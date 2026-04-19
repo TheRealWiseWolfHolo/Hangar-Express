@@ -5,6 +5,7 @@ nonisolated enum RefreshStage: Hashable, Sendable {
     case preparingSession
     case pledges
     case buyback
+    case hangarLog
     case account
     case finalizing
 
@@ -18,6 +19,8 @@ nonisolated enum RefreshStage: Hashable, Sendable {
             return "Refreshing hangar pledges"
         case .buyback:
             return "Refreshing buy-back pledges"
+        case .hangarLog:
+            return "Refreshing hangar log"
         case .account:
             return "Refreshing account overview"
         case .finalizing:
@@ -63,6 +66,12 @@ protocol HangarRepository: Sendable {
     ) async throws -> HangarSnapshot
 
     func refreshBuybackData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot
+
+    func refreshHangarLogData(
         for session: UserSession,
         from snapshot: HangarSnapshot,
         progress: @escaping RefreshProgressHandler

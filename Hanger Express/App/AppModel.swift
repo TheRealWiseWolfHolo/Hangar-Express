@@ -28,6 +28,7 @@ final class AppModel {
         case full
         case hangar
         case buyback
+        case hangarLog
         case account
 
         var errorSubject: String {
@@ -38,6 +39,8 @@ final class AppModel {
                 return "the hangar and fleet data"
             case .buyback:
                 return "the buy-back data"
+            case .hangarLog:
+                return "the hangar log"
             case .account:
                 return "the account overview"
             }
@@ -406,6 +409,16 @@ final class AppModel {
                 from: existingSnapshot,
                 progress: progress
             )
+        case .hangarLog:
+            guard let existingSnapshot else {
+                return try await hangarRepository.fetchSnapshot(for: session, progress: progress)
+            }
+
+            return try await hangarRepository.refreshHangarLogData(
+                for: session,
+                from: existingSnapshot,
+                progress: progress
+            )
         case .account:
             guard let existingSnapshot else {
                 return try await hangarRepository.fetchSnapshot(for: session, progress: progress)
@@ -434,11 +447,22 @@ final class AppModel {
         return RefreshProgress(
             stage: .preparingSession,
             stepNumber: 1,
-            stepCount: scope == .full ? 4 : (scope == .hangar ? 3 : 2),
+            stepCount: stepCount(for: scope),
             detail: initialRefreshDetail(for: scope),
             completedUnitCount: 0,
             totalUnitCount: 1
         )
+    }
+
+    private func stepCount(for scope: RefreshScope) -> Int {
+        switch scope {
+        case .full:
+            return 5
+        case .hangar:
+            return 3
+        case .buyback, .hangarLog, .account:
+            return 2
+        }
     }
 
     private func initialRefreshDetail(for scope: RefreshScope) -> String {
@@ -449,6 +473,8 @@ final class AppModel {
             return "Preparing your saved RSI cookies for a hangar refresh."
         case .buyback:
             return "Preparing your saved RSI cookies for a buy-back refresh."
+        case .hangarLog:
+            return "Preparing your saved RSI cookies for a hangar log refresh."
         case .account:
             return "Preparing your saved RSI cookies for an account refresh."
         }

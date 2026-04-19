@@ -369,6 +369,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
     let packages: [HangarPackage]
     let fleet: [FleetShip]
     let buyback: [BuybackPledge]
+    let hangarLogs: [HangarLogEntry]
     let referralStats: ReferralStats
 
     init(
@@ -381,6 +382,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
         packages: [HangarPackage],
         fleet: [FleetShip],
         buyback: [BuybackPledge],
+        hangarLogs: [HangarLogEntry] = [],
         referralStats: ReferralStats = .unavailable
     ) {
         self.accountHandle = accountHandle
@@ -392,6 +394,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
         self.packages = packages
         self.fleet = fleet
         self.buyback = buyback
+        self.hangarLogs = hangarLogs
         self.referralStats = referralStats
     }
 
@@ -405,6 +408,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
         case packages
         case fleet
         case buyback
+        case hangarLogs
         case referralStats
     }
 
@@ -420,6 +424,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
         packages = try container.decodeIfPresent([HangarPackage].self, forKey: .packages) ?? []
         fleet = try container.decodeIfPresent([FleetShip].self, forKey: .fleet) ?? []
         buyback = try container.decodeIfPresent([BuybackPledge].self, forKey: .buyback) ?? []
+        hangarLogs = try container.decodeIfPresent([HangarLogEntry].self, forKey: .hangarLogs) ?? []
         referralStats = try container.decodeIfPresent(ReferralStats.self, forKey: .referralStats) ?? .unavailable
     }
 
@@ -434,6 +439,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
         try container.encode(packages, forKey: .packages)
         try container.encode(fleet, forKey: .fleet)
         try container.encode(buyback, forKey: .buyback)
+        try container.encode(hangarLogs, forKey: .hangarLogs)
         try container.encode(referralStats, forKey: .referralStats)
     }
 
@@ -452,6 +458,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
             packages: packages,
             fleet: fleet,
             buyback: buyback,
+            hangarLogs: hangarLogs,
             referralStats: referralStats
         )
     }
@@ -470,6 +477,26 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
             packages: packages,
             fleet: fleet,
             buyback: buyback,
+            hangarLogs: hangarLogs,
+            referralStats: referralStats
+        )
+    }
+
+    func updatingHangarLogs(
+        hangarLogs: [HangarLogEntry],
+        lastSyncedAt: Date = .now
+    ) -> HangarSnapshot {
+        HangarSnapshot(
+            accountHandle: accountHandle,
+            lastSyncedAt: lastSyncedAt,
+            avatarURL: avatarURL,
+            primaryOrganization: primaryOrganization,
+            storeCreditUSD: storeCreditUSD,
+            totalSpendUSD: totalSpendUSD,
+            packages: packages,
+            fleet: fleet,
+            buyback: buyback,
+            hangarLogs: hangarLogs,
             referralStats: referralStats
         )
     }
@@ -493,6 +520,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
             packages: packages,
             fleet: fleet,
             buyback: buyback,
+            hangarLogs: hangarLogs,
             referralStats: referralStats
         )
     }
@@ -512,6 +540,92 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
                 partialResult += package.currentValueUSD
             }
         )
+    }
+}
+
+enum HangarLogAction: String, Hashable, Sendable, Codable, CaseIterable, Identifiable {
+    case created = "CREATED"
+    case reclaimed = "RECLAIMED"
+    case consumed = "CONSUMED"
+    case appliedUpgrade = "APPLIED_UPGRADE"
+    case buyback = "BUYBACK"
+    case gift = "GIFT"
+    case giftClaimed = "GIFT_CLAIMED"
+    case giftCancelled = "GIFT_CANCELLED"
+    case nameChange = "NAME_CHANGE"
+    case nameChangeReclaimed = "NAME_CHANGE_RECLAIMED"
+    case giveaway = "GIVEAWAY"
+    case unknown = "UNKNOWN"
+
+    var id: String {
+        rawValue
+    }
+
+    var title: String {
+        switch self {
+        case .created:
+            return "Created"
+        case .reclaimed:
+            return "Melt"
+        case .consumed:
+            return "Consumed"
+        case .appliedUpgrade:
+            return "Upgrade Applied"
+        case .buyback:
+            return "Buy Back"
+        case .gift:
+            return "Gift"
+        case .giftClaimed:
+            return "Gift Claimed"
+        case .giftCancelled:
+            return "Gift Cancelled"
+        case .nameChange:
+            return "Name Reservation"
+        case .nameChangeReclaimed:
+            return "Name Released"
+        case .giveaway:
+            return "Giveaway"
+        case .unknown:
+            return "Other"
+        }
+    }
+}
+
+struct HangarLogEntry: Hashable, Sendable, Codable, Identifiable {
+    let id: String
+    let occurredAt: Date
+    let action: HangarLogAction
+    let itemName: String
+    let operatorName: String?
+    let priceUSD: Decimal?
+    let sourcePledgeID: String?
+    let targetPledgeID: String?
+    let orderCode: String?
+    let reason: String?
+    let rawText: String
+
+    var actionTitle: String {
+        action.title
+    }
+
+    var searchableText: String {
+        let components: [String?] = [
+            itemName,
+            action.rawValue,
+            action.title,
+            operatorName,
+            orderCode,
+            sourcePledgeID,
+            targetPledgeID,
+            reason,
+            rawText,
+            occurredAt.formatted(date: .abbreviated, time: .shortened)
+        ]
+
+        return components
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
     }
 }
 

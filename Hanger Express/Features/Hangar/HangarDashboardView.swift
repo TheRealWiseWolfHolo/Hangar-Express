@@ -28,6 +28,7 @@ struct HangarDashboardView: View {
     @State private var searchText = ""
     @State private var searchFilters: Set<SearchFilter> = []
     @State private var isSearchPresented = false
+    @State private var isLogPresented = false
 
     var body: some View {
         NavigationStack {
@@ -102,8 +103,15 @@ struct HangarDashboardView: View {
                 searchFilters.removeAll()
             }
             .navigationTitle("Hangar")
+            .sheet(isPresented: $isLogPresented) {
+                HangarLogView(appModel: appModel)
+            }
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button("Log") {
+                        isLogPresented = true
+                    }
+
                     Button(appModel.isRefreshing(.hangar) ? "Refreshing..." : "Refresh") {
                         Task {
                             await appModel.refresh(scope: .hangar)

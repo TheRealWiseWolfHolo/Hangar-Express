@@ -76,6 +76,7 @@ struct SettingsView: View {
                     Label("Buy-back visibility", systemImage: "checkmark.circle")
                     Label("Ship grouping and local notes", systemImage: "checkmark.circle")
                     Label("Melt, gift, and upgrade actions", systemImage: "hourglass")
+                    Label("Item-linked hangar log shortcuts from pledge details", systemImage: "hourglass")
                 } header: {
                     Text("Roadmap")
                 }

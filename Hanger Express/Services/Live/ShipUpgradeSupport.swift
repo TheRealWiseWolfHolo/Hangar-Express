@@ -35,10 +35,12 @@ enum UpgradeTitleParser {
             CharacterSet.alphanumerics.contains(scalar) ? String(scalar) : " "
         }
 
-        return sanitizedScalars
+        let normalizedKey = sanitizedScalars
             .joined()
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
+
+        return canonicalizedShipKey(normalizedKey)
     }
 
     static func stripManufacturerPrefix(from rawName: String) -> String {
@@ -76,9 +78,20 @@ enum UpgradeTitleParser {
     }
 
     private static let manufacturerPrefixes = [
+        "Aegis Dynamics",
+        "Anvil Aerospace",
+        "Argo Astronautics",
+        "Crusader Industries",
+        "Drake Interplanetary",
+        "Gatac Manufacture",
+        "Greycat Industrial",
+        "Kruger Intergalactic",
+        "Origin Jumpworks",
+        "Roberts Space Industries",
         "Aegis",
         "Anvil",
         "ARGO",
+        "Aopoa",
         "Banu",
         "Consolidated Outland",
         "Crusader",
@@ -93,7 +106,85 @@ enum UpgradeTitleParser {
         "Mirai",
         "Origin",
         "RSI",
-        "Tumbril"
+        "Tumbril",
+        "Vanduul"
+    ]
+
+    private static func canonicalizedShipKey(_ rawKey: String) -> String {
+        guard !rawKey.isEmpty else {
+            return rawKey
+        }
+
+        let tokens = rawKey
+            .split(separator: " ")
+            .map(String.init)
+
+        guard !tokens.isEmpty else {
+            return rawKey
+        }
+
+        var normalizedTokens: [String] = []
+        normalizedTokens.reserveCapacity(tokens.count)
+
+        var index = 0
+        while index < tokens.count {
+            let token = tokens[index]
+
+            if token == "mk",
+               index + 1 < tokens.count,
+               let normalizedMark = normalizedMarkValue(for: tokens[index + 1]) {
+                normalizedTokens.append("mk")
+                normalizedTokens.append(normalizedMark)
+                index += 2
+                continue
+            }
+
+            if token.hasPrefix("mk"),
+               let normalizedMark = normalizedMarkValue(for: String(token.dropFirst(2))) {
+                normalizedTokens.append("mk")
+                normalizedTokens.append(normalizedMark)
+                index += 1
+                continue
+            }
+
+            if token == "superhornet" {
+                normalizedTokens.append("super")
+                normalizedTokens.append("hornet")
+                index += 1
+                continue
+            }
+
+            normalizedTokens.append(token)
+            index += 1
+        }
+
+        let canonicalKey = normalizedTokens.joined(separator: " ")
+        return legacyShipAliases[canonicalKey] ?? canonicalKey
+    }
+
+    private static func normalizedMarkValue(for token: String) -> String? {
+        [
+            "1": "i",
+            "2": "ii",
+            "3": "iii",
+            "4": "iv",
+            "5": "v",
+            "6": "vi",
+            "7": "vii",
+            "8": "viii",
+            "9": "ix",
+            "10": "x"
+        ][token]
+    }
+
+    private static let legacyShipAliases = [
+        "dragonfly star kitten edition": "dragonfly black",
+        "idris m frigate": "idris m",
+        "idris p frigate": "idris p",
+        "f7c m hornet mk i": "f7c m super hornet mk i",
+        "f7c m hornet mk ii": "f7c m super hornet mk ii",
+        "f7c m hornet heartseeker mk i": "f7c m super hornet heartseeker mk i",
+        "f7c m hornet heartseeker mk ii": "f7c m super hornet heartseeker mk ii"
     ]
 }
 
@@ -268,8 +359,19 @@ private struct RemoteHostedShip: Decodable {
 
 enum FleetRoleFormatter {
     static func summary(type: String?, focus: String?) -> String? {
-        categories(type: type, focus: focus)
-            .joined(separator: " / ")
+        let displayType = displayTypeName(for: type)
+        let focusCategories = focusComponents(from: focus)
+
+        if let displayType, !focusCategories.isEmpty {
+            return "\(displayType): \(focusCategories.joined(separator: " | "))"
+        }
+
+        if let displayType {
+            return displayType
+        }
+
+        return focusCategories
+            .joined(separator: " | ")
             .nilIfEmpty
     }
 
@@ -280,16 +382,19 @@ enum FleetRoleFormatter {
             categories.append(displayType)
         }
 
-        let focusCategories = focus?
-            .split(separator: "/")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .compactMap(\.nilIfEmpty) ?? []
-        categories.append(contentsOf: focusCategories)
+        categories.append(contentsOf: focusComponents(from: focus))
 
         var seen = Set<String>()
         return categories.filter { category in
             seen.insert(category.localizedLowercase).inserted
         }
+    }
+
+    private static func focusComponents(from rawFocus: String?) -> [String] {
+        rawFocus?
+            .split(separator: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .compactMap(\.nilIfEmpty) ?? []
     }
 
     private static func displayTypeName(for rawType: String?) -> String? {
@@ -309,6 +414,86 @@ enum FleetRoleFormatter {
                 .map { $0.localizedCapitalized }
                 .joined(separator: " ")
         }
+    }
+}
+
+enum FleetPresentationFormatter {
+    static func roleSummary(role: String, categories: [String]) -> String? {
+        let normalizedCategories = categories.compactMap(\.nilIfEmpty)
+        if let formattedFromCategories = summary(from: normalizedCategories) {
+            return formattedFromCategories
+        }
+
+        let trimmedRole = role.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedRole.isEmpty else {
+            return nil
+        }
+
+        if trimmedRole.contains(":") {
+            return trimmedRole
+        }
+
+        let parts = trimmedRole
+            .split(separator: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .compactMap(\.nilIfEmpty)
+
+        return summary(from: parts) ?? trimmedRole
+    }
+
+    static func manufacturerDisplayName(_ rawManufacturer: String) -> String {
+        let trimmed = rawManufacturer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return rawManufacturer
+        }
+
+        let canonicalNames: [String: String] = [
+            "aegis": "Aegis Dynamics",
+            "aegis dynamics": "Aegis Dynamics",
+            "anvil": "Anvil Aerospace",
+            "anvil aerospace": "Anvil Aerospace",
+            "aopoa": "Aopoa",
+            "argo": "Argo Astronautics",
+            "argo astronauts": "Argo Astronautics",
+            "argo astronautics": "Argo Astronautics",
+            "banu": "Banu",
+            "consolidated outland": "Consolidated Outland",
+            "crusader": "Crusader Industries",
+            "crusader industries": "Crusader Industries",
+            "drake": "Drake Interplanetary",
+            "drake interplanetary": "Drake Interplanetary",
+            "esperia": "Esperia",
+            "gatac": "Gatac Manufacture",
+            "gatac manufacture": "Gatac Manufacture",
+            "grey": "Grey's Market",
+            "grey's market": "Grey's Market",
+            "greycat": "Greycat Industrial",
+            "greycat industrial": "Greycat Industrial",
+            "kruger": "Kruger Intergalactic",
+            "kruger intergalactic": "Kruger Intergalactic",
+            "misc": "MISC",
+            "mirai": "Mirai",
+            "origin": "Origin Jumpworks",
+            "origin jumpworks": "Origin Jumpworks",
+            "rsi": "Roberts Space Industries",
+            "roberts space industries": "Roberts Space Industries",
+            "tumbril": "Tumbril",
+            "vanduul": "Vanduul"
+        ]
+
+        return canonicalNames[trimmed.localizedLowercase] ?? trimmed
+    }
+
+    private static func summary(from categories: [String]) -> String? {
+        guard let first = categories.first else {
+            return nil
+        }
+
+        if categories.count == 1 {
+            return first
+        }
+
+        return "\(first): \(categories.dropFirst().joined(separator: " | "))"
     }
 }
 

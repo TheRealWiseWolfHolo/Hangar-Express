@@ -825,6 +825,76 @@ struct Hanger_ExpressTests {
         #expect(match?.msrpUSD == 190)
     }
 
+    @Test func shipCatalogMatchesLegacyFleetShipNamesToHostedCatalogEntries() async throws {
+        let catalog = RSIShipCatalog(
+            ships: [
+                .init(
+                    id: 1,
+                    name: "Idris-M",
+                    manufacturer: "Aegis Dynamics",
+                    msrpUSD: 1000,
+                    imageURL: URL(string: "https://example.com/idris-m.jpg")
+                ),
+                .init(
+                    id: 2,
+                    name: "Idris-P",
+                    manufacturer: "Aegis Dynamics",
+                    msrpUSD: 1900,
+                    imageURL: URL(string: "https://example.com/idris-p.jpg")
+                ),
+                .init(
+                    id: 3,
+                    name: "F7A Hornet Mk I",
+                    manufacturer: "Anvil Aerospace",
+                    msrpUSD: 125,
+                    imageURL: URL(string: "https://example.com/f7a.jpg")
+                ),
+                .init(
+                    id: 4,
+                    name: "F7C-M Super Hornet Heartseeker Mk I",
+                    manufacturer: "Anvil Aerospace",
+                    msrpUSD: 200,
+                    imageURL: URL(string: "https://example.com/heartseeker.jpg")
+                )
+            ]
+        )
+
+        #expect(catalog.matchShip(named: "Idris-M Frigate")?.name == "Idris-M")
+        #expect(catalog.matchShip(named: "Idris-P Frigate")?.name == "Idris-P")
+        #expect(catalog.matchShip(named: "F7A Hornet Mk1")?.name == "F7A Hornet Mk I")
+        #expect(catalog.matchShip(named: "F7C-M Hornet Heartseeker Mk I")?.name == "F7C-M Super Hornet Heartseeker Mk I")
+    }
+
+    @Test func fleetProjectorUsesCanonicalManufacturerFallbackNames() async throws {
+        let package = HangarPackage(
+            id: 501,
+            title: "Package - Legacy Test",
+            status: "Attributed",
+            insurance: "LTI",
+            acquiredAt: .now,
+            originalValueUSD: 100,
+            currentValueUSD: 100,
+            canGift: false,
+            canReclaim: true,
+            canUpgrade: false,
+            contents: [
+                PackageItem(
+                    id: "ship-501",
+                    title: "F7A Hornet Mk 1",
+                    detail: "Anvil",
+                    category: .ship,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+
+        let fleet = FleetProjector.project(packages: [package], shipCatalog: nil)
+
+        #expect(fleet.count == 1)
+        #expect(fleet.first?.manufacturer == "Anvil Aerospace")
+    }
+
     @Test func hostedShipCatalogDecodesMSRPAndThumbnailData() async throws {
         let data = Data(
             """
@@ -885,9 +955,31 @@ struct Hanger_ExpressTests {
         let catalog = try HostedShipCatalogClient.decodeCatalog(from: data)
         let match = try #require(catalog.matchShip(named: "Origin 135c"))
 
-        #expect(match.roleSummary == "Multi / Starter / Light Freight")
+        #expect(match.roleSummary == "Multi: Starter | Light Freight")
         #expect(match.roleCategories == ["Multi", "Starter", "Light Freight"])
         #expect(match.msrpUSD == 65)
+    }
+
+    @Test func fleetRoleFormatterUsesTypeAndPipeSeparatedFocusSummary() async throws {
+        #expect(FleetRoleFormatter.summary(type: "combat", focus: "Medium Fighter") == "Combat: Medium Fighter")
+        #expect(FleetRoleFormatter.summary(type: "multi", focus: "Starter / Light Fighter") == "Multi: Starter | Light Fighter")
+        #expect(FleetRoleFormatter.summary(type: nil, focus: "Light Freight / Starter") == "Light Freight | Starter")
+    }
+
+    @Test func fleetPresentationFormatterNormalizesLegacySlashRoleStringsAndShortManufacturers() async throws {
+        #expect(
+            FleetPresentationFormatter.roleSummary(
+                role: "Ground / Racing",
+                categories: ["Ground", "Racing"]
+            ) == "Ground: Racing"
+        )
+        #expect(
+            FleetPresentationFormatter.roleSummary(
+                role: "Transport / Passenger",
+                categories: []
+            ) == "Transport: Passenger"
+        )
+        #expect(FleetPresentationFormatter.manufacturerDisplayName("Drake") == "Drake Interplanetary")
     }
 
     @Test func fleetProjectorFiltersEquipmentAndUsesHostedGreyManufacturer() async throws {
@@ -941,10 +1033,95 @@ struct Hanger_ExpressTests {
         #expect(fleet.count == 1)
         #expect(fleet.first?.displayName == "GREY MTC")
         #expect(fleet.first?.manufacturer == "Grey's Market")
-        #expect(fleet.first?.role == "Ground / Racing")
+        #expect(fleet.first?.role == "Ground: Racing")
         #expect(fleet.first?.roleCategories == ["Ground", "Racing"])
         #expect(fleet.first?.msrpUSD == 30)
         #expect(fleet.first?.meltValueUSD == 40)
+    }
+
+    @Test func fleetProjectorUsesBaseDragonflyFunctionButKeepsStarKittenMSRPUnknown() async throws {
+        let catalog = RSIShipCatalog(
+            ships: [
+                .init(
+                    id: 112,
+                    name: "Dragonfly Black",
+                    manufacturer: "Drake Interplanetary",
+                    msrpUSD: 40,
+                    type: "competition",
+                    focus: "Racing",
+                    imageURL: URL(string: "https://example.com/dragonfly-black.webp")
+                )
+            ]
+        )
+
+        let package = HangarPackage(
+            id: 777,
+            title: "IAE 2955 Referral Bonus",
+            status: "Attributed",
+            insurance: "120 months",
+            acquiredAt: .now,
+            originalValueUSD: 0,
+            currentValueUSD: 0,
+            canGift: false,
+            canReclaim: false,
+            canUpgrade: false,
+            contents: [
+                PackageItem(
+                    id: "ship-777",
+                    title: "Dragonfly Star Kitten Edition",
+                    detail: "Drake",
+                    category: .vehicle,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+
+        let fleet = FleetProjector.project(packages: [package], shipCatalog: catalog)
+        let ship = try #require(fleet.first)
+
+        #expect(ship.manufacturer == "Drake Interplanetary")
+        #expect(ship.role == "Competition: Racing")
+        #expect(ship.roleCategories == ["Competition", "Racing"])
+        #expect(ship.msrpUSD == nil)
+        #expect(ship.imageURL == URL(string: "https://example.com/dragonfly-black.webp"))
+    }
+
+    @Test func fleetProjectorDropsUnmatchedItemsWithoutInsurance() async throws {
+        let package = HangarPackage(
+            id: 888,
+            title: "BIS Extras",
+            status: "Attributed",
+            insurance: "Unknown",
+            acquiredAt: .now,
+            originalValueUSD: 0,
+            currentValueUSD: 0,
+            canGift: false,
+            canReclaim: false,
+            canUpgrade: false,
+            contents: [
+                PackageItem(
+                    id: "ship-888",
+                    title: "Ship Showdown Flag",
+                    detail: "FPS Equipment",
+                    category: .vehicle,
+                    imageURL: nil,
+                    upgradePricing: nil
+                ),
+                PackageItem(
+                    id: "ship-889",
+                    title: "Terrapin 2954 Ship Showdown Poster",
+                    detail: "FPS Equipment",
+                    category: .vehicle,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+
+        let fleet = FleetProjector.project(packages: [package], shipCatalog: nil)
+
+        #expect(fleet.isEmpty)
     }
 
     @Test func fleetShipsGroupByVisibleShipAttributes() async throws {
@@ -1778,6 +1955,15 @@ private actor FakeHangarRepository: HangarRepository {
         }
 
         return buybackSnapshot ?? snapshot
+    }
+
+    func refreshHangarLogData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot {
+        invokedScopes.append("hangarLog")
+        return snapshot
     }
 
     func refreshAccountData(

@@ -6,6 +6,7 @@ final class LiveHangarRepository: HangarRepository {
     private let browser = RSIAccountPageBrowser()
     private let shipCatalogClient = HostedShipCatalogClient()
     private let previewRepository = PreviewHangarRepository()
+    private let maxHangarLogEntries = 500
     private let pledgePageSize = 50
     private let buybackPageSize = 100
     private let maxPledgePages = 200
@@ -20,30 +21,36 @@ final class LiveHangarRepository: HangarRepository {
         }
 
         try validate(session: session)
-        progress(preparationProgress(for: session, stepNumber: 1, stepCount: 4))
+        progress(preparationProgress(for: session, stepNumber: 1, stepCount: 5))
 
         let remotePledges = try await fetchRemotePledges(
             using: session.cookies,
             progress: progress,
             stepNumber: 2,
-            stepCount: 4
+            stepCount: 5
         )
         let remoteBuyback = try await fetchRemoteBuyback(
             using: session.cookies,
             progress: progress,
             stepNumber: 3,
-            stepCount: 4
+            stepCount: 5
+        )
+        let hangarLogs = try await fetchRemoteHangarLogs(
+            using: session.cookies,
+            progress: progress,
+            stepNumber: 4,
+            stepCount: 5
         )
         let shipCatalog = await fetchHostedShipCatalog(
             progress: progress,
-            stepNumber: 4,
-            stepCount: 4
+            stepNumber: 5,
+            stepCount: 5
         )
         let accountContext = try await fetchAccountContext(
             for: session,
             progress: progress,
-            stepNumber: 4,
-            stepCount: 4
+            stepNumber: 5,
+            stepCount: 5
         )
 
         let packages = remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) }
@@ -53,9 +60,9 @@ final class LiveHangarRepository: HangarRepository {
         progress(
             makeProgress(
                 stage: .finalizing,
-                stepNumber: 4,
-                stepCount: 4,
-                detail: "Organized \(remotePledges.count) pledges and \(remoteBuyback.count) buy-back items.",
+                stepNumber: 5,
+                stepCount: 5,
+                detail: "Organized \(remotePledges.count) pledges, \(remoteBuyback.count) buy-back items, and \(hangarLogs.count) hangar log entries.",
                 completedUnitCount: 3,
                 totalUnitCount: 3
             )
@@ -71,6 +78,7 @@ final class LiveHangarRepository: HangarRepository {
             packages: packages,
             fleet: fleet,
             buyback: buyback,
+            hangarLogs: hangarLogs,
             referralStats: accountContext.referralStats
         )
     }
@@ -148,6 +156,34 @@ final class LiveHangarRepository: HangarRepository {
 
         return snapshot.updatingBuyback(
             buyback: buyback
+        )
+    }
+
+    func refreshHangarLogData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.refreshHangarLogData(
+                for: session,
+                from: snapshot,
+                progress: progress
+            )
+        }
+
+        try validate(session: session)
+        progress(preparationProgress(for: session, stepNumber: 1, stepCount: 2))
+
+        let hangarLogs = try await fetchRemoteHangarLogs(
+            using: session.cookies,
+            progress: progress,
+            stepNumber: 2,
+            stepCount: 2
+        )
+
+        return snapshot.updatingHangarLogs(
+            hangarLogs: hangarLogs
         )
     }
 
@@ -390,6 +426,70 @@ final class LiveHangarRepository: HangarRepository {
         }
 
         return remoteBuyback
+    }
+
+    private func fetchRemoteHangarLogs(
+        using cookies: [SessionCookie],
+        progress: @escaping RefreshProgressHandler,
+        stepNumber: Int,
+        stepCount: Int
+    ) async throws -> [HangarLogEntry] {
+        progress(
+            makeProgress(
+                stage: .hangarLog,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: "Opening RSI's hangar log window and loading the current entries.",
+                completedUnitCount: 0,
+                totalUnitCount: 1
+            )
+        )
+
+        let result = try await browser.fetchHangarLogPage(
+            using: cookies,
+            page: 1
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        if !(200 ..< 300).contains(result.statusCode) {
+            throw LiveHangarRepositoryError.unexpectedMarkup(
+                result.failureMessage
+                ?? "RSI hangar log returned HTTP \(result.statusCode)."
+            )
+        }
+
+        if let failureMessage = result.failureMessage {
+            throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
+        }
+
+        let hangarLogs = Array(HangarLogParser.parse(result.items).prefix(maxHangarLogEntries))
+
+        if hangarLogs.isEmpty {
+            throw LiveHangarRepositoryError.unexpectedMarkup(
+                result.debugSummary
+                ?? "RSI opened the hangar log window, but no log entries were discovered."
+            )
+        }
+
+        progress(
+            makeProgress(
+                stage: .hangarLog,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: hangarLogs.count >= maxHangarLogEntries
+                    ? "Loaded \(hangarLogs.count) hangar log entries from RSI (cap \(maxHangarLogEntries))."
+                    : "Loaded \(hangarLogs.count) hangar log entries from RSI.",
+                completedUnitCount: 1,
+                totalUnitCount: 1
+            )
+        )
+
+        return hangarLogs.sorted { lhs, rhs in
+            lhs.occurredAt > rhs.occurredAt
+        }
     }
 
     private func fetchHostedShipCatalog(
@@ -738,6 +838,13 @@ final class LiveHangarRepository: HangarRepository {
             return directURL
         }
 
+        if let specialEditionURL = specialEditionImageURL(
+            for: item.title,
+            packageThumbnailURL: packageThumbnailURL
+        ) {
+            return specialEditionURL
+        }
+
         switch category {
         case .upgrade:
             return targetShip?.imageURL ?? (usePackageThumbnailFallback ? packageThumbnailURL : nil)
@@ -746,6 +853,17 @@ final class LiveHangarRepository: HangarRepository {
         case .gamePackage, .flair, .perk:
             return usePackageThumbnailFallback ? packageThumbnailURL : nil
         }
+    }
+
+    private func specialEditionImageURL(
+        for itemTitle: String,
+        packageThumbnailURL: URL?
+    ) -> URL? {
+        if itemTitle.localizedCaseInsensitiveContains("Dragonfly Star Kitten Edition") {
+            return packageThumbnailURL
+        }
+
+        return nil
     }
 
     private func upgradePricing(
@@ -1048,6 +1166,10 @@ enum FleetProjector {
                     return nil
                 }
 
+                if matchedShip == nil, !hasShipLikeInsurance(package.insurance) {
+                    return nil
+                }
+
                 return (item, matchedShip)
             }
 
@@ -1062,17 +1184,26 @@ enum FleetProjector {
                     manufacturer: manufacturer(for: item, matchedShip: matchedShip),
                     role: role(for: item, matchedShip: matchedShip),
                     roleCategories: roleCategories(for: item, matchedShip: matchedShip),
-                    msrpUSD: hostedMSRP(for: matchedShip),
+                    msrpUSD: hostedMSRP(for: item, matchedShip: matchedShip),
                     insurance: package.insurance,
                     sourcePackageID: package.id,
                     sourcePackageName: package.title,
                     meltValueUSD: meltValue,
                     canGift: package.canGift,
                     canReclaim: package.canReclaim,
-                    imageURL: matchedShip?.imageURL ?? item.imageURL
+                    imageURL: preferredImageURL(for: item, matchedShip: matchedShip)
                 )
             }
         }
+    }
+
+    private static func preferredImageURL(for item: PackageItem, matchedShip: RSIShipCatalog.Ship?) -> URL? {
+        if item.title.localizedCaseInsensitiveContains("Dragonfly Star Kitten Edition"),
+           let itemImageURL = item.imageURL {
+            return itemImageURL
+        }
+
+        return matchedShip?.imageURL ?? item.imageURL
     }
 
     private static func manufacturer(for item: PackageItem, matchedShip: RSIShipCatalog.Ship?) -> String {
@@ -1084,22 +1215,24 @@ enum FleetProjector {
         let manufacturers: [(match: String, display: String)] = [
             ("Grey's Market", "Grey's Market"),
             ("GREY", "Grey's Market"),
-            ("Aegis", "Aegis"),
-            ("Anvil", "Anvil"),
-            ("ARGO", "ARGO"),
+            ("Aegis", "Aegis Dynamics"),
+            ("Anvil", "Anvil Aerospace"),
+            ("Aopoa", "Aopoa"),
+            ("ARGO", "Argo Astronautics"),
             ("Banu", "Banu"),
             ("Consolidated Outland", "Consolidated Outland"),
-            ("Crusader", "Crusader"),
-            ("Drake", "Drake"),
+            ("Crusader", "Crusader Industries"),
+            ("Drake", "Drake Interplanetary"),
             ("Esperia", "Esperia"),
-            ("Gatac", "Gatac"),
-            ("Greycat", "Greycat"),
-            ("Kruger", "Kruger"),
+            ("Gatac", "Gatac Manufacture"),
+            ("Greycat", "Greycat Industrial"),
+            ("Kruger", "Kruger Intergalactic"),
             ("MISC", "MISC"),
             ("Mirai", "Mirai"),
-            ("Origin", "Origin"),
-            ("RSI", "RSI"),
-            ("Tumbril", "Tumbril")
+            ("Origin", "Origin Jumpworks"),
+            ("RSI", "Roberts Space Industries"),
+            ("Tumbril", "Tumbril"),
+            ("Vanduul", "Vanduul")
         ]
 
         for manufacturer in manufacturers {
@@ -1139,8 +1272,21 @@ enum FleetProjector {
         return fallbackCategories.isEmpty ? [fallbackRole] : fallbackCategories
     }
 
-    private static func hostedMSRP(for matchedShip: RSIShipCatalog.Ship?) -> Decimal? {
-        matchedShip?.msrpUSD
+    private static func hostedMSRP(for item: PackageItem, matchedShip: RSIShipCatalog.Ship?) -> Decimal? {
+        if item.title.localizedCaseInsensitiveContains("Dragonfly Star Kitten Edition") {
+            return nil
+        }
+
+        return matchedShip?.msrpUSD
+    }
+
+    private static func hasShipLikeInsurance(_ insurance: String) -> Bool {
+        let normalized = insurance.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
+        guard !normalized.isEmpty else {
+            return false
+        }
+
+        return normalized != "unknown"
     }
 
     private static func isObviousEquipmentItem(_ item: PackageItem) -> Bool {
@@ -1154,6 +1300,12 @@ enum FleetProjector {
             "attachment",
             "ammo",
             "backpack",
+            "banner",
+            "coin",
+            "decoration",
+            "decor",
+            "die",
+            "flag",
             "grenade",
             "helmet",
             "knife",
@@ -1162,13 +1314,19 @@ enum FleetProjector {
             "medpen",
             "multi-tool",
             "multitool",
+            "painting",
+            "pennant",
+            "plush",
+            "poster",
             "pistol",
             "rifle",
             "shotgun",
             "smg",
             "sniper",
+            "statue",
             "undersuit",
-            "weapon"
+            "weapon",
+            "trophy"
         ]
 
         return equipmentKeywords.contains(where: haystack.contains)
@@ -1208,6 +1366,20 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         try await prepareWebView(with: cookies)
         try await load(url: url)
         return try await evaluate(script: Self.buybackExtractionScript, as: RemoteBuybackPage.self)
+    }
+
+    func fetchHangarLogPage(
+        using cookies: [SessionCookie],
+        page: Int
+    ) async throws -> RemoteHangarLogPage {
+        let url = try storefrontURL(path: "/en/account/pledges")
+        try await prepareWebView(with: cookies)
+        try await ensureLoaded(url: url)
+        return try await evaluate(
+            script: Self.hangarLogExtractionScript,
+            arguments: ["page": page],
+            as: RemoteHangarLogPage.self
+        )
     }
 
     func fetchShipCatalog(using cookies: [SessionCookie]) async throws -> RSIShipCatalog {
@@ -1412,9 +1584,17 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     private func evaluate<Value: Decodable>(script: String, as type: Value.Type) async throws -> Value {
+        try await evaluate(script: script, arguments: [:], as: type)
+    }
+
+    private func evaluate<Value: Decodable>(
+        script: String,
+        arguments: [String: Any],
+        as type: Value.Type
+    ) async throws -> Value {
         let result = try await webView.callAsyncJavaScript(
             script,
-            arguments: [:],
+            arguments: arguments,
             in: nil,
             contentWorld: .page
         )
@@ -1425,6 +1605,19 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
         let data = try JSONSerialization.data(withJSONObject: result)
         return try JSONDecoder().decode(Value.self, from: data)
+    }
+
+    private func ensureLoaded(url: URL) async throws {
+        guard webView.url?.host == url.host, webView.url?.path == url.path else {
+            try await load(url: url)
+            return
+        }
+
+        if webView.isLoading {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                loadContinuation = continuation
+            }
+        }
     }
 
     private func pageURL(path: String, page: Int, pageSize: Int) throws -> URL {
@@ -2919,6 +3112,332 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       })
     };
     """
+
+    private static let hangarLogExtractionScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const maxEntries = 500;
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const waitFor = async (predicate, timeoutMs = 6000, intervalMs = 125) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (predicate()) {
+          return true;
+        }
+        await wait(intervalMs);
+      }
+      return predicate();
+    };
+    const isVisible = (node) => !!node && !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length);
+    const clickElement = (node) => {
+      if (!node) {
+        return false;
+      }
+      if (typeof node.click === 'function') {
+        node.click();
+      } else {
+        node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      }
+      return true;
+    };
+    const collectEntries = () =>
+      Array.from(document.querySelectorAll('.pledge-log-entry')).map((entry) => {
+        const paragraphText = normalizeText(entry.querySelector('p')?.textContent);
+        const itemName = normalizeText(entry.querySelector('span')?.textContent);
+        const splitIndex = paragraphText.indexOf(' - ');
+        const timeText = splitIndex >= 0
+          ? normalizeText(paragraphText.slice(0, splitIndex)).replace(/\\bam\\b/g, 'AM').replace(/\\bpm\\b/g, 'PM')
+          : '';
+        const messageText = splitIndex >= 0 ? normalizeText(paragraphText.slice(splitIndex + 3)) : paragraphText;
+        const contentText = itemName && messageText.startsWith(itemName)
+          ? normalizeText(messageText.slice(itemName.length))
+          : messageText;
+
+        return {
+          timeText,
+          itemName,
+          fullText: paragraphText,
+          contentText
+        };
+      });
+    const parseRenderedEntries = (rendered) => {
+      const container = document.createElement('div');
+      container.innerHTML = typeof rendered === 'string' ? rendered : '';
+      return Array.from(container.querySelectorAll('.pledge-log-entry')).map((entry) => {
+        const paragraphText = normalizeText(entry.querySelector('p')?.textContent);
+        const itemName = normalizeText(entry.querySelector('span')?.textContent);
+        const splitIndex = paragraphText.indexOf(' - ');
+        const timeText = splitIndex >= 0
+          ? normalizeText(paragraphText.slice(0, splitIndex)).replace(/\\bam\\b/g, 'AM').replace(/\\bpm\\b/g, 'PM')
+          : '';
+        const messageText = splitIndex >= 0 ? normalizeText(paragraphText.slice(splitIndex + 3)) : paragraphText;
+        const contentText = itemName && messageText.startsWith(itemName)
+          ? normalizeText(messageText.slice(itemName.length))
+          : messageText;
+
+        return {
+          timeText,
+          itemName,
+          fullText: paragraphText,
+          contentText
+        };
+      });
+    };
+    const dedupeEntries = (entries) => {
+      const seen = new Set();
+      const results = [];
+      for (const entry of entries) {
+        const key = [entry.timeText, entry.itemName, entry.contentText].join('•');
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        results.push(entry);
+        if (results.length >= maxEntries) {
+          break;
+        }
+      }
+      return results;
+    };
+    const findScrollableContainers = () =>
+      Array.from(document.querySelectorAll('*')).filter((node) => {
+        if (!(node instanceof HTMLElement)) {
+          return false;
+        }
+        const style = window.getComputedStyle(node);
+        const overflowY = style.overflowY;
+        const canScroll = /(auto|scroll|overlay)/.test(overflowY) && node.scrollHeight > node.clientHeight + 48;
+        return canScroll && node.querySelector('.pledge-log-entry');
+      });
+    const findLoadMoreButton = () =>
+      Array.from(document.querySelectorAll('button, a, [role=\"button\"], input[type=\"button\"], input[type=\"submit\"]'))
+        .find((node) => {
+          const label = normalizeText(node.textContent || node.value || '').toLowerCase();
+          return isVisible(node) && (
+            label.includes('load more') ||
+            label === 'more' ||
+            label.includes('show more')
+          );
+        });
+    const findHangarLogButton = () =>
+      Array.from(document.querySelectorAll('button, a, [role=\"button\"], input[type=\"button\"], input[type=\"submit\"]'))
+        .find((node) => {
+          const label = normalizeText(node.textContent || node.value || '').toLowerCase();
+          return isVisible(node) && label.includes('hangar log');
+        });
+
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      return {
+        accessDenied: true,
+        statusCode: 403,
+        items: [],
+        failureMessage: 'The RSI account page reported access denied before the hangar log request started.',
+        debugSummary: null
+      };
+    }
+
+    const hangarLogButton = findHangarLogButton();
+    if (!hangarLogButton) {
+      return {
+        accessDenied: false,
+        statusCode: 200,
+        items: [],
+        failureMessage: 'The RSI account page loaded, but the Hangar log button could not be found.',
+        debugSummary: normalizeText(document.body.innerText).slice(0, 500)
+      };
+    }
+
+    clickElement(hangarLogButton);
+
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
+    const rsiDevice = cookieValue('_rsi_device');
+    const requestHeaders = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Accept': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+    if (csrfToken) {
+      requestHeaders['x-csrf-token'] = csrfToken;
+    }
+    if (rsiToken) {
+      requestHeaders['x-rsi-token'] = rsiToken;
+    }
+    if (rsiDevice) {
+      requestHeaders['x-rsi-device'] = rsiDevice;
+    }
+
+    const modalAppeared = await waitFor(
+      () =>
+        document.querySelector('.pledge-log-entry') ||
+        document.querySelector('[class*=\"modal\"] [class*=\"pledge\"]') ||
+        document.querySelector('[class*=\"overlay\"] [class*=\"pledge\"]'),
+      8000,
+      150
+    );
+
+    if (!modalAppeared) {
+      return {
+        accessDenied: false,
+        statusCode: 200,
+        items: [],
+        failureMessage: 'RSI did not finish opening the Hangar log window.',
+        debugSummary: normalizeText(document.body.innerText).slice(0, 700)
+      };
+    }
+
+    let items = collectEntries();
+    let stablePasses = 0;
+    let pagedFetchStatus = 'not-started';
+    let pagedFetchPageCount = null;
+    let pagedFetchStoppedAt = 1;
+
+    for (let index = 0; index < 80 && items.length < maxEntries; index += 1) {
+      const beforeCount = items.length;
+
+      for (const container of findScrollableContainers()) {
+        container.scrollTop = container.scrollHeight;
+      }
+
+      window.scrollTo(0, document.body.scrollHeight);
+      clickElement(findLoadMoreButton());
+      await wait(250);
+
+      items = collectEntries().slice(0, maxEntries);
+
+      if (items.length > beforeCount) {
+        stablePasses = 0;
+        continue;
+      }
+
+      stablePasses += 1;
+      if (stablePasses >= 4) {
+        break;
+      }
+    }
+
+    items = collectEntries().slice(0, maxEntries);
+
+    try {
+      const pageOneResponse = await fetch('/api/account/pledgeLog', {
+        method: 'POST',
+        credentials: 'include',
+        headers: requestHeaders,
+        body: JSON.stringify({ page: 1 })
+      });
+
+      const pageOneRawBody = await pageOneResponse.text();
+      let pageOnePayload = null;
+      try {
+        pageOnePayload = JSON.parse(pageOneRawBody);
+      } catch {}
+
+      if (pageOneResponse.ok && pageOnePayload?.data) {
+        const apiItems = parseRenderedEntries(pageOnePayload.data.rendered);
+        if (apiItems.length > 0) {
+          items = dedupeEntries(apiItems.concat(items));
+        }
+
+        const reportedPageCount = Number.parseInt(String(pageOnePayload.data.pagecount || ''), 10);
+        const pageCount = Number.isFinite(reportedPageCount) && reportedPageCount > 0 ? reportedPageCount : null;
+        pagedFetchPageCount = pageCount;
+        pagedFetchStatus = 'page-1-ok';
+
+        for (let page = 2; page <= (pageCount || 100) && items.length < maxEntries; page += 1) {
+          const response = await fetch('/api/account/pledgeLog', {
+            method: 'POST',
+            credentials: 'include',
+            headers: requestHeaders,
+            body: JSON.stringify({ page })
+          });
+
+          const rawBody = await response.text();
+          let payload = null;
+          try {
+            payload = JSON.parse(rawBody);
+          } catch {}
+
+          if (!response.ok || !payload?.data) {
+            pagedFetchStatus = `page-${page}-http-${response.status}`;
+            pagedFetchStoppedAt = page;
+            break;
+          }
+
+          const currentPage = Number.parseInt(String(payload.data.page || page), 10);
+          const currentPageCount = Number.parseInt(String(payload.data.pagecount || pageCount || ''), 10);
+          if (Number.isFinite(currentPageCount) && currentPageCount > 0) {
+            pagedFetchPageCount = currentPageCount;
+          }
+
+          if (Number.isFinite(currentPage) && Number.isFinite(currentPageCount) && currentPage > currentPageCount) {
+            pagedFetchStatus = `page-${page}-past-end`;
+            pagedFetchStoppedAt = page;
+            break;
+          }
+
+          const pageItems = parseRenderedEntries(payload.data.rendered);
+          if (pageItems.length === 0) {
+            pagedFetchStatus = `page-${page}-empty`;
+            pagedFetchStoppedAt = page;
+            break;
+          }
+
+          const beforeCount = items.length;
+          items = dedupeEntries(items.concat(pageItems));
+          pagedFetchStoppedAt = page;
+
+          if (items.length === beforeCount) {
+            pagedFetchStatus = `page-${page}-duplicate`;
+            break;
+          }
+
+          pagedFetchStatus = `page-${page}-ok`;
+        }
+
+        if (items.length >= maxEntries) {
+          pagedFetchStatus = `cap-${maxEntries}`;
+        }
+      } else {
+        pagedFetchStatus = `page-1-http-${pageOneResponse.status}`;
+      }
+    } catch (error) {
+      pagedFetchStatus = `fetch-error:${normalizeText(error?.message || String(error))}`;
+    }
+
+    items = dedupeEntries(items).slice(0, maxEntries);
+
+    const failureMessage = items.length === 0
+      ? 'RSI opened the Hangar log flow, but no .pledge-log-entry rows were rendered.'
+      : null;
+
+    const debugSummary = [
+      `button=${normalizeText(hangarLogButton.textContent || hangarLogButton.value || '')}`,
+      `entries=${items.length}`,
+      `max=${maxEntries}`,
+      `pagedStatus=${pagedFetchStatus}`,
+      `pagedCount=${pagedFetchPageCount ?? 'unknown'}`,
+      `pagedStop=${pagedFetchStoppedAt}`,
+      `scrollables=${findScrollableContainers().length}`,
+      `loadMoreVisible=${Boolean(findLoadMoreButton())}`,
+      `body=${normalizeText(document.body.innerText).slice(0, 500)}`
+    ].join(' | ');
+
+    return {
+      accessDenied: false,
+      statusCode: 200,
+      items,
+      failureMessage,
+      debugSummary
+    };
+    """
 }
 
 enum RSIStoreCreditParser {
@@ -3137,6 +3656,180 @@ private nonisolated struct RemoteBuybackPledge: Decodable {
             valueText,
             imageURL ?? ""
         ].joined(separator: "•")
+    }
+}
+
+private nonisolated struct RemoteHangarLogPage: Decodable {
+    let accessDenied: Bool
+    let statusCode: Int
+    let items: [RemoteHangarLogItem]
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
+private nonisolated struct RemoteHangarLogItem: Decodable {
+    let timeText: String
+    let itemName: String
+    let fullText: String
+    let contentText: String
+}
+
+private nonisolated enum HangarLogParser {
+    private static let createdPattern = #"^#(\d+?) - Created by ([\w\d-]+?) - order #([A-Z0-9]+?), value: \$([0-9.]+?) USD$"#
+    private static let reclaimedPattern = #"^#(\d+?) - Reclaimed by ([\w\d-]+?) for \$([0-9.]+?) USD$"#
+    private static let consumedPattern = #"^#(\d+?) - Consumed by ([\w\d-]+?) on pledge #(\d+?), value: \$([0-9.]+?) USD$"#
+    private static let appliedUpgradePattern = #"^#(\d+?) - Upgrade applied: #(\d+?) ([^,]+?), new value: \$([0-9.]+?) USD$"#
+    private static let buybackPattern = #"^#(\d+?) - Buy-back by ([\w\d-]+?) - order #([\w\d]+?)$"#
+    private static let giftPattern = #"^#(\d+?) - Gifted to ([^,]+?), value: \$([0-9.]+?) USD$"#
+    private static let giftClaimedPattern = #"^#(\d+) - Claimed as a gift by ([\w\d-]+?), value: \$([0-9.]+?) USD$"#
+    private static let giftCancelledPattern = #"^#(\d+?) - Gift cancelled by ([\d\w-]+?), value: \$([0-9.]+?) USD$"#
+    private static let nameChangePattern = #"^#(\d+) - Name Reservation: \((.+)\) on item (.+)$"#
+    private static let nameChangeReclaimedPattern = #"^#(\d+) - Name Release: \(([^\)]+)\) on item (\S+) Reclaimed$"#
+    private static let giveawayPattern = #"^#(\d+?) - (.*?)$"#
+
+    static func parse(_ items: [RemoteHangarLogItem]) -> [HangarLogEntry] {
+        items.compactMap(parse)
+    }
+
+    private static func parse(_ item: RemoteHangarLogItem) -> HangarLogEntry? {
+        let occurredAt = parsedDate(from: item.timeText) ?? .distantPast
+        let content = item.contentText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var action: HangarLogAction = .unknown
+        var priceUSD: Decimal?
+        var orderCode: String?
+        var sourcePledgeID: String?
+        var targetPledgeID: String?
+        var operatorName: String?
+        var reason: String?
+
+        if let groups = match(createdPattern, in: content) {
+            action = .created
+            targetPledgeID = groupValue(groups, 0)
+            operatorName = groupValue(groups, 1)
+            orderCode = groupValue(groups, 2)
+            priceUSD = parseMoney(groupValue(groups, 3))
+        } else if let groups = match(reclaimedPattern, in: content) {
+            action = .reclaimed
+            targetPledgeID = groupValue(groups, 0)
+            operatorName = groupValue(groups, 1)
+            priceUSD = parseMoney(groupValue(groups, 2))
+        } else if let groups = match(consumedPattern, in: content) {
+            action = .consumed
+            targetPledgeID = groupValue(groups, 0)
+            operatorName = groupValue(groups, 1)
+            sourcePledgeID = groupValue(groups, 2)
+            priceUSD = parseMoney(groupValue(groups, 3))
+        } else if let groups = match(appliedUpgradePattern, in: content) {
+            action = .appliedUpgrade
+            targetPledgeID = groupValue(groups, 0)
+            sourcePledgeID = groupValue(groups, 1)
+            reason = groupValue(groups, 2)
+            priceUSD = parseMoney(groupValue(groups, 3))
+            operatorName = "CIG"
+        } else if let groups = match(buybackPattern, in: content) {
+            action = .buyback
+            targetPledgeID = groupValue(groups, 0)
+            operatorName = groupValue(groups, 1)
+            orderCode = groupValue(groups, 2)
+        } else if let groups = match(giftPattern, in: content) {
+            action = .gift
+            targetPledgeID = groupValue(groups, 0)
+            operatorName = groupValue(groups, 1)
+            priceUSD = parseMoney(groupValue(groups, 2))
+        } else if let groups = match(giftClaimedPattern, in: content) {
+            action = .giftClaimed
+            targetPledgeID = groupValue(groups, 0)
+            operatorName = groupValue(groups, 1)
+            priceUSD = parseMoney(groupValue(groups, 2))
+        } else if let groups = match(giftCancelledPattern, in: content) {
+            action = .giftCancelled
+            targetPledgeID = groupValue(groups, 0)
+            operatorName = groupValue(groups, 1)
+            priceUSD = parseMoney(groupValue(groups, 2))
+        } else if let groups = match(nameChangePattern, in: content) {
+            action = .nameChange
+            targetPledgeID = groupValue(groups, 0)
+            sourcePledgeID = groupValue(groups, 1)
+            reason = groupValue(groups, 2)
+        } else if let groups = match(nameChangeReclaimedPattern, in: content) {
+            action = .nameChangeReclaimed
+            targetPledgeID = groupValue(groups, 0)
+            sourcePledgeID = groupValue(groups, 1)
+            reason = groupValue(groups, 2)
+        } else if let groups = match(giveawayPattern, in: content) {
+            action = .giveaway
+            targetPledgeID = groupValue(groups, 0)
+            reason = groupValue(groups, 1)
+        }
+
+        let resolvedOperatorName = operatorName?.nilIfEmpty ?? "CIG"
+        let resolvedTargetID = targetPledgeID?.nilIfEmpty
+        let identifier = [
+            action.rawValue,
+            resolvedTargetID ?? "unknown",
+            String(Int(occurredAt.timeIntervalSince1970)),
+            content
+        ].joined(separator: "#")
+
+        return HangarLogEntry(
+            id: identifier,
+            occurredAt: occurredAt,
+            action: action,
+            itemName: item.itemName.nilIfEmpty ?? "Unknown item",
+            operatorName: resolvedOperatorName,
+            priceUSD: priceUSD,
+            sourcePledgeID: sourcePledgeID?.nilIfEmpty,
+            targetPledgeID: resolvedTargetID,
+            orderCode: orderCode?.nilIfEmpty,
+            reason: reason?.nilIfEmpty,
+            rawText: item.fullText.nilIfEmpty ?? content
+        )
+    }
+
+    private static func parsedDate(from rawValue: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "MMM d yyyy, h:mm a"
+        return formatter.date(from: rawValue)
+    }
+
+    private static func parseMoney(_ rawValue: String?) -> Decimal? {
+        guard let rawValue else {
+            return nil
+        }
+
+        return Decimal(string: rawValue, locale: Locale(identifier: "en_US_POSIX"))
+    }
+
+    private static func groupValue(_ groups: [String], _ index: Int) -> String? {
+        guard groups.indices.contains(index) else {
+            return nil
+        }
+
+        return groups[index]
+    }
+
+    private static func match(_ pattern: String, in text: String) -> [String]? {
+        guard let expression = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+
+        let range = NSRange(text.startIndex ..< text.endIndex, in: text)
+        guard let match = expression.firstMatch(in: text, options: [], range: range) else {
+            return nil
+        }
+
+        return (1 ..< match.numberOfRanges).compactMap { index in
+            let captureRange = match.range(at: index)
+            guard captureRange.location != NSNotFound,
+                  let range = Range(captureRange, in: text) else {
+                return nil
+            }
+
+            return String(text[range])
+        }
     }
 }
 
