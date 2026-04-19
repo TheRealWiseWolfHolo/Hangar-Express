@@ -1,4 +1,4 @@
-# Hanger Express
+# Hangar Express
 
 SwiftUI iOS prototype for retrieving and organizing a Star Citizen hangar.
 
@@ -11,7 +11,7 @@ SwiftUI iOS prototype for retrieving and organizing a Star Citizen hangar.
 ## Repo Shape
 
 ```text
-Hanger Express/
+Hangar Express/
   App/
   Core/
     Domain/
@@ -40,3 +40,14 @@ The app shell currently uses preview data so we can settle the product structure
 4. Organize locally with filters, grouping, notes, and future alerting.
 
 More detail is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Legal
+
+Hangar Express is an unofficial Star Citizen fan project and is not affiliated with the Cloud Imperium group of companies.
+
+This repository is intentionally published without an open-source license. All rights are reserved except for the limited personal, non-commercial permission described in [PERMISSIONS.md](PERMISSIONS.md).
+
+Star Citizen, Squadron 42, Roberts Space Industries, and related names, ships, artwork, and other game content shown or referenced by this app or repository belong to the Cloud Imperium group of companies and their respective owners.
+
+- Fan-project notice and attribution guidance: [DISCLAIMER.md](DISCLAIMER.md)
+- Limited personal-use permission notice: [PERMISSIONS.md](PERMISSIONS.md)

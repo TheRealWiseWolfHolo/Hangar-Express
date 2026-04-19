@@ -15,42 +15,35 @@ actor KeychainSessionStore: SessionStore {
         self.account = account
     }
 
-    func loadSession() async -> UserSession? {
-        let query = baseQuery(returnData: true)
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        guard status == errSecSuccess, let data = result as? Data else {
-            return nil
+    func loadSnapshot() async -> StoredSessionsSnapshot {
+        guard let payload = loadPayload() else {
+            return .empty
         }
 
-        do {
-            return try decoder.decode(UserSession.self, from: data)
-        } catch {
-#if DEBUG
-            print("KeychainSessionStore failed to decode the saved RSI session: \(error)")
-#endif
-            return nil
-        }
+        return payload.snapshot
     }
 
-    func save(_ session: UserSession) async {
-        guard let data = try? encoder.encode(session) else {
-            return
-        }
-
-        let query = baseQuery(returnData: false)
-        SecItemDelete(query as CFDictionary)
-
-        var attributes = query
-        attributes[kSecValueData as String] = data
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-
-        SecItemAdd(attributes as CFDictionary, nil)
+    func save(_ session: UserSession, makeActive: Bool) async -> StoredSessionsSnapshot {
+        let updatedPayload = (loadPayload() ?? .empty).saving(session, makeActive: makeActive)
+        persist(updatedPayload)
+        return updatedPayload.snapshot
     }
 
-    func clear() async {
+    func selectSession(id: UserSession.ID) async -> StoredSessionsSnapshot {
+        let updatedPayload = (loadPayload() ?? .empty).selecting(id: id)
+        persist(updatedPayload)
+        return updatedPayload.snapshot
+    }
+
+    func deleteSession(id: UserSession.ID) async -> StoredSessionsSnapshot {
+        let updatedPayload = (loadPayload() ?? .empty).deleting(id: id)
+        persist(updatedPayload)
+        return updatedPayload.snapshot
+    }
+
+    func clear() async -> StoredSessionsSnapshot {
         SecItemDelete(baseQuery(returnData: false) as CFDictionary)
+        return .empty
     }
 
     private func baseQuery(returnData: Bool) -> [String: Any] {
@@ -66,5 +59,53 @@ actor KeychainSessionStore: SessionStore {
         }
 
         return query
+    }
+
+    private func loadPayload() -> StoredSessionsPayload? {
+        let query = baseQuery(returnData: true)
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+        guard status == errSecSuccess, let data = result as? Data else {
+            return nil
+        }
+
+        if let payload = try? decoder.decode(StoredSessionsPayload.self, from: data) {
+            return payload
+        }
+
+        if let legacySession = try? decoder.decode(UserSession.self, from: data) {
+            let migratedPayload = StoredSessionsPayload(
+                activeSessionID: legacySession.id,
+                sessions: [legacySession]
+            )
+            persist(migratedPayload)
+            return migratedPayload
+        }
+
+#if DEBUG
+        print("KeychainSessionStore failed to decode the saved RSI session payload.")
+#endif
+        return nil
+    }
+
+    private func persist(_ payload: StoredSessionsPayload) {
+        if payload.sessions.isEmpty {
+            SecItemDelete(baseQuery(returnData: false) as CFDictionary)
+            return
+        }
+
+        guard let data = try? encoder.encode(payload) else {
+            return
+        }
+
+        let query = baseQuery(returnData: false)
+        SecItemDelete(query as CFDictionary)
+
+        var attributes = query
+        attributes[kSecValueData as String] = data
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+
+        SecItemAdd(attributes as CFDictionary, nil)
     }
 }

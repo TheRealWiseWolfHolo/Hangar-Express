@@ -5,27 +5,24 @@ struct PreviewHangarRepository: HangarRepository {
         for session: UserSession,
         progress: @escaping RefreshProgressHandler
     ) async throws -> HangarSnapshot {
-        await progress(
+        progress(
             RefreshProgress(
                 stage: .preview,
+                stepNumber: 1,
+                stepCount: 1,
                 detail: "Loading the local sample hangar snapshot.",
                 completedUnitCount: 0,
                 totalUnitCount: 1
             )
         )
 
-        let now = Date()
-        let snapshot = HangarSnapshot(
-            accountHandle: session.handle,
-            lastSyncedAt: now,
-            packages: Self.samplePackages,
-            fleet: Self.sampleFleet,
-            buyback: Self.sampleBuyback
-        )
+        let snapshot = Self.previewSnapshot(for: session, lastSyncedAt: .now)
 
-        await progress(
+        progress(
             RefreshProgress(
                 stage: .preview,
+                stepNumber: 1,
+                stepCount: 1,
                 detail: "Preview hangar ready.",
                 completedUnitCount: 1,
                 totalUnitCount: 1
@@ -35,12 +32,143 @@ struct PreviewHangarRepository: HangarRepository {
         return snapshot
     }
 
+    func refreshHangarData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot {
+        progress(
+            RefreshProgress(
+                stage: .preview,
+                stepNumber: 1,
+                stepCount: 1,
+                detail: "Refreshing the preview hangar and fleet sections.",
+                completedUnitCount: 0,
+                totalUnitCount: 1
+            )
+        )
+
+        progress(
+            RefreshProgress(
+                stage: .preview,
+                stepNumber: 1,
+                stepCount: 1,
+                detail: "Preview hangar and fleet ready.",
+                completedUnitCount: 1,
+                totalUnitCount: 1
+            )
+        )
+
+        return snapshot.updatingHangar(
+            packages: Self.samplePackages,
+            fleet: Self.sampleFleet
+        )
+    }
+
+    func refreshBuybackData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot {
+        progress(
+            RefreshProgress(
+                stage: .preview,
+                stepNumber: 1,
+                stepCount: 1,
+                detail: "Refreshing the preview buy-back section.",
+                completedUnitCount: 0,
+                totalUnitCount: 1
+            )
+        )
+
+        progress(
+            RefreshProgress(
+                stage: .preview,
+                stepNumber: 1,
+                stepCount: 1,
+                detail: "Preview buy-back ready.",
+                completedUnitCount: 1,
+                totalUnitCount: 1
+            )
+        )
+
+        return snapshot.updatingBuyback(
+            buyback: Self.sampleBuyback
+        )
+    }
+
+    func refreshAccountData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot {
+        progress(
+            RefreshProgress(
+                stage: .preview,
+                stepNumber: 1,
+                stepCount: 1,
+                detail: "Refreshing the preview account overview.",
+                completedUnitCount: 0,
+                totalUnitCount: 1
+            )
+        )
+
+        let refreshedSnapshot = Self.previewSnapshot(for: session, lastSyncedAt: .now)
+
+        progress(
+            RefreshProgress(
+                stage: .preview,
+                stepNumber: 1,
+                stepCount: 1,
+                detail: "Preview account overview ready.",
+                completedUnitCount: 1,
+                totalUnitCount: 1
+            )
+        )
+
+        return snapshot.updatingAccount(
+            accountHandle: refreshedSnapshot.accountHandle,
+            avatarURL: refreshedSnapshot.avatarURL,
+            primaryOrganization: refreshedSnapshot.primaryOrganization,
+            storeCreditUSD: refreshedSnapshot.storeCreditUSD,
+            totalSpendUSD: refreshedSnapshot.totalSpendUSD,
+            referralStats: refreshedSnapshot.referralStats
+        )
+    }
+
     static let sampleSnapshot = HangarSnapshot(
         accountHandle: UserSession.preview.handle,
         lastSyncedAt: referenceDate(year: 2026, month: 4, day: 17),
+        primaryOrganization: AccountOrganization(
+            name: "Skewers Gentlemen's Club",
+            rank: "President"
+        ),
+        storeCreditUSD: 145,
+        totalSpendUSD: 1215,
         packages: samplePackages,
         fleet: sampleFleet,
-        buyback: sampleBuyback
+        buyback: sampleBuyback,
+        referralStats: sampleReferralStats
+    )
+
+    private static func previewSnapshot(for session: UserSession, lastSyncedAt: Date) -> HangarSnapshot {
+        HangarSnapshot(
+            accountHandle: session.handle,
+            lastSyncedAt: lastSyncedAt,
+            avatarURL: session.avatarURL,
+            storeCreditUSD: 145,
+            totalSpendUSD: 1215,
+            packages: samplePackages,
+            fleet: sampleFleet,
+            buyback: sampleBuyback,
+            referralStats: sampleReferralStats
+        )
+    }
+
+    private static let sampleReferralStats = ReferralStats(
+        currentLadderCount: 18,
+        legacyLadderCount: 7,
+        hasLegacyLadder: true
     )
 
     private static let samplePackages: [HangarPackage] = [
@@ -137,7 +265,8 @@ struct PreviewHangarRepository: HangarRepository {
             sourcePackageName: "Polaris Expedition Pack",
             meltValueUSD: 750,
             canGift: true,
-            canReclaim: true
+            canReclaim: true,
+            imageURL: sampleURL("polaris")
         ),
         FleetShip(
             id: 2002,
@@ -149,7 +278,8 @@ struct PreviewHangarRepository: HangarRepository {
             sourcePackageName: "Polaris Expedition Pack",
             meltValueUSD: 0,
             canGift: true,
-            canReclaim: true
+            canReclaim: true,
+            imageURL: sampleURL("ursa-medivac")
         ),
         FleetShip(
             id: 2003,
@@ -161,7 +291,8 @@ struct PreviewHangarRepository: HangarRepository {
             sourcePackageName: "Vulture Foundation Token",
             meltValueUSD: 150,
             canGift: false,
-            canReclaim: true
+            canReclaim: true,
+            imageURL: sampleURL("vulture")
         ),
         FleetShip(
             id: 2004,
@@ -173,7 +304,8 @@ struct PreviewHangarRepository: HangarRepository {
             sourcePackageName: "Zeus Mk II MR Patrol Build",
             meltValueUSD: 170,
             canGift: true,
-            canReclaim: true
+            canReclaim: true,
+            imageURL: sampleURL("zeus-mk-ii-mr")
         )
     ]
 
@@ -183,21 +315,24 @@ struct PreviewHangarRepository: HangarRepository {
             title: "Cutlass Black Starter Package",
             recoveredValueUSD: 115,
             addedToBuybackAt: referenceDate(year: 2025, month: 8, day: 2),
-            notes: "Good base for future CCU chains."
+            notes: "Good base for future CCU chains.",
+            imageURL: sampleURL("cutlass-black")
         ),
         BuybackPledge(
             id: 3002,
             title: "Spirit C1 Warbond",
             recoveredValueUSD: 110,
             addedToBuybackAt: referenceDate(year: 2025, month: 10, day: 17),
-            notes: "Watch sale windows before re-purchasing."
+            notes: "Watch sale windows before re-purchasing.",
+            imageURL: sampleURL("spirit-c1")
         ),
         BuybackPledge(
             id: 3003,
             title: "STV Referral Utility Pack",
             recoveredValueUSD: 35,
             addedToBuybackAt: referenceDate(year: 2026, month: 2, day: 7),
-            notes: "Low-value item, but useful for fleet notes."
+            notes: "Low-value item, but useful for fleet notes.",
+            imageURL: sampleURL("stv")
         )
     ]
 }

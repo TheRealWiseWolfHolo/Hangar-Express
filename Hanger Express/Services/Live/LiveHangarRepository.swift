@@ -4,10 +4,12 @@ import WebKit
 @MainActor
 final class LiveHangarRepository: HangarRepository {
     private let browser = RSIAccountPageBrowser()
+    private let shipCatalogClient = HostedShipCatalogClient()
     private let previewRepository = PreviewHangarRepository()
     private let pledgePageSize = 50
     private let buybackPageSize = 100
-    private let maxPages = 20
+    private let maxPledgePages = 200
+    private let maxBuybackPages = 100
 
     func fetchSnapshot(
         for session: UserSession,
@@ -17,25 +19,210 @@ final class LiveHangarRepository: HangarRepository {
             return try await previewRepository.fetchSnapshot(for: session, progress: progress)
         }
 
-        guard !session.cookies.isEmpty else {
-            throw LiveHangarRepositoryError.sessionUnavailable
-        }
+        try validate(session: session)
+        progress(preparationProgress(for: session, stepNumber: 1, stepCount: 4))
+
+        let remotePledges = try await fetchRemotePledges(
+            using: session.cookies,
+            progress: progress,
+            stepNumber: 2,
+            stepCount: 4
+        )
+        let remoteBuyback = try await fetchRemoteBuyback(
+            using: session.cookies,
+            progress: progress,
+            stepNumber: 3,
+            stepCount: 4
+        )
+        let shipCatalog = await fetchHostedShipCatalog(
+            progress: progress,
+            stepNumber: 4,
+            stepCount: 4
+        )
+        let accountContext = try await fetchAccountContext(
+            for: session,
+            progress: progress,
+            stepNumber: 4,
+            stepCount: 4
+        )
+
+        let packages = remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) }
+        let fleet = FleetProjector.project(packages: packages, shipCatalog: shipCatalog)
+        let buyback = remoteBuyback.map(normalize(buyback:))
 
         progress(
-            RefreshProgress(
-                stage: .preparingSession,
-                detail: "Restoring \(session.cookies.count) saved RSI cookies.",
-                completedUnitCount: 1,
-                totalUnitCount: 1
+            makeProgress(
+                stage: .finalizing,
+                stepNumber: 4,
+                stepCount: 4,
+                detail: "Organized \(remotePledges.count) pledges and \(remoteBuyback.count) buy-back items.",
+                completedUnitCount: 3,
+                totalUnitCount: 3
             )
         )
 
+        return HangarSnapshot(
+            accountHandle: session.handle,
+            lastSyncedAt: .now,
+            avatarURL: accountContext.avatarURL ?? session.avatarURL,
+            primaryOrganization: accountContext.primaryOrganization,
+            storeCreditUSD: accountContext.storeCreditUSD,
+            totalSpendUSD: accountContext.totalSpendUSD,
+            packages: packages,
+            fleet: fleet,
+            buyback: buyback,
+            referralStats: accountContext.referralStats
+        )
+    }
+
+    func refreshHangarData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.refreshHangarData(
+                for: session,
+                from: snapshot,
+                progress: progress
+            )
+        }
+
+        try validate(session: session)
+        progress(preparationProgress(for: session, stepNumber: 1, stepCount: 3))
+
+        let remotePledges = try await fetchRemotePledges(
+            using: session.cookies,
+            progress: progress,
+            stepNumber: 2,
+            stepCount: 3
+        )
+        let shipCatalog = await fetchHostedShipCatalog(
+            progress: progress,
+            stepNumber: 3,
+            stepCount: 3
+        )
+        let packages = remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) }
+        let fleet = FleetProjector.project(packages: packages, shipCatalog: shipCatalog)
+
+        progress(
+            makeProgress(
+                stage: .finalizing,
+                stepNumber: 3,
+                stepCount: 3,
+                detail: "Organized \(remotePledges.count) pledges into the hangar and fleet views.",
+                completedUnitCount: 2,
+                totalUnitCount: 2
+            )
+        )
+
+        return snapshot.updatingHangar(
+            packages: packages,
+            fleet: fleet
+        )
+    }
+
+    func refreshBuybackData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.refreshBuybackData(
+                for: session,
+                from: snapshot,
+                progress: progress
+            )
+        }
+
+        try validate(session: session)
+        progress(preparationProgress(for: session, stepNumber: 1, stepCount: 2))
+
+        let remoteBuyback = try await fetchRemoteBuyback(
+            using: session.cookies,
+            progress: progress,
+            stepNumber: 2,
+            stepCount: 2
+        )
+        let buyback = remoteBuyback.map(normalize(buyback:))
+
+        return snapshot.updatingBuyback(
+            buyback: buyback
+        )
+    }
+
+    func refreshAccountData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.refreshAccountData(
+                for: session,
+                from: snapshot,
+                progress: progress
+            )
+        }
+
+        try validate(session: session)
+        progress(preparationProgress(for: session, stepNumber: 1, stepCount: 2))
+
+        let accountContext = try await fetchAccountContext(
+            for: session,
+            progress: progress,
+            stepNumber: 2,
+            stepCount: 2
+        )
+
+        return snapshot.updatingAccount(
+            accountHandle: session.handle,
+            avatarURL: accountContext.didRefreshAccountOverview ? accountContext.avatarURL : snapshot.avatarURL,
+            primaryOrganization: accountContext.didRefreshPrimaryOrganization ? accountContext.primaryOrganization : snapshot.primaryOrganization,
+            storeCreditUSD: accountContext.didRefreshAccountOverview ? accountContext.storeCreditUSD : snapshot.storeCreditUSD,
+            totalSpendUSD: accountContext.didRefreshAccountOverview ? accountContext.totalSpendUSD : snapshot.totalSpendUSD,
+            referralStats: accountContext.didRefreshReferralStats ? accountContext.referralStats : snapshot.referralStats,
+            lastSyncedAt: (accountContext.didRefreshAccountOverview || accountContext.didRefreshReferralStats) ? .now : snapshot.lastSyncedAt
+        )
+    }
+
+    private func validate(session: UserSession) throws {
+        guard !session.cookies.isEmpty else {
+            throw LiveHangarRepositoryError.sessionUnavailable
+        }
+    }
+
+    private func preparationProgress(
+        for session: UserSession,
+        stepNumber: Int,
+        stepCount: Int
+    ) -> RefreshProgress {
+        makeProgress(
+            stage: .preparingSession,
+            stepNumber: stepNumber,
+            stepCount: stepCount,
+            detail: "Restoring \(session.cookies.count) saved RSI cookies.",
+            completedUnitCount: 1,
+            totalUnitCount: 1
+        )
+    }
+
+    private func fetchRemotePledges(
+        using cookies: [SessionCookie],
+        progress: @escaping RefreshProgressHandler,
+        stepNumber: Int,
+        stepCount: Int
+    ) async throws -> [RemotePledge] {
         var remotePledges: [RemotePledge] = []
         var pledgeTotalPages: Int?
-        for page in 1 ... maxPages {
+        var previousPledgePageSignature: String?
+        var didReachEndOfPledges = false
+
+        for page in 1 ... maxPledgePages {
             progress(
-                RefreshProgress(
+                makeProgress(
                     stage: .pledges,
+                    stepNumber: stepNumber,
+                    stepCount: stepCount,
                     detail: pageDetail(
                         for: "pledges",
                         page: page,
@@ -49,7 +236,7 @@ final class LiveHangarRepository: HangarRepository {
             )
 
             let result = try await browser.extractPledges(
-                using: session.cookies,
+                using: cookies,
                 page: page,
                 pageSize: pledgePageSize
             )
@@ -66,13 +253,15 @@ final class LiveHangarRepository: HangarRepository {
                     reportedByPage: result.totalPages,
                     page: page,
                     pageItemCount: result.items.count,
-                    pageSize: pledgePageSize
+                    hasNextPage: result.hasNextPage
                 )
             )
 
             progress(
-                RefreshProgress(
+                makeProgress(
                     stage: .pledges,
+                    stepNumber: stepNumber,
+                    stepCount: stepCount,
                     detail: pageDetail(
                         for: "pledges",
                         page: page,
@@ -89,18 +278,44 @@ final class LiveHangarRepository: HangarRepository {
                 after: page,
                 pageItemCount: result.items.count,
                 knownTotalPages: pledgeTotalPages,
-                pageSize: pledgePageSize
+                hasNextPage: result.hasNextPage,
+                pageSignature: result.pageSignature,
+                previousPageSignature: previousPledgePageSignature
             ) {
+                didReachEndOfPledges = true
                 break
             }
+
+            previousPledgePageSignature = result.pageSignature
         }
 
+        guard didReachEndOfPledges else {
+            throw LiveHangarRepositoryError.pageLimitReached(
+                itemLabel: "hangar pledges",
+                limit: maxPledgePages
+            )
+        }
+
+        return remotePledges
+    }
+
+    private func fetchRemoteBuyback(
+        using cookies: [SessionCookie],
+        progress: @escaping RefreshProgressHandler,
+        stepNumber: Int,
+        stepCount: Int
+    ) async throws -> [RemoteBuybackPledge] {
         var remoteBuyback: [RemoteBuybackPledge] = []
         var buybackTotalPages: Int?
-        for page in 1 ... maxPages {
+        var previousBuybackPageSignature: String?
+        var didReachEndOfBuyback = false
+
+        for page in 1 ... maxBuybackPages {
             progress(
-                RefreshProgress(
+                makeProgress(
                     stage: .buyback,
+                    stepNumber: stepNumber,
+                    stepCount: stepCount,
                     detail: pageDetail(
                         for: "buy-back items",
                         page: page,
@@ -114,7 +329,7 @@ final class LiveHangarRepository: HangarRepository {
             )
 
             let result = try await browser.extractBuybackPledges(
-                using: session.cookies,
+                using: cookies,
                 page: page,
                 pageSize: buybackPageSize
             )
@@ -131,13 +346,15 @@ final class LiveHangarRepository: HangarRepository {
                     reportedByPage: result.totalPages,
                     page: page,
                     pageItemCount: result.items.count,
-                    pageSize: buybackPageSize
+                    hasNextPage: result.hasNextPage
                 )
             )
 
             progress(
-                RefreshProgress(
+                makeProgress(
                     stage: .buyback,
+                    stepNumber: stepNumber,
+                    stepCount: stepCount,
                     detail: pageDetail(
                         for: "buy-back items",
                         page: page,
@@ -154,16 +371,38 @@ final class LiveHangarRepository: HangarRepository {
                 after: page,
                 pageItemCount: result.items.count,
                 knownTotalPages: buybackTotalPages,
-                pageSize: buybackPageSize
+                hasNextPage: result.hasNextPage,
+                pageSignature: result.pageSignature,
+                previousPageSignature: previousBuybackPageSignature
             ) {
+                didReachEndOfBuyback = true
                 break
             }
+
+            previousBuybackPageSignature = result.pageSignature
         }
 
+        guard didReachEndOfBuyback else {
+            throw LiveHangarRepositoryError.pageLimitReached(
+                itemLabel: "buy-back pledges",
+                limit: maxBuybackPages
+            )
+        }
+
+        return remoteBuyback
+    }
+
+    private func fetchHostedShipCatalog(
+        progress: @escaping RefreshProgressHandler,
+        stepNumber: Int,
+        stepCount: Int
+    ) async -> RSIShipCatalog? {
         progress(
-            RefreshProgress(
+            makeProgress(
                 stage: .finalizing,
-                detail: "Loading RSI store ship MSRP and media data for upgrade valuation.",
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: "Loading hosted ship MSRP and thumbnail data for upgrade valuation.",
                 completedUnitCount: 0,
                 totalUnitCount: 2
             )
@@ -171,41 +410,136 @@ final class LiveHangarRepository: HangarRepository {
 
         let shipCatalog: RSIShipCatalog?
         do {
-            shipCatalog = try await browser.fetchShipCatalog(using: session.cookies)
+            shipCatalog = try await shipCatalogClient.fetchCatalog()
         } catch {
             shipCatalog = nil
         }
 
         progress(
-            RefreshProgress(
+            makeProgress(
                 stage: .finalizing,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
                 detail: shipCatalog == nil
-                    ? "RSI store valuation data was unavailable. Continuing with hangar media only."
-                    : "Loaded \(shipCatalog?.ships.count ?? 0) RSI store ships for image and MSRP enrichment.",
+                    ? "Hosted ship valuation data was unavailable. Continuing with hangar media only."
+                    : "Loaded \(shipCatalog?.ships.count ?? 0) hosted ships for MSRP and image enrichment.",
                 completedUnitCount: 1,
                 totalUnitCount: 2
             )
         )
 
-        let packages = remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) }
-        let fleet = projectFleet(from: packages)
-        let buyback = remoteBuyback.map(normalize(buyback:))
+        return shipCatalog
+    }
 
+    private func fetchAccountContext(
+        for session: UserSession,
+        progress: @escaping RefreshProgressHandler,
+        stepNumber: Int,
+        stepCount: Int
+    ) async throws -> AccountRefreshContext {
         progress(
-            RefreshProgress(
-                stage: .finalizing,
-                detail: "Organized \(remotePledges.count) pledges and \(remoteBuyback.count) buy-back items.",
-                completedUnitCount: 2,
-                totalUnitCount: 2
+            makeProgress(
+                stage: .account,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: "Loading account balances and profile details.",
+                completedUnitCount: 0,
+                totalUnitCount: 3
             )
         )
 
-        return HangarSnapshot(
-            accountHandle: session.handle,
-            lastSyncedAt: .now,
-            packages: packages,
-            fleet: fleet,
-            buyback: buyback
+        let accountOverview = try await optionalAccountFetch {
+            try await browser.fetchAccountOverview(
+                using: session.cookies,
+                profileName: session.displayName
+            )
+        }
+        let didRefreshAccountOverview = accountOverview != nil
+
+        progress(
+            makeProgress(
+                stage: .account,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: accountOverview == nil
+                    ? "Account balances were unavailable. Continuing with saved account metadata."
+                    : "Loaded \(accountOverview?.storeCreditUSD?.usdString ?? "an unavailable") store credit balance and \(accountOverview?.totalSpendUSD?.usdString ?? "an unavailable total spend").",
+                completedUnitCount: 1,
+                totalUnitCount: 3
+            )
+        )
+
+        let refreshedReferralStats = try await optionalAccountFetch {
+            try await browser.fetchReferralStats(using: session.cookies)
+        }
+        let didRefreshReferralStats = refreshedReferralStats != nil
+        let referralStats = refreshedReferralStats ?? .unavailable
+        let currentReferralDetail = referralStats.currentLadderCount.map { "\($0) current referrals" } ?? "unavailable current referrals"
+        let legacyReferralDetail = referralStats.hasLegacyLadder
+            ? referralStats.legacyLadderCount.map { "\($0) legacy referrals" } ?? "unavailable legacy referrals"
+            : "no legacy referral ladder"
+
+        progress(
+            makeProgress(
+                stage: .account,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: "Loaded \(currentReferralDetail) and \(legacyReferralDetail).",
+                completedUnitCount: 2,
+                totalUnitCount: 3
+            )
+        )
+
+        progress(
+            makeProgress(
+                stage: .account,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: "Account overview sync complete.",
+                completedUnitCount: 3,
+                totalUnitCount: 3
+            )
+        )
+
+        return AccountRefreshContext(
+            avatarURL: accountOverview?.avatarURL,
+            primaryOrganization: accountOverview?.primaryOrganization,
+            storeCreditUSD: accountOverview?.storeCreditUSD,
+            totalSpendUSD: accountOverview?.totalSpendUSD,
+            referralStats: referralStats,
+            didRefreshAccountOverview: didRefreshAccountOverview,
+            didRefreshPrimaryOrganization: accountOverview?.didRefreshPrimaryOrganization ?? false,
+            didRefreshReferralStats: didRefreshReferralStats
+        )
+    }
+
+    private func optionalAccountFetch<T>(
+        _ operation: () async throws -> T
+    ) async throws -> T? {
+        do {
+            return try await operation()
+        } catch let error as LiveHangarRepositoryError where error.requiresReauthentication {
+            throw error
+        } catch {
+            return nil
+        }
+    }
+
+    private func makeProgress(
+        stage: RefreshStage,
+        stepNumber: Int,
+        stepCount: Int,
+        detail: String,
+        completedUnitCount: Int,
+        totalUnitCount: Int?
+    ) -> RefreshProgress {
+        RefreshProgress(
+            stage: stage,
+            stepNumber: stepNumber,
+            stepCount: stepCount,
+            detail: detail,
+            completedUnitCount: completedUnitCount,
+            totalUnitCount: totalUnitCount
         )
     }
 
@@ -213,14 +547,18 @@ final class LiveHangarRepository: HangarRepository {
         reportedByPage: Int?,
         page: Int,
         pageItemCount: Int,
-        pageSize: Int
+        hasNextPage: Bool?
     ) -> Int? {
         if let reportedByPage, reportedByPage > 0 {
             return reportedByPage
         }
 
-        if pageItemCount < pageSize {
+        if hasNextPage == false {
             return page
+        }
+
+        if pageItemCount == 0 {
+            return max(page - 1, 1)
         }
 
         return nil
@@ -243,13 +581,27 @@ final class LiveHangarRepository: HangarRepository {
         after page: Int,
         pageItemCount: Int,
         knownTotalPages: Int?,
-        pageSize: Int
+        hasNextPage: Bool?,
+        pageSignature: String?,
+        previousPageSignature: String?
     ) -> Bool {
         if let knownTotalPages, page >= knownTotalPages {
             return true
         }
 
-        return pageItemCount < pageSize
+        if let hasNextPage {
+            return !hasNextPage
+        }
+
+        if pageItemCount == 0 {
+            return true
+        }
+
+        if let pageSignature, let previousPageSignature, pageSignature == previousPageSignature {
+            return true
+        }
+
+        return false
     }
 
     private func pageDetail(
@@ -282,24 +634,33 @@ final class LiveHangarRepository: HangarRepository {
     private func normalize(package remote: RemotePledge, shipCatalog: RSIShipCatalog?) -> HangarPackage {
         let containsSummary = remote.containsText.trimmingCharacters(in: .whitespacesAndNewlines)
         let packageValueUSD = parseMoney(remote.valueText)
+        let packageThumbnailURL = remote.thumbnailImageURL.flatMap(URL.init(string:))
+        let insuranceOptions = inferInsuranceOptions(
+            from: remote.alsoContains,
+            containsSummary: containsSummary,
+            items: remote.items
+        )
         let contents = normalizeContents(
             for: remote,
             containsSummary: containsSummary,
             packageValueUSD: packageValueUSD,
-            shipCatalog: shipCatalog
+            shipCatalog: shipCatalog,
+            packageThumbnailURL: packageThumbnailURL
         )
 
         return HangarPackage(
             id: remote.id ?? stableNumericID(from: remote.title),
             title: normalizePackageTitle(remote.title),
             status: remote.statusText.nilIfEmpty ?? "Unknown",
-            insurance: inferInsurance(from: remote.alsoContains, containsSummary: containsSummary),
+            insurance: insuranceOptions.first ?? "Unknown",
+            insuranceOptions: insuranceOptions.isEmpty ? nil : insuranceOptions,
             acquiredAt: parseRSIDate(remote.dateText) ?? .now,
             originalValueUSD: packageValueUSD,
-            currentValueUSD: packageValueUSD,
+            currentValueUSD: inferredCurrentValueUSD(contents: contents, shipCatalog: shipCatalog, fallbackValueUSD: packageValueUSD),
             canGift: remote.canGift,
             canReclaim: remote.canReclaim,
             canUpgrade: remote.canUpgrade,
+            packageThumbnailURL: packageThumbnailURL,
             contents: contents
         )
     }
@@ -308,12 +669,14 @@ final class LiveHangarRepository: HangarRepository {
         for remote: RemotePledge,
         containsSummary: String,
         packageValueUSD: Decimal,
-        shipCatalog: RSIShipCatalog?
+        shipCatalog: RSIShipCatalog?,
+        packageThumbnailURL: URL?
     ) -> [PackageItem] {
         let upgradeMeltValueUSD = inferredUpgradeMeltValue(
             package: remote,
             packageValueUSD: packageValueUSD
         )
+        let shouldUsePackageThumbnailFallback = remote.items.count <= 1
 
         let liveItems = remote.items.enumerated().map { offset, item in
             let itemCategory = category(for: item.kind, title: item.title, detail: item.detail)
@@ -330,7 +693,9 @@ final class LiveHangarRepository: HangarRepository {
                     for: item,
                     category: itemCategory,
                     shipCatalog: shipCatalog,
-                    targetShip: targetShip
+                    targetShip: targetShip,
+                    packageThumbnailURL: packageThumbnailURL,
+                    usePackageThumbnailFallback: shouldUsePackageThumbnailFallback
                 ),
                 upgradePricing: upgradePricing(
                     path: upgradePath,
@@ -355,7 +720,7 @@ final class LiveHangarRepository: HangarRepository {
                 title: containsSummary,
                 detail: "Extracted from the RSI pledge summary",
                 category: .perk,
-                imageURL: nil,
+                imageURL: packageThumbnailURL,
                 upgradePricing: nil
             )
         ]
@@ -365,7 +730,9 @@ final class LiveHangarRepository: HangarRepository {
         for item: RemotePledgeItem,
         category: PackageItem.Category,
         shipCatalog: RSIShipCatalog?,
-        targetShip: RSIShipCatalog.Ship?
+        targetShip: RSIShipCatalog.Ship?,
+        packageThumbnailURL: URL?,
+        usePackageThumbnailFallback: Bool
     ) -> URL? {
         if let directURL = item.imageURL.flatMap(URL.init(string:)) {
             return directURL
@@ -373,11 +740,11 @@ final class LiveHangarRepository: HangarRepository {
 
         switch category {
         case .upgrade:
-            return targetShip?.imageURL
+            return targetShip?.imageURL ?? (usePackageThumbnailFallback ? packageThumbnailURL : nil)
         case .ship, .vehicle:
-            return shipCatalog?.matchShip(named: item.title)?.imageURL
+            return shipCatalog?.matchShip(named: item.title)?.imageURL ?? (usePackageThumbnailFallback ? packageThumbnailURL : nil)
         case .gamePackage, .flair, .perk:
-            return nil
+            return usePackageThumbnailFallback ? packageThumbnailURL : nil
         }
     }
 
@@ -408,6 +775,31 @@ final class LiveHangarRepository: HangarRepository {
         )
     }
 
+    private func inferredCurrentValueUSD(
+        contents: [PackageItem],
+        shipCatalog: RSIShipCatalog?,
+        fallbackValueUSD: Decimal
+    ) -> Decimal {
+        let shipLikeItems = contents.filter(\.isShipLike)
+        let shipLikeValueUSD = shipLikeItems.reduce(into: Decimal.zero) { partialResult, item in
+            partialResult += shipCatalog?.matchShip(named: item.title)?.msrpUSD ?? .zero
+        }
+
+        if !shipLikeItems.isEmpty, shipLikeValueUSD > 0 {
+            return shipLikeValueUSD
+        }
+
+        let upgradeValueUSD = contents.reduce(into: Decimal.zero) { partialResult, item in
+            partialResult += item.upgradePricing?.actualValueUSD ?? .zero
+        }
+
+        if upgradeValueUSD > 0 {
+            return upgradeValueUSD
+        }
+
+        return fallbackValueUSD
+    }
+
     private func inferredUpgradeMeltValue(package remote: RemotePledge, packageValueUSD: Decimal) -> Decimal? {
         guard packageValueUSD > 0 else {
             return nil
@@ -430,40 +822,16 @@ final class LiveHangarRepository: HangarRepository {
 
     private func normalize(buyback remote: RemoteBuybackPledge) -> BuybackPledge {
         let title = remote.title.nilIfEmpty ?? "Untitled Buy Back"
-        let notes = remote.containsText.nilIfEmpty ?? "Recovered from the RSI buy-back page."
+        let notes = remote.containsText.nilIfEmpty ?? ""
 
         return BuybackPledge(
             id: remote.id ?? stableNumericID(from: title),
             title: title,
             recoveredValueUSD: parseMoney(remote.valueText),
             addedToBuybackAt: parseRSIDate(remote.dateText) ?? .now,
-            notes: notes
+            notes: notes,
+            imageURL: remote.imageURL.flatMap(URL.init(string:))
         )
-    }
-
-    private func projectFleet(from packages: [HangarPackage]) -> [FleetShip] {
-        packages.flatMap { package in
-            let sourceItems = package.contents.filter { item in
-                item.category == .ship || item.category == .vehicle
-            }
-
-            return sourceItems.enumerated().map { offset, item in
-                let meltValue = sourceItems.count == 1 ? package.originalValueUSD : .zero
-
-                return FleetShip(
-                    id: package.id * 100 + offset,
-                    displayName: item.title,
-                    manufacturer: inferManufacturer(from: item),
-                    role: inferRole(from: item),
-                    insurance: package.insurance,
-                    sourcePackageID: package.id,
-                    sourcePackageName: package.title,
-                    meltValueUSD: meltValue,
-                    canGift: package.canGift,
-                    canReclaim: package.canReclaim
-                )
-            }
-        }
     }
 
     private func normalizePackageTitle(_ title: String) -> String {
@@ -510,72 +878,40 @@ final class LiveHangarRepository: HangarRepository {
         return .perk
     }
 
-    private func inferInsurance(from alsoContains: [String], containsSummary: String) -> String {
-        let candidates = alsoContains + containsSummary.components(separatedBy: "#")
-
-        for rawValue in candidates {
-            let value = rawValue
-                .replacingOccurrences(of: "-", with: " ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            guard value.localizedCaseInsensitiveContains("insurance") else {
-                continue
-            }
-
-            if value.localizedCaseInsensitiveContains("lifetime") {
-                return "LTI"
-            }
-
-            let lowercased = value.localizedLowercase
-            if let months = firstMatch(in: lowercased, pattern: #"(\d+)\s*(month|months|mo)\b"#) {
-                return "\(months) months"
-            }
-
-            if let years = firstMatch(in: lowercased, pattern: #"(\d+)\s*(year|years|yr)\b"#) {
-                return "\(years * 12) months"
-            }
+    private func inferInsuranceOptions(
+        from alsoContains: [String],
+        containsSummary: String,
+        items: [RemotePledgeItem]
+    ) -> [String] {
+        let itemCandidates = items.flatMap { item in
+            [item.title, item.kind, item.detail]
         }
+        let candidates = alsoContains + containsSummary.components(separatedBy: "#") + itemCandidates
+        let extractedOptions = candidates.flatMap(extractInsuranceOptions(from:))
 
-        return "Unknown"
+        return HangarPackage.normalizedInsuranceLevels(extractedOptions)
     }
 
-    private func inferManufacturer(from item: PackageItem) -> String {
-        let candidates = [item.detail, item.title]
-        let manufacturers = [
-            "Aegis",
-            "Anvil",
-            "ARGO",
-            "Banu",
-            "Consolidated Outland",
-            "Crusader",
-            "Drake",
-            "Esperia",
-            "Gatac",
-            "Greycat",
-            "Kruger",
-            "MISC",
-            "Mirai",
-            "Origin",
-            "RSI",
-            "Tumbril"
-        ]
+    private func extractInsuranceOptions(from rawValue: String) -> [String] {
+        let value = rawValue
+            .replacingOccurrences(of: "-", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        for manufacturer in manufacturers {
-            if candidates.contains(where: { $0.localizedCaseInsensitiveContains(manufacturer) }) {
-                return manufacturer
-            }
+        guard !value.isEmpty else {
+            return []
         }
 
-        return "Unknown"
-    }
+        var results: [String] = []
+        let lowercased = value.localizedLowercase
 
-    private func inferRole(from item: PackageItem) -> String {
-        let detail = item.detail.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !detail.isEmpty, detail.caseInsensitiveCompare(item.category.rawValue) != .orderedSame {
-            return detail
+        if lowercased.contains("lti") || lowercased.contains("lifetime") {
+            results.append("LTI")
         }
 
-        return item.category.rawValue
+        results.append(contentsOf: allMatches(in: lowercased, pattern: #"(\d+)\s*(month|months|mo)\b"#).map { "\($0) months" })
+        results.append(contentsOf: allMatches(in: lowercased, pattern: #"(\d+)\s*(year|years|yr)\b"#).map { "\($0 * 12) months" })
+
+        return results
     }
 
     private func parseMoney(_ value: String) -> Decimal {
@@ -627,6 +963,21 @@ final class LiveHangarRepository: HangarRepository {
         return Int(text[captureRange])
     }
 
+    private func allMatches(in text: String, pattern: String) -> [Int] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return []
+        }
+
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.matches(in: text, range: range).compactMap { match in
+            guard let captureRange = Range(match.range(at: 1), in: text) else {
+                return nil
+            }
+
+            return Int(text[captureRange])
+        }
+    }
+
     private func stableNumericID(from text: String) -> Int {
         var value = 0
         for scalar in text.unicodeScalars {
@@ -654,10 +1005,20 @@ final class LiveHangarRepository: HangarRepository {
     }()
 }
 
-private enum LiveHangarRepositoryError: Error, LocalizedError {
+enum LiveHangarRepositoryError: Error, LocalizedError, Equatable {
     case sessionUnavailable
     case sessionExpired
     case unexpectedMarkup(String)
+    case pageLimitReached(itemLabel: String, limit: Int)
+
+    var requiresReauthentication: Bool {
+        switch self {
+        case .sessionUnavailable, .sessionExpired:
+            return true
+        case .unexpectedMarkup, .pageLimitReached:
+            return false
+        }
+    }
 
     var errorDescription: String? {
         switch self {
@@ -667,7 +1028,150 @@ private enum LiveHangarRepositoryError: Error, LocalizedError {
             return "The saved RSI session expired. Sign in again to refresh the live hangar."
         case let .unexpectedMarkup(message):
             return message
+        case let .pageLimitReached(itemLabel, limit):
+            return "Live RSI refresh hit the safety limit after \(limit) pages while loading \(itemLabel)."
         }
+    }
+}
+
+enum FleetProjector {
+    static func project(packages: [HangarPackage], shipCatalog: RSIShipCatalog?) -> [FleetShip] {
+        packages.flatMap { package in
+            let fleetEntries = package.contents.compactMap { item -> (PackageItem, RSIShipCatalog.Ship?)? in
+                guard item.category == .ship || item.category == .vehicle else {
+                    return nil
+                }
+
+                let matchedShip = shipCatalog?.matchShip(named: item.title)
+
+                if matchedShip == nil, isObviousEquipmentItem(item) {
+                    return nil
+                }
+
+                return (item, matchedShip)
+            }
+
+            return fleetEntries.enumerated().map { offset, entry in
+                let meltValue = fleetEntries.count == 1 ? package.originalValueUSD : .zero
+                let item = entry.0
+                let matchedShip = entry.1
+
+                return FleetShip(
+                    id: package.id * 100 + offset,
+                    displayName: item.title,
+                    manufacturer: manufacturer(for: item, matchedShip: matchedShip),
+                    role: role(for: item, matchedShip: matchedShip),
+                    roleCategories: roleCategories(for: item, matchedShip: matchedShip),
+                    msrpUSD: hostedMSRP(for: matchedShip),
+                    insurance: package.insurance,
+                    sourcePackageID: package.id,
+                    sourcePackageName: package.title,
+                    meltValueUSD: meltValue,
+                    canGift: package.canGift,
+                    canReclaim: package.canReclaim,
+                    imageURL: matchedShip?.imageURL ?? item.imageURL
+                )
+            }
+        }
+    }
+
+    private static func manufacturer(for item: PackageItem, matchedShip: RSIShipCatalog.Ship?) -> String {
+        if let manufacturer = matchedShip?.manufacturer?.nilIfEmpty {
+            return manufacturer
+        }
+
+        let candidates = [item.detail, item.title]
+        let manufacturers: [(match: String, display: String)] = [
+            ("Grey's Market", "Grey's Market"),
+            ("GREY", "Grey's Market"),
+            ("Aegis", "Aegis"),
+            ("Anvil", "Anvil"),
+            ("ARGO", "ARGO"),
+            ("Banu", "Banu"),
+            ("Consolidated Outland", "Consolidated Outland"),
+            ("Crusader", "Crusader"),
+            ("Drake", "Drake"),
+            ("Esperia", "Esperia"),
+            ("Gatac", "Gatac"),
+            ("Greycat", "Greycat"),
+            ("Kruger", "Kruger"),
+            ("MISC", "MISC"),
+            ("Mirai", "Mirai"),
+            ("Origin", "Origin"),
+            ("RSI", "RSI"),
+            ("Tumbril", "Tumbril")
+        ]
+
+        for manufacturer in manufacturers {
+            if candidates.contains(where: { $0.localizedCaseInsensitiveContains(manufacturer.match) }) {
+                return manufacturer.display
+            }
+        }
+
+        return "Unknown"
+    }
+
+    private static func role(for item: PackageItem, matchedShip: RSIShipCatalog.Ship?) -> String {
+        if let hostedSummary = matchedShip?.roleSummary?.nilIfEmpty {
+            return hostedSummary
+        }
+
+        let detail = item.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !detail.isEmpty, detail.caseInsensitiveCompare(item.category.rawValue) != .orderedSame {
+            return detail
+        }
+
+        return item.category.rawValue
+    }
+
+    private static func roleCategories(for item: PackageItem, matchedShip: RSIShipCatalog.Ship?) -> [String] {
+        let hostedCategories = matchedShip?.roleCategories ?? []
+        if !hostedCategories.isEmpty {
+            return hostedCategories
+        }
+
+        let fallbackRole = role(for: item, matchedShip: matchedShip)
+        let fallbackCategories = fallbackRole
+            .split(separator: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        return fallbackCategories.isEmpty ? [fallbackRole] : fallbackCategories
+    }
+
+    private static func hostedMSRP(for matchedShip: RSIShipCatalog.Ship?) -> Decimal? {
+        matchedShip?.msrpUSD
+    }
+
+    private static func isObviousEquipmentItem(_ item: PackageItem) -> Bool {
+        let haystack = [item.title, item.detail]
+            .joined(separator: " ")
+            .localizedLowercase
+
+        let equipmentKeywords = [
+            "armor",
+            "armour",
+            "attachment",
+            "ammo",
+            "backpack",
+            "grenade",
+            "helmet",
+            "knife",
+            "magazine",
+            "medgun",
+            "medpen",
+            "multi-tool",
+            "multitool",
+            "pistol",
+            "rifle",
+            "shotgun",
+            "smg",
+            "sniper",
+            "undersuit",
+            "weapon"
+        ]
+
+        return equipmentKeywords.contains(where: haystack.contains)
     }
 }
 
@@ -744,6 +1248,103 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
                     imageURL: ship.imageURL.flatMap(URL.init(string:))
                 )
             }
+        )
+    }
+
+    func fetchAccountOverview(
+        using cookies: [SessionCookie],
+        profileName: String
+    ) async throws -> AccountOverview {
+        let url = try storefrontURL(path: "/en/")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let payload = try await evaluate(script: Self.accountBalancesExtractionScript, as: RemoteAccountBalances.self)
+
+        if payload.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        let storeCreditUSD: Decimal?
+        if let graphQLStoreCreditValue = payload.graphQLStoreCreditValue?.nilIfEmpty,
+           let parsedStoreCredit = RSIStoreCreditParser.parseStructuredMinorUnits(graphQLStoreCreditValue)
+        {
+            storeCreditUSD = parsedStoreCredit
+        } else if let storeCreditText = payload.storeCreditText?.nilIfEmpty {
+            storeCreditUSD = RSIStoreCreditParser.parseCurrencyText(storeCreditText)
+        } else {
+            storeCreditUSD = nil
+        }
+
+        let billingURL = try storefrontURL(path: "/en/account/billing")
+        try await load(url: billingURL)
+
+        let billingPayload = try await evaluate(script: Self.billingSummaryExtractionScript, as: RemoteBillingSummary.self)
+
+        if billingPayload.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        let primaryOrganizationOverview = try? await fetchPrimaryOrganization(profileName: profileName)
+
+        return AccountOverview(
+            storeCreditUSD: storeCreditUSD,
+            totalSpendUSD: billingPayload.totalSpendText.flatMap(RSIStoreCreditParser.parseCurrencyText),
+            avatarURL: normalizedRSIURL(from: payload.avatarURL),
+            primaryOrganization: primaryOrganizationOverview?.organization,
+            didRefreshPrimaryOrganization: primaryOrganizationOverview?.didRefreshPrimaryOrganization ?? false
+        )
+    }
+
+    func fetchReferralStats(using cookies: [SessionCookie]) async throws -> ReferralStats {
+        let referralURL = try storefrontURL(path: "/en/referral")
+        try await prepareWebView(with: cookies)
+        try await load(url: referralURL)
+
+        let currentPayload = try await evaluate(script: Self.referralCurrentExtractionScript, as: RemoteReferralOverview.self)
+
+        if currentPayload.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        let legacyURL = try storefrontURL(path: "/en/referral-legacy")
+        try await load(url: legacyURL)
+
+        let legacyPayload = try await evaluate(script: Self.legacyReferralExtractionScript, as: RemoteLegacyReferralPage.self)
+
+        if legacyPayload.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        return ReferralStatsResolver.resolve(
+            currentLadderCount: currentPayload.currentLadderCount,
+            legacyGraphQLCount: legacyPayload.graphQLCount,
+            legacyParsedCount: legacyPayload.legacyLadderCount,
+            legacyPageUnavailable: legacyPayload.pageUnavailable
+        )
+    }
+
+    private func fetchPrimaryOrganization(profileName: String) async throws -> PrimaryOrganizationOverview {
+        let trimmedProfileName = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedProfileName.isEmpty else {
+            return PrimaryOrganizationOverview(
+                organization: nil,
+                didRefreshPrimaryOrganization: false
+            )
+        }
+
+        let dossierURL = try citizenDossierURL(profileName: trimmedProfileName)
+        try await load(url: dossierURL)
+
+        let payload = try await evaluate(script: Self.primaryOrganizationExtractionScript, as: RemotePrimaryOrganization.self)
+
+        if payload.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        return PrimaryOrganizationOverview(
+            organization: payload.organization,
+            didRefreshPrimaryOrganization: !payload.pageUnavailable
         )
     }
 
@@ -856,6 +1457,41 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         return url
     }
 
+    private func citizenDossierURL(profileName: String) throws -> URL {
+        let allowedCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard let encodedProfileName = profileName.addingPercentEncoding(withAllowedCharacters: allowedCharacters) else {
+            throw LiveHangarRepositoryError.unexpectedMarkup("Unable to build the RSI citizen dossier URL.")
+        }
+
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "robertsspaceindustries.com"
+        components.percentEncodedPath = "/en/citizens/\(encodedProfileName)"
+
+        guard let url = components.url else {
+            throw LiveHangarRepositoryError.unexpectedMarkup("Unable to build the RSI citizen dossier URL.")
+        }
+
+        return url
+    }
+
+    private func normalizedRSIURL(from rawValue: String?) -> URL? {
+        guard let trimmedValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmedValue.isEmpty else {
+            return nil
+        }
+
+        if trimmedValue.hasPrefix("//") {
+            return URL(string: "https:\(trimmedValue)")
+        }
+
+        if trimmedValue.hasPrefix("/") {
+            return URL(string: "https://robertsspaceindustries.com\(trimmedValue)")
+        }
+
+        return URL(string: trimmedValue)
+    }
+
     private static let pledgesExtractionScript = """
     await new Promise(resolve => setTimeout(resolve, 150));
 
@@ -872,7 +1508,11 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     const firstImageURL = (node) => {
       const candidates = [];
-      const image = node.querySelector('img, picture img');
+      const directImage =
+        node?.matches?.('img') ? node :
+        node?.matches?.('picture') ? node.querySelector('img') :
+        null;
+      const image = directImage || node.querySelector('img, picture img');
       if (image) {
         candidates.push(
           image.currentSrc,
@@ -884,7 +1524,9 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         );
       }
 
-      const styledNode = node.querySelector('[style*="background-image"]');
+      const styledNode =
+        node?.matches?.('[style*="background-image"]') ? node :
+        node.querySelector('[style*="background-image"]');
       if (styledNode) {
         const style = styledNode.getAttribute('style') || '';
         const match = style.match(/url\\((['"]?)(.*?)\\1\\)/i);
@@ -919,7 +1561,21 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       return "";
     };
 
-    const pageNumbers = Array.from(document.querySelectorAll('a[href*="page="], button[data-page], [data-page]'))
+    const currentPage = (() => {
+      const parsed = Number.parseInt(new URL(window.location.href).searchParams.get('page') || '1', 10);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+    })();
+
+    const isDisabled = (node) => {
+      const nodeIsDisabled = node?.matches?.('[disabled], [aria-disabled="true"]') || false;
+      if (nodeIsDisabled) {
+        return true;
+      }
+
+      return Boolean(node?.classList?.contains('disabled') || node?.closest?.('.disabled'));
+    };
+
+    const paginationTargets = Array.from(document.querySelectorAll('a[href*="page="], button[data-page], [data-page], a[rel="next"], button[rel="next"]'))
       .map((node) => {
         const candidates = [
           node.getAttribute?.('data-page'),
@@ -945,25 +1601,60 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
           const parsed = Number.parseInt(match[1], 10);
           if (Number.isFinite(parsed) && parsed > 0) {
-            return parsed;
+            return {
+              page: parsed,
+              isNextControl: false,
+              disabled: isDisabled(node)
+            };
           }
         }
 
-        return null;
+        const label = [
+          node.getAttribute?.('aria-label'),
+          node.getAttribute?.('title'),
+          node.textContent,
+          node.getAttribute?.('rel')
+        ]
+          .map((value) => String(value || '').toLowerCase())
+          .join(' ');
+
+        return {
+          page: null,
+          isNextControl: label.includes('next'),
+          disabled: isDisabled(node)
+        };
       })
+      .filter((value) => value !== null);
+
+    const pageNumbers = paginationTargets
+      .map((target) => target.page)
       .filter((value) => Number.isFinite(value));
 
     const accessDenied = document.title.toLowerCase().includes('access denied') || document.body.innerText.includes('Access denied');
     const rows = Array.from(document.querySelectorAll('.list-items .row'));
+    const hasNextPage = paginationTargets.some((target) => {
+      if (target.disabled) {
+        return false;
+      }
+
+      if (Number.isFinite(target.page)) {
+        return target.page > currentPage;
+      }
+
+      return target.isNextControl;
+    });
 
     return {
       accessDenied,
       title: document.title,
       totalPages: pageNumbers.length ? Math.max(...pageNumbers) : null,
+      hasNextPage,
       items: rows.map((row) => {
         const titles = Array.from(row.querySelectorAll('.title'))
           .map((node) => node.textContent.trim())
           .filter(Boolean);
+        const packageThumbnailNode =
+          row.querySelector('.image-col, .image, .thumb, .thumbnail, picture, img') || row;
         const items = Array.from(row.querySelectorAll('.with-images .item')).map((item) => ({
           title: firstText(item, ['.title']),
           kind: firstText(item, ['.kind']),
@@ -981,6 +1672,7 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
           dateText: firstText(row, ['.date-col', '.date']),
           valueText: firstValue(row, ['.js-pledge-value']) || firstText(row, ['.value', '.price']),
           containsText: firstText(row, ['.items-col', '.contains']),
+          thumbnailImageURL: firstImageURL(packageThumbnailNode),
           alsoContains: titles,
           canGift: row.querySelector('.shadow-button.js-gift, .js-gift') !== null,
           canReclaim: row.querySelector('.shadow-button.js-reclaim, .js-reclaim') !== null,
@@ -1165,6 +1857,902 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     };
     """
 
+    private static let accountBalancesExtractionScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const isVisible = (node) => {
+      if (!node || !(node instanceof Element)) {
+        return false;
+      }
+
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number.parseFloat(style.opacity || '1') === 0) {
+        return false;
+      }
+
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+
+    const findVisibleAccountPanel = () => {
+      const stablePanel = document.querySelector('[data-cy-id="account-sidepanel"]');
+      if (stablePanel && isVisible(stablePanel)) {
+        return stablePanel;
+      }
+
+      const panels = Array.from(document.querySelectorAll('body *'))
+        .filter((node) => {
+          if (!isVisible(node)) {
+            return false;
+          }
+
+          const text = normalizeText(node.textContent).toLowerCase();
+          if (!text.includes('store credit')) {
+            return false;
+          }
+
+          return text.includes('credits') || text.includes('my hangar') || text.includes('account dashboard');
+        })
+        .sort((lhs, rhs) => rhs.getBoundingClientRect().height - lhs.getBoundingClientRect().height);
+
+      return panels[0] || null;
+    };
+
+    const findAvatarTrigger = () => {
+      const labeledCandidates = Array.from(document.querySelectorAll('button, a, [role="button"], summary'))
+        .filter((node) => {
+          if (!isVisible(node)) {
+            return false;
+          }
+
+          const haystack = [
+            node.textContent,
+            node.getAttribute?.('aria-label'),
+            node.getAttribute?.('title'),
+            node.className
+          ]
+            .map(normalizeText)
+            .join(' ')
+            .toLowerCase();
+
+          return ['account', 'my rsi', 'my account', 'profile', 'avatar', 'user'].some((label) => haystack.includes(label));
+        });
+
+      const imageCandidates = Array.from(document.querySelectorAll('header img, nav img, button img, a img, [role="button"] img, img'))
+        .map((image) => image.closest('button, a, [role="button"], summary') || image)
+        .filter((node) => {
+          if (!isVisible(node)) {
+            return false;
+          }
+
+          const rect = node.getBoundingClientRect();
+          if (rect.top > window.innerHeight * 0.35 || rect.left < window.innerWidth * 0.55) {
+            return false;
+          }
+
+          const haystack = [
+            node.getAttribute?.('aria-label'),
+            node.getAttribute?.('title'),
+            node.className,
+            node.querySelector?.('img')?.getAttribute?.('alt')
+          ]
+            .map(normalizeText)
+            .join(' ')
+            .toLowerCase();
+
+          return haystack.includes('avatar')
+            || haystack.includes('profile')
+            || haystack.includes('account')
+            || haystack.includes('user')
+            || node.querySelector?.('img') !== null;
+        });
+
+      const candidates = [...labeledCandidates, ...imageCandidates];
+      candidates.sort((lhs, rhs) => {
+        const lhsRect = lhs.getBoundingClientRect();
+        const rhsRect = rhs.getBoundingClientRect();
+        if (lhsRect.right !== rhsRect.right) {
+          return rhsRect.right - lhsRect.right;
+        }
+
+        return lhsRect.top - rhsRect.top;
+      });
+
+      return candidates[0] || null;
+    };
+
+    const waitForAccountPanel = async (timeoutMs = 1500) => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < timeoutMs) {
+        const panel = findVisibleAccountPanel();
+        if (panel) {
+          return panel;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
+      return findVisibleAccountPanel();
+    };
+
+    const openAccountPanelIfNeeded = async () => {
+      if (findVisibleAccountPanel()) {
+        return;
+      }
+
+      document.dispatchEvent(
+        new CustomEvent('plt-client.sidePanel.toggle', {
+          detail: {
+            type: 'account',
+            open: true
+          }
+        })
+      );
+
+      if (await waitForAccountPanel(1200)) {
+        return;
+      }
+
+      const trigger = findAvatarTrigger();
+      if (!trigger) {
+        return;
+      }
+
+      trigger.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true, view: window }));
+      trigger.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window }));
+      trigger.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+      trigger.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+      trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      trigger.click?.();
+      await waitForAccountPanel(1200);
+    };
+
+    const fetchStructuredStoreCreditValue = async () => {
+      const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+      if (!csrfToken) {
+        return '';
+      }
+
+      const query = `query AccountDashboardForCredits {
+        accountDashboard {
+          account {
+            creditsData {
+              label
+              currency
+              symbol
+              value
+              variant
+            }
+          }
+        }
+      }`;
+
+      try {
+        const response = await fetch('/graphql', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json;charset=UTF-8',
+            'Accept': 'application/json',
+            'X-CSRF-TOKEN': csrfToken
+          },
+          body: JSON.stringify({
+            operationName: 'AccountDashboardForCredits',
+            query,
+            variables: {}
+          })
+        });
+
+        const rawBody = await response.text();
+        let payload = null;
+        try {
+          payload = JSON.parse(rawBody);
+        } catch {
+          return '';
+        }
+
+        const credits = payload?.data?.accountDashboard?.account?.creditsData;
+        if (!Array.isArray(credits)) {
+          return '';
+        }
+
+        const storeCredit = credits.find((credit) => {
+          const label = normalizeText(credit?.label).toLowerCase();
+          const variant = normalizeText(credit?.variant).toLowerCase();
+          return label.includes('store credit') || variant.includes('store');
+        }) || credits.find((credit) => normalizeText(credit?.currency).toUpperCase() === 'USD');
+
+        if (!storeCredit) {
+          return '';
+        }
+
+        const value = typeof storeCredit.value === 'number'
+          ? storeCredit.value
+          : Number.parseFloat(String(storeCredit.value || ''));
+
+        return Number.isFinite(value) ? String(value) : '';
+      } catch {
+        return '';
+      }
+    };
+
+    const extractStoreCreditText = (sourceNode) => {
+      const snippets = [];
+      const collectSnippet = (value) => {
+        const normalized = normalizeText(value);
+        if (normalized) {
+          snippets.push(normalized);
+        }
+      };
+
+      if (sourceNode) {
+        collectSnippet(sourceNode.textContent);
+
+        Array.from(sourceNode.querySelectorAll('*')).forEach((node) => {
+          const haystack = [
+            node.textContent,
+            node.parentElement?.textContent,
+            node.previousElementSibling?.textContent,
+            node.nextElementSibling?.textContent
+          ];
+
+          haystack.forEach(collectSnippet);
+        });
+      }
+
+      collectSnippet(document.body.innerText);
+
+      for (const snippet of snippets) {
+        const match =
+          snippet.match(/store credit[^$\\d-]{0,80}(\\$?\\d[\\d,]*(?:\\.\\d{1,2})?)/i) ||
+          snippet.match(/(\\$?\\d[\\d,]*(?:\\.\\d{1,2})?)[^$\\d-]{0,40}store credit/i);
+
+        if (match?.[1]) {
+          return match[1];
+        }
+      }
+
+      return '';
+    };
+
+    const extractAvatarURL = (sourceNode, triggerNode) => {
+      const candidates = [];
+      const collectFrom = (root, priority) => {
+        if (!root || !(root instanceof Element)) {
+          return;
+        }
+
+        const imageNodes = root.matches('img')
+          ? [root]
+          : Array.from(root.querySelectorAll('img'));
+
+        imageNodes.forEach((imageNode) => {
+          if (!(imageNode instanceof HTMLImageElement) || !isVisible(imageNode)) {
+            return;
+          }
+
+          const rect = imageNode.getBoundingClientRect();
+          if (rect.width < 24 || rect.height < 24) {
+            return;
+          }
+
+          const url = normalizeText(imageNode.currentSrc || imageNode.src || imageNode.getAttribute('src'));
+          if (!url) {
+            return;
+          }
+
+          candidates.push({
+            url,
+            priority,
+            area: rect.width * rect.height,
+            squareness: Math.abs(rect.width - rect.height)
+          });
+        });
+      };
+
+      collectFrom(sourceNode, 2);
+      collectFrom(triggerNode, 1);
+      collectFrom(document.querySelector('header'), 0);
+      collectFrom(document.querySelector('nav'), 0);
+
+      candidates.sort((lhs, rhs) => {
+        if (lhs.priority !== rhs.priority) {
+          return rhs.priority - lhs.priority;
+        }
+
+        if (lhs.area !== rhs.area) {
+          return rhs.area - lhs.area;
+        }
+
+        return lhs.squareness - rhs.squareness;
+      });
+
+      const bestCandidate = candidates[0];
+      if (!bestCandidate) {
+        return '';
+      }
+
+      try {
+        return new URL(bestCandidate.url, window.location.href).href;
+      } catch {
+        return bestCandidate.url;
+      }
+    };
+
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const graphQLStoreCreditValue = await fetchStructuredStoreCreditValue();
+    const avatarTrigger = findAvatarTrigger();
+    await openAccountPanelIfNeeded();
+
+    const accessDenied = document.title.toLowerCase().includes('access denied') || document.body.innerText.includes('Access denied');
+    const accountPanel = findVisibleAccountPanel();
+    const storeCreditText = extractStoreCreditText(accountPanel);
+    const avatarURL = extractAvatarURL(accountPanel, avatarTrigger);
+
+    return {
+      accessDenied,
+      graphQLStoreCreditValue: graphQLStoreCreditValue || null,
+      storeCreditText: storeCreditText || null,
+      avatarURL: avatarURL || null
+    };
+    """
+
+    private static let primaryOrganizationExtractionScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+
+    const accessDenied =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    const mainOrganizationRoot =
+      document.querySelector('.main-org .info') ||
+      document.querySelector('.box-content.org.main .info');
+
+    if (!mainOrganizationRoot) {
+      return {
+        accessDenied,
+        pageUnavailable: true,
+        organizationName: null,
+        organizationRank: null
+      };
+    }
+
+    let organization = {
+      name: '',
+      rank: ''
+    };
+
+    Array.from(mainOrganizationRoot.querySelectorAll('.entry')).forEach((entry) => {
+      const label = normalizeText(entry.querySelector('.label')?.textContent).toLowerCase();
+      const value = normalizeText(entry.querySelector('.value')?.textContent);
+
+      if (!value) {
+        return;
+      }
+
+      if (!label && !organization.name) {
+        organization.name = value;
+        return;
+      }
+
+      if (label.includes('organization rank') && !organization.rank) {
+        organization.rank = value;
+      }
+    });
+
+    return {
+      accessDenied,
+      pageUnavailable: false,
+      organizationName: organization.name || null,
+      organizationRank: organization.rank || null
+    };
+    """
+
+    private static let referralCurrentExtractionScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+
+    const waitFor = async (predicate, timeoutMs = 1600) => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < timeoutMs) {
+        const result = predicate();
+        if (result) {
+          return result;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
+      return predicate();
+    };
+
+    const parseCount = (value) => {
+      const match = normalizeText(value).match(/\\d[\\d,]*/);
+      if (!match) {
+        return null;
+      }
+
+      const parsed = Number.parseInt(match[0].replace(/,/g, ''), 10);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    const decodeHTML = (value) => {
+      const textarea = document.createElement('textarea');
+      textarea.innerHTML = value;
+      return textarea.value;
+    };
+
+    const extractCampaignId = () => {
+      const components = Array.from(document.querySelectorAll('g-platform-client-component'));
+      for (const component of components) {
+        const rawValue = component.getAttribute(':properties') || component.getAttribute('properties');
+        if (!rawValue) {
+          continue;
+        }
+
+        const decoded = decodeHTML(rawValue);
+        if (!decoded.includes('Account.ReferralPage.Ladder')) {
+          continue;
+        }
+
+        const match =
+          decoded.match(/"referralCampaign"\\s*:\\s*\\{[^}]*"id"\\s*:\\s*"([^"]+)"/) ||
+          decoded.match(/"componentId"\\s*:\\s*"Account\\.ReferralPage\\.Ladder"[\\s\\S]*?"id"\\s*:\\s*"([^"]+)"/);
+
+        if (match?.[1]) {
+          return match[1];
+        }
+      }
+
+      return '2';
+    };
+
+    const fetchReferralCount = async (campaignId) => {
+      const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+      if (!csrfToken) {
+        return null;
+      }
+
+      const query = `query ReferralCountByCampaign($campaignId: ID!) {
+        referralCountByCampaign(campaignId: $campaignId)
+      }`;
+
+      try {
+        const response = await fetch('/graphql', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json;charset=UTF-8',
+            'Accept': 'application/json',
+            'X-CSRF-TOKEN': csrfToken,
+            'Accept-Language': document.documentElement.getAttribute('lang') || 'en'
+          },
+          body: JSON.stringify({
+            operationName: 'ReferralCountByCampaign',
+            query,
+            variables: {
+              campaignId
+            }
+          })
+        });
+
+        const rawBody = await response.text();
+        let payload = null;
+        try {
+          payload = JSON.parse(rawBody);
+        } catch {
+          return null;
+        }
+
+        const value = payload?.data?.referralCountByCampaign;
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          return value;
+        }
+
+        const parsed = Number.parseInt(String(value ?? ''), 10);
+        return Number.isFinite(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    };
+
+    await waitFor(() => document.querySelector('.accountReferralHeroBanner, .accountReferralRecruitsCount__text, g-platform-client-component'), 1200);
+
+    const accessDenied = document.title.toLowerCase().includes('access denied') || document.body.innerText.includes('Access denied');
+    const campaignId = extractCampaignId();
+    const graphQLCount = await fetchReferralCount(campaignId);
+    const counterText = normalizeText(document.querySelector('.accountReferralRecruitsCount__text')?.textContent);
+
+    return {
+      accessDenied,
+      campaignId,
+      currentLadderCount: graphQLCount ?? parseCount(counterText),
+      counterText: counterText || null
+    };
+    """
+
+    private static let billingSummaryExtractionScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const isVisible = (node) => {
+      if (!node || !(node instanceof Element)) {
+        return false;
+      }
+
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number.parseFloat(style.opacity || '1') === 0) {
+        return false;
+      }
+
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+
+    const waitForBodyText = async (timeoutMs = 1600) => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < timeoutMs) {
+        if (normalizeText(document.body?.innerText).length > 0) {
+          return;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    };
+
+    const pushUnique = (collection, value) => {
+      const normalized = normalizeText(value);
+      if (!normalized || collection.includes(normalized)) {
+        return;
+      }
+
+      collection.push(normalized);
+    };
+
+    const buildSnippets = (node) => {
+      if (!node) {
+        return [];
+      }
+
+      const snippets = [];
+      pushUnique(snippets, node.textContent);
+
+      if (!(node instanceof Element)) {
+        return snippets;
+      }
+
+      pushUnique(snippets, node.getAttribute('aria-label'));
+      pushUnique(snippets, node.getAttribute('title'));
+      pushUnique(snippets, node.parentElement?.textContent);
+      pushUnique(snippets, node.previousElementSibling?.textContent);
+      pushUnique(snippets, node.nextElementSibling?.textContent);
+
+      Array.from(node.querySelectorAll('*'))
+        .slice(0, 60)
+        .forEach((child) => {
+          pushUnique(snippets, child.textContent);
+          pushUnique(snippets, child.getAttribute?.('aria-label'));
+          pushUnique(snippets, child.getAttribute?.('title'));
+        });
+
+      return snippets;
+    };
+
+    const parseTotalSpendText = (snippet) => {
+      const normalized = normalizeText(snippet);
+      if (!normalized) {
+        return '';
+      }
+
+      const patterns = [
+        /total\\s+spen[dt][^$\\d-]{0,80}(\\$?\\d[\\d,]*(?:\\.\\d{1,2})?)/i,
+        /(\\$?\\d[\\d,]*(?:\\.\\d{1,2})?)[^$\\d-]{0,40}total\\s+spen[dt]/i
+      ];
+
+      for (const pattern of patterns) {
+        const match = normalized.match(pattern);
+        if (match?.[1]) {
+          return match[1];
+        }
+      }
+
+      return '';
+    };
+
+    await waitForBodyText();
+
+    const accessDenied = document.title.toLowerCase().includes('access denied') || document.body.innerText.includes('Access denied');
+    const candidates = Array.from(document.querySelectorAll('body *'))
+      .filter((node) => isVisible(node) && /total\\s+spen[dt]/i.test(normalizeText(node.textContent)));
+
+    const snippets = candidates.flatMap((node) => buildSnippets(node));
+    pushUnique(snippets, document.body?.innerText);
+
+    let totalSpendText = '';
+    let matchedSnippet = '';
+
+    for (const snippet of snippets) {
+      const parsed = parseTotalSpendText(snippet);
+      if (!parsed) {
+        continue;
+      }
+
+      totalSpendText = parsed;
+      matchedSnippet = snippet;
+      break;
+    }
+
+    return {
+      accessDenied,
+      totalSpendText: totalSpendText || null,
+      matchedSnippet: matchedSnippet || null
+    };
+    """
+
+    private static let legacyReferralExtractionScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const isVisible = (node) => {
+      if (!(node instanceof Element)) {
+        return false;
+      }
+
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number.parseFloat(style.opacity || '1') === 0) {
+        return false;
+      }
+
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+
+    const waitFor = async (timeoutMs = 1600) => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < timeoutMs) {
+        const hasText = normalizeText(document.body?.innerText).length > 0;
+        if (hasText) {
+          return;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    };
+
+    const fetchReferralCount = async (campaignId) => {
+      const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+      if (!csrfToken) {
+        return null;
+      }
+
+      const query = `query ReferralCountByCampaign($campaignId: ID!) {
+        referralCountByCampaign(campaignId: $campaignId)
+      }`;
+
+      try {
+        const response = await fetch('/graphql', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json;charset=UTF-8',
+            'Accept': 'application/json',
+            'X-CSRF-TOKEN': csrfToken,
+            'Accept-Language': document.documentElement.getAttribute('lang') || 'en'
+          },
+          body: JSON.stringify({
+            operationName: 'ReferralCountByCampaign',
+            query,
+            variables: {
+              campaignId
+            }
+          })
+        });
+
+        const rawBody = await response.text();
+        let payload = null;
+        try {
+          payload = JSON.parse(rawBody);
+        } catch {
+          return null;
+        }
+
+        const value = payload?.data?.referralCountByCampaign;
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          return value;
+        }
+
+        const parsed = Number.parseInt(String(value ?? ''), 10);
+        return Number.isFinite(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const pushUnique = (collection, value) => {
+      const normalized = normalizeText(value);
+      if (!normalized || collection.includes(normalized)) {
+        return;
+      }
+
+      collection.push(normalized);
+    };
+
+    const buildSnippets = (node) => {
+      if (!node) {
+        return [];
+      }
+
+      const snippets = [];
+      pushUnique(snippets, node.textContent);
+
+      if (!(node instanceof Element)) {
+        return snippets;
+      }
+
+      pushUnique(snippets, node.getAttribute('aria-label'));
+      pushUnique(snippets, node.getAttribute('title'));
+      pushUnique(snippets, node.parentElement?.textContent);
+
+      Array.from(node.querySelectorAll('*'))
+        .slice(0, 40)
+        .forEach((child) => {
+          pushUnique(snippets, child.textContent);
+          pushUnique(snippets, child.getAttribute?.('aria-label'));
+          pushUnique(snippets, child.getAttribute?.('title'));
+        });
+
+      return snippets;
+    };
+
+    const parseLabeledLegacyCount = (snippet) => {
+      const normalized = normalizeText(snippet);
+      if (!normalized) {
+        return null;
+      }
+
+      const patterns = [
+        /(\\d{1,9}(?:,\\d{3})*)\\D{0,40}citizens?\\s+recruited/i,
+        /citizens?\\s+recruited\\D{0,40}(\\d{1,9}(?:,\\d{3})*)/i
+      ];
+
+      for (const pattern of patterns) {
+        const match = normalized.match(pattern);
+        if (!match?.[1]) {
+          continue;
+        }
+
+        const parsed = Number.parseInt(match[1].replace(/,/g, ''), 10);
+        if (Number.isFinite(parsed)) {
+          return parsed;
+        }
+      }
+
+      return null;
+    };
+
+    const parseCountFromSnippet = (snippet) => {
+      const patterns = [
+        /(\\d{1,9}(?:,\\d{3})*)\\s+(?:citizens?|recruits?|referrals?)\\s+(?:recruited|referred|earned)?/i,
+        /(?:legacy\\s+)?(?:citizens?|recruits?|referrals?|recruitment points?|reward points?)\\D{0,30}(\\d{1,9}(?:,\\d{3})*)/i,
+        /(\\d{1,9}(?:,\\d{3})*)\\D{0,20}(?:legacy\\s+)?(?:recruits?|referrals?|recruitment points?|reward points?)/i
+      ];
+
+      for (const pattern of patterns) {
+        const match = normalizeText(snippet).match(pattern);
+        if (!match?.[1]) {
+          continue;
+        }
+
+        const parsed = Number.parseInt(match[1].replace(/,/g, ''), 10);
+        if (Number.isFinite(parsed)) {
+          return parsed;
+        }
+      }
+
+      return null;
+    };
+
+    const visibleLabelNodes = Array.from(document.querySelectorAll('body *'))
+      .filter((node) => isVisible(node) && /citizens?\\s+recruited/i.test(normalizeText(node.textContent)));
+
+    const targetedContainers = visibleLabelNodes.flatMap((node) => [
+      node,
+      node.parentElement,
+      node.parentElement?.parentElement,
+      node.closest?.('[class*="recruit"], [id*="recruit"], [class*="citizen"], [id*="citizen"], [class*="count"], [id*="count"]')
+    ]).filter(Boolean);
+
+    const targetedSnippets = targetedContainers.flatMap((node) => buildSnippets(node));
+
+    let legacyLadderCount = null;
+    let matchedSnippet = '';
+
+    for (const snippet of targetedSnippets) {
+      const parsed = parseLabeledLegacyCount(snippet);
+      if (parsed === null) {
+        continue;
+      }
+
+      legacyLadderCount = parsed;
+      matchedSnippet = snippet;
+      break;
+    }
+
+    if (legacyLadderCount === null && visibleLabelNodes.length > 0) {
+      for (const labelNode of visibleLabelNodes) {
+        const labelRect = labelNode.getBoundingClientRect();
+        const numericCandidates = Array.from(document.querySelectorAll('body *'))
+          .filter((node) => {
+            if (!isVisible(node)) {
+              return false;
+            }
+
+            const text = normalizeText(node.textContent);
+            return /^\\d{1,9}(?:,\\d{3})*$/.test(text);
+          })
+          .map((node) => ({ node, rect: node.getBoundingClientRect(), text: normalizeText(node.textContent) }))
+          .filter((candidate) => {
+            const horizontalCenter = candidate.rect.left + (candidate.rect.width / 2);
+            return horizontalCenter >= labelRect.left - 120 && horizontalCenter <= labelRect.right + 120;
+          })
+          .sort((lhs, rhs) => {
+            const lhsVerticalDistance = Math.abs((lhs.rect.bottom) - labelRect.top);
+            const rhsVerticalDistance = Math.abs((rhs.rect.bottom) - labelRect.top);
+            return lhsVerticalDistance - rhsVerticalDistance;
+          });
+
+        const bestCandidate = numericCandidates[0];
+        if (!bestCandidate) {
+          continue;
+        }
+
+        const parsed = Number.parseInt(bestCandidate.text.replace(/,/g, ''), 10);
+        if (!Number.isFinite(parsed)) {
+          continue;
+        }
+
+        legacyLadderCount = parsed;
+        matchedSnippet = `${bestCandidate.text} CITIZENS RECRUITED`;
+        break;
+      }
+    }
+
+    await waitFor();
+
+    const accessDenied = document.title.toLowerCase().includes('access denied') || document.body.innerText.includes('Access denied');
+    const bodyText = normalizeText(document.body?.innerText);
+    const title = normalizeText(document.title);
+    const pageUnavailable = /(^|\\b)404(\\b|$)/.test(title) || /page not found/i.test(bodyText);
+    const graphQLCount = pageUnavailable ? null : await fetchReferralCount('1');
+    const candidateNodes = [
+      document.querySelector('.accountReferralRecruitsCount__text'),
+      ...Array.from(document.querySelectorAll('[class*="recruit"], [id*="recruit"], [class*="referral"], [id*="referral"], [class*="count"], [id*="count"]')).slice(0, 120),
+      document.body
+    ];
+
+    if (legacyLadderCount === null) {
+      for (const node of candidateNodes) {
+        for (const snippet of buildSnippets(node)) {
+          const parsed = parseCountFromSnippet(snippet);
+          if (parsed === null) {
+            continue;
+          }
+
+          legacyLadderCount = parsed;
+          matchedSnippet = snippet;
+          break;
+        }
+
+        if (legacyLadderCount !== null) {
+          break;
+        }
+      }
+    }
+
+    return {
+      accessDenied,
+      pageUnavailable,
+      title: title || null,
+      graphQLCount,
+      legacyLadderCount,
+      matchedSnippet: matchedSnippet || null
+    };
+    """
+
     private static let buybackExtractionScript = """
     await new Promise(resolve => setTimeout(resolve, 150));
 
@@ -1179,7 +2767,65 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       return "";
     };
 
-    const pageNumbers = Array.from(document.querySelectorAll('a[href*="page="], button[data-page], [data-page]'))
+    const firstImageURL = (node) => {
+      const candidates = [];
+      const directImage =
+        node?.matches?.('img') ? node :
+        node?.matches?.('picture') ? node.querySelector('img') :
+        null;
+      const image = directImage || node?.querySelector?.('img, picture img');
+      if (image) {
+        candidates.push(
+          image.currentSrc,
+          image.getAttribute('src'),
+          image.getAttribute('data-src'),
+          image.getAttribute('data-original'),
+          image.getAttribute('data-lazy'),
+          image.getAttribute('srcset')?.split(',')[0]?.trim()?.split(' ')[0]
+        );
+      }
+
+      const styledNode =
+        node?.matches?.('[style*="background-image"]') ? node :
+        node?.querySelector?.('[style*="background-image"]');
+      if (styledNode) {
+        const style = styledNode.getAttribute('style') || '';
+        const match = style.match(/url\\((['"]?)(.*?)\\1\\)/i);
+        if (match?.[2]) {
+          candidates.push(match[2]);
+        }
+      }
+
+      for (const candidate of candidates) {
+        if (!candidate) {
+          continue;
+        }
+
+        try {
+          return new URL(candidate, window.location.href).toString();
+        } catch {
+          continue;
+        }
+      }
+
+      return "";
+    };
+
+    const currentPage = (() => {
+      const parsed = Number.parseInt(new URL(window.location.href).searchParams.get('page') || '1', 10);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+    })();
+
+    const isDisabled = (node) => {
+      const nodeIsDisabled = node?.matches?.('[disabled], [aria-disabled="true"]') || false;
+      if (nodeIsDisabled) {
+        return true;
+      }
+
+      return Boolean(node?.classList?.contains('disabled') || node?.closest?.('.disabled'));
+    };
+
+    const paginationTargets = Array.from(document.querySelectorAll('a[href*="page="], button[data-page], [data-page], a[rel="next"], button[rel="next"]'))
       .map((node) => {
         const candidates = [
           node.getAttribute?.('data-page'),
@@ -1205,21 +2851,54 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
           const parsed = Number.parseInt(match[1], 10);
           if (Number.isFinite(parsed) && parsed > 0) {
-            return parsed;
+            return {
+              page: parsed,
+              isNextControl: false,
+              disabled: isDisabled(node)
+            };
           }
         }
 
-        return null;
+        const label = [
+          node.getAttribute?.('aria-label'),
+          node.getAttribute?.('title'),
+          node.textContent,
+          node.getAttribute?.('rel')
+        ]
+          .map((value) => String(value || '').toLowerCase())
+          .join(' ');
+
+        return {
+          page: null,
+          isNextControl: label.includes('next'),
+          disabled: isDisabled(node)
+        };
       })
+      .filter((value) => value !== null);
+
+    const pageNumbers = paginationTargets
+      .map((target) => target.page)
       .filter((value) => Number.isFinite(value));
 
     const accessDenied = document.title.toLowerCase().includes('access denied') || document.body.innerText.includes('Access denied');
     const articles = Array.from(document.querySelectorAll('article.pledge'));
+    const hasNextPage = paginationTargets.some((target) => {
+      if (target.disabled) {
+        return false;
+      }
+
+      if (Number.isFinite(target.page)) {
+        return target.page > currentPage;
+      }
+
+      return target.isNextControl;
+    });
 
     return {
       accessDenied,
       title: document.title,
       totalPages: pageNumbers.length ? Math.max(...pageNumbers) : null,
+      hasNextPage,
       items: articles.map((article) => {
         const button = article.querySelector('.holosmallbtn, a[href*="/pledge/buyback/"]');
         const href = button?.getAttribute('href') || '';
@@ -1234,18 +2913,64 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
           title: firstText(article, ['.information h1', 'h1', 'h2']),
           dateText: definitionValues[0] || '',
           containsText: definitionValues[2] || firstText(article, ['.information .contains']),
-          valueText: firstText(article, ['.price', '.value', '.cost'])
+          valueText: firstText(article, ['.price', '.value', '.cost']),
+          imageURL: firstImageURL(article.querySelector('.image, .thumb, .thumbnail, picture, img') || article)
         };
       })
     };
     """
 }
 
+enum RSIStoreCreditParser {
+    static func parseStructuredMinorUnits(_ rawValue: String) -> Decimal? {
+        guard let value = parseDecimal(rawValue) else {
+            return nil
+        }
+
+        return value / 100
+    }
+
+    static func parseCurrencyText(_ rawValue: String) -> Decimal? {
+        parseDecimal(rawValue)
+    }
+
+    private static func parseDecimal(_ rawValue: String) -> Decimal? {
+        let sanitized = rawValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(
+                of: #"[^0-9\.-]"#,
+                with: "",
+                options: .regularExpression
+            )
+
+        guard !sanitized.isEmpty else {
+            return nil
+        }
+
+        return Decimal(string: sanitized, locale: Locale(identifier: "en_US_POSIX"))
+    }
+}
+
+private struct AccountOverview {
+    let storeCreditUSD: Decimal?
+    let totalSpendUSD: Decimal?
+    let avatarURL: URL?
+    let primaryOrganization: AccountOrganization?
+    let didRefreshPrimaryOrganization: Bool
+}
+
 private nonisolated struct RemotePledgePage: Decodable {
     let accessDenied: Bool
     let title: String
     let totalPages: Int?
+    let hasNextPage: Bool?
     let items: [RemotePledge]
+
+    var pageSignature: String {
+        items
+            .map(\.pageSignature)
+            .joined(separator: "|")
+    }
 }
 
 private nonisolated struct RemotePledge: Decodable {
@@ -1255,11 +2980,27 @@ private nonisolated struct RemotePledge: Decodable {
     let dateText: String
     let valueText: String
     let containsText: String
+    let thumbnailImageURL: String?
     let alsoContains: [String]
     let canGift: Bool
     let canReclaim: Bool
     let canUpgrade: Bool
     let items: [RemotePledgeItem]
+
+    var pageSignature: String {
+        [
+            id.map(String.init) ?? "nil",
+            title,
+            statusText,
+            dateText,
+            valueText,
+            containsText,
+            alsoContains.joined(separator: ","),
+            canGift ? "gift" : "locked",
+            canReclaim ? "reclaim" : "keep",
+            canUpgrade ? "upgrade" : "fixed"
+        ].joined(separator: "•")
+    }
 }
 
 private nonisolated struct RemotePledgeItem: Decodable {
@@ -1278,6 +3019,86 @@ private nonisolated struct RemoteShipCatalogPayload: Decodable {
     let ships: [RemoteStoreShip]
 }
 
+private nonisolated struct RemoteAccountBalances: Decodable {
+    let accessDenied: Bool
+    let graphQLStoreCreditValue: String?
+    let storeCreditText: String?
+    let avatarURL: String?
+}
+
+private nonisolated struct RemotePrimaryOrganization: Decodable {
+    let accessDenied: Bool
+    let pageUnavailable: Bool
+    let organizationName: String?
+    let organizationRank: String?
+
+    var organization: AccountOrganization? {
+        guard let organizationName = organizationName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !organizationName.isEmpty else {
+            return nil
+        }
+
+        let normalizedRank = organizationRank?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return AccountOrganization(
+            name: organizationName,
+            rank: normalizedRank?.isEmpty == false ? normalizedRank : nil
+        )
+    }
+}
+
+private nonisolated struct RemoteBillingSummary: Decodable {
+    let accessDenied: Bool
+    let totalSpendText: String?
+    let matchedSnippet: String?
+}
+
+private nonisolated struct RemoteReferralOverview: Decodable {
+    let accessDenied: Bool
+    let campaignId: String
+    let currentLadderCount: Int?
+    let counterText: String?
+}
+
+private nonisolated struct RemoteLegacyReferralPage: Decodable {
+    let accessDenied: Bool
+    let pageUnavailable: Bool
+    let title: String?
+    let graphQLCount: Int?
+    let legacyLadderCount: Int?
+    let matchedSnippet: String?
+}
+
+private nonisolated struct AccountRefreshContext {
+    let avatarURL: URL?
+    let primaryOrganization: AccountOrganization?
+    let storeCreditUSD: Decimal?
+    let totalSpendUSD: Decimal?
+    let referralStats: ReferralStats
+    let didRefreshAccountOverview: Bool
+    let didRefreshPrimaryOrganization: Bool
+    let didRefreshReferralStats: Bool
+}
+
+private nonisolated struct PrimaryOrganizationOverview {
+    let organization: AccountOrganization?
+    let didRefreshPrimaryOrganization: Bool
+}
+
+enum ReferralStatsResolver {
+    static func resolve(
+        currentLadderCount: Int?,
+        legacyGraphQLCount: Int?,
+        legacyParsedCount: Int?,
+        legacyPageUnavailable: Bool
+    ) -> ReferralStats {
+        ReferralStats(
+            currentLadderCount: currentLadderCount,
+            legacyLadderCount: legacyPageUnavailable ? nil : (legacyGraphQLCount ?? legacyParsedCount),
+            hasLegacyLadder: !legacyPageUnavailable
+        )
+    }
+}
+
 private nonisolated struct RemoteStoreShip: Decodable {
     let id: Int
     let name: String
@@ -1289,7 +3110,14 @@ private nonisolated struct RemoteBuybackPage: Decodable {
     let accessDenied: Bool
     let title: String
     let totalPages: Int?
+    let hasNextPage: Bool?
     let items: [RemoteBuybackPledge]
+
+    var pageSignature: String {
+        items
+            .map(\.pageSignature)
+            .joined(separator: "|")
+    }
 }
 
 private nonisolated struct RemoteBuybackPledge: Decodable {
@@ -1298,6 +3126,18 @@ private nonisolated struct RemoteBuybackPledge: Decodable {
     let dateText: String
     let containsText: String
     let valueText: String
+    let imageURL: String?
+
+    var pageSignature: String {
+        [
+            id.map(String.init) ?? "nil",
+            title,
+            dateText,
+            containsText,
+            valueText,
+            imageURL ?? ""
+        ].joined(separator: "•")
+    }
 }
 
 private extension String {

@@ -1,4 +1,4 @@
-# Hanger Express Architecture
+# Hangar Express Architecture
 
 ## Product Goal
 
@@ -21,7 +21,7 @@ The Android app at `summerkirakira/Starcitizen-lite` is useful as a feature inve
 ## Recommended Module Layout
 
 ```text
-Hanger Express/
+Hangar Express/
   App/
     AppEnvironment.swift
     AppModel.swift

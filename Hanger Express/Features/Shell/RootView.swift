@@ -49,6 +49,8 @@ struct RootView: View {
     private var fallbackProgress: RefreshProgress {
         RefreshProgress(
             stage: .preparingSession,
+            stepNumber: 1,
+            stepCount: 4,
             detail: "Starting the hangar refresh.",
             completedUnitCount: 0,
             totalUnitCount: nil
