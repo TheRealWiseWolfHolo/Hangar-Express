@@ -5,9 +5,20 @@ struct HangarDashboardView: View {
         case all = "All"
         case giftable = "Giftable"
         case reclaimable = "Reclaimable"
-        case upgradeable = "Upgradeable"
 
         var id: Self { self }
+    }
+
+    enum SearchFilter: String, CaseIterable, Identifiable {
+        case lti = "LTI"
+        case upgrades = "Upgrades"
+        case packages = "Packages"
+
+        var id: Self { self }
+
+        var title: String {
+            rawValue
+        }
     }
 
     let appModel: AppModel
@@ -15,32 +26,12 @@ struct HangarDashboardView: View {
 
     @State private var filter: PackageFilter = .all
     @State private var searchText = ""
+    @State private var searchFilters: Set<SearchFilter> = []
+    @State private var isSearchPresented = false
 
     var body: some View {
         NavigationStack {
             List {
-                Section {
-                    MetricCard(
-                        title: "Packages",
-                        primaryValue: "\(snapshot.metrics.packageCount)",
-                        secondaryValue: "Ships \(snapshot.metrics.shipCount)"
-                    )
-
-                    MetricCard(
-                        title: "Value",
-                        primaryValue: snapshot.metrics.totalOriginalValue.usdString,
-                        secondaryValue: "Current \(snapshot.metrics.totalCurrentValue.usdString)"
-                    )
-
-                    MetricCard(
-                        title: "Actions",
-                        primaryValue: "Giftable \(snapshot.metrics.giftableCount)",
-                        secondaryValue: "Reclaimable \(snapshot.metrics.reclaimableCount)"
-                    )
-                } header: {
-                    Text("Snapshot")
-                }
-
                 Section {
                     Picker("Filter", selection: $filter) {
                         ForEach(PackageFilter.allCases) { option in
@@ -50,50 +41,72 @@ struct HangarDashboardView: View {
                     .pickerStyle(.segmented)
                 }
 
-                Section {
-                    ForEach(filteredPackages) { package in
-                        NavigationLink {
-                            HangarPackageDetailView(package: package)
-                        } label: {
-                            HStack(alignment: .top, spacing: 12) {
-                                RemoteThumbnailView(
-                                    url: package.thumbnailURL,
-                                    fallbackSystemImage: "shippingbox.fill",
-                                    size: 72
-                                )
-
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text(package.title)
-                                        .font(.headline)
-                                    Text("\(package.status) • \(package.insurance)")
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
-
-                                    HStack {
-                                        Text(package.originalValueUSD.usdString)
-                                        Text(package.canGift ? "Giftable" : "Locked")
-                                        Text(package.canReclaim ? "Reclaimable" : "No Melt")
+                if isSearchPresented {
+                    Section {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 10) {
+                                ForEach(SearchFilter.allCases) { searchFilter in
+                                    Button {
+                                        toggle(searchFilter)
+                                    } label: {
+                                        Text(searchFilter.title)
+                                            .font(.subheadline.weight(.medium))
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 8)
+                                            .foregroundStyle(searchFilters.contains(searchFilter) ? Color.white : Color.accentColor)
+                                            .background(
+                                                Capsule(style: .continuous)
+                                                    .fill(searchFilters.contains(searchFilter) ? Color.accentColor : Color.accentColor.opacity(0.12))
+                                            )
                                     }
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .buttonStyle(.plain)
                                 }
                             }
                             .padding(.vertical, 4)
                         }
+                    } header: {
+                        Text("Common Search Filters")
+                    } footer: {
+                        Text("Packages only includes pledges with more than one ship or vehicle.")
+                    }
+                }
+
+                Section {
+                    ForEach(filteredPackageGroups) { packageGroup in
+                        NavigationLink {
+                            HangarPackageDetailView(
+                                packageGroup: packageGroup,
+                                reloadToken: appModel.imageReloadToken
+                            )
+                        } label: {
+                            HangarPackageGroupRow(
+                                packageGroup: packageGroup,
+                                reloadToken: appModel.imageReloadToken
+                            )
+                        }
                     }
                 } header: {
                     Text("Pledges")
-                } footer: {
-                    Text("This screen should stay read-only in v1, even after live RSI sync is enabled.")
                 }
             }
-            .searchable(text: $searchText, prompt: "Search packages, ships, insurance")
+            .searchable(
+                text: $searchText,
+                isPresented: $isSearchPresented,
+                prompt: "Search packages, ships, insurance"
+            )
+            .onChange(of: isSearchPresented) { _, isPresented in
+                guard !isPresented else {
+                    return
+                }
+
+                searchFilters.removeAll()
+            }
             .navigationTitle("Hangar")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(appModel.isRefreshing ? "Refreshing..." : "Refresh") {
+                    Button(appModel.isRefreshing(.hangar) ? "Refreshing..." : "Refresh") {
                         Task {
-                            await appModel.refresh()
+                            await appModel.refresh(scope: .hangar)
                         }
                     }
                     .disabled(appModel.isRefreshing)
@@ -102,8 +115,9 @@ struct HangarDashboardView: View {
         }
     }
 
-    private var filteredPackages: [HangarPackage] {
-        snapshot.packages.filter { package in
+    private var filteredPackageGroups: [GroupedHangarPackage] {
+        snapshot.packages.groupedForInventoryDisplay.filter { packageGroup in
+            let package = packageGroup.representative
             let matchesFilter: Bool
             switch filter {
             case .all:
@@ -112,11 +126,13 @@ struct HangarDashboardView: View {
                 matchesFilter = package.canGift
             case .reclaimable:
                 matchesFilter = package.canReclaim
-            case .upgradeable:
-                matchesFilter = package.canUpgrade
             }
 
             guard matchesFilter else {
+                return false
+            }
+
+            guard matchesSearchFilters(for: package) else {
                 return false
             }
 
@@ -127,17 +143,107 @@ struct HangarDashboardView: View {
             let haystack = [
                 package.title,
                 package.status,
-                package.insurance,
+                package.searchableInsuranceText,
                 package.contents.map(\.title).joined(separator: " ")
             ].joined(separator: " ").localizedLowercase
 
             return haystack.contains(searchText.localizedLowercase)
         }
     }
+
+    private func matchesSearchFilters(for package: HangarPackage) -> Bool {
+        searchFilters.allSatisfy { searchFilter in
+            switch searchFilter {
+            case .lti:
+                return package.hasLifetimeInsurance
+            case .upgrades:
+                return package.hasUpgradeItems
+            case .packages:
+                return package.isMultiShipPackage
+            }
+        }
+    }
+
+    private func toggle(_ searchFilter: SearchFilter) {
+        if searchFilters.contains(searchFilter) {
+            searchFilters.remove(searchFilter)
+        } else {
+            searchFilters.insert(searchFilter)
+        }
+    }
+}
+
+private struct HangarPackageGroupRow: View {
+    let packageGroup: GroupedHangarPackage
+    let reloadToken: UUID?
+
+    private var package: HangarPackage {
+        packageGroup.representative
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            RemoteThumbnailView(
+                url: package.thumbnailURL,
+                reloadToken: reloadToken,
+                fallbackSystemImage: "shippingbox.fill",
+                size: 72
+            )
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(package.title)
+                        .font(.headline)
+
+                    if packageGroup.containsMultipleCopies {
+                        Text("x\(packageGroup.quantity)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(Color.accentColor.opacity(0.14))
+                            )
+                    }
+                }
+
+                Text(statusSummary)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Text(valueSummary)
+                    Text(package.canGift ? "Giftable" : "Locked")
+                    Text(package.canReclaim ? "Reclaimable" : "No Melt")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var valueSummary: String {
+        packageGroup.containsMultipleCopies ? "Each \(package.originalValueUSD.usdString)" : package.originalValueUSD.usdString
+    }
+
+    private var statusSummary: String {
+        if let displayedInsurance = package.displayedInsurance {
+            return "\(package.status) • \(displayedInsurance)"
+        }
+
+        return package.status
+    }
 }
 
 private struct HangarPackageDetailView: View {
-    let package: HangarPackage
+    let packageGroup: GroupedHangarPackage
+    let reloadToken: UUID?
+
+    private var package: HangarPackage {
+        packageGroup.representative
+    }
 
     var body: some View {
         List {
@@ -145,6 +251,7 @@ private struct HangarPackageDetailView: View {
                 Section {
                     RemoteThumbnailView(
                         url: thumbnailURL,
+                        reloadToken: reloadToken,
                         fallbackSystemImage: "shippingbox.fill",
                         size: 180
                     )
@@ -155,17 +262,25 @@ private struct HangarPackageDetailView: View {
 
             Section {
                 LabeledContent("Status", value: package.status)
-                LabeledContent("Insurance", value: package.insurance)
+                if let detailInsuranceText = package.detailInsuranceText {
+                    LabeledContent("Insurance", value: detailInsuranceText)
+                }
                 LabeledContent("Acquired", value: package.acquiredAt.formatted(date: .abbreviated, time: .omitted))
-                LabeledContent("Original Value", value: package.originalValueUSD.usdString)
-                LabeledContent("Current Value", value: package.currentValueUSD.usdString)
+                LabeledContent(originalValueLabel, value: package.originalValueUSD.usdString)
+                LabeledContent(currentValueLabel, value: package.currentValueUSD.usdString)
+                if packageGroup.containsMultipleCopies {
+                    LabeledContent("Copies", value: "\(packageGroup.quantity)")
+                }
             } header: {
                 Text("Package")
             }
 
             Section {
                 ForEach(package.contents) { item in
-                    PackageItemRow(item: item)
+                    PackageItemRow(
+                        item: item,
+                        reloadToken: reloadToken
+                    )
                 }
             } header: {
                 Text("Contents")
@@ -174,15 +289,25 @@ private struct HangarPackageDetailView: View {
         .navigationTitle(package.title)
         .navigationBarTitleDisplayMode(.inline)
     }
+
+    private var originalValueLabel: String {
+        packageGroup.containsMultipleCopies ? "Melt Value (Each)" : "Melt Value"
+    }
+
+    private var currentValueLabel: String {
+        packageGroup.containsMultipleCopies ? "Current Value (Each)" : "Current Value"
+    }
 }
 
 private struct PackageItemRow: View {
     let item: PackageItem
+    let reloadToken: UUID?
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             RemoteThumbnailView(
                 url: item.imageURL,
+                reloadToken: reloadToken,
                 fallbackSystemImage: fallbackSystemImage,
                 size: 72
             )
@@ -258,10 +383,23 @@ private struct LabeledValueRow: View {
     }
 }
 
-private struct RemoteThumbnailView: View {
+struct RemoteThumbnailView: View {
     let url: URL?
+    let reloadToken: UUID?
     let fallbackSystemImage: String
     let size: CGFloat
+
+    init(
+        url: URL?,
+        reloadToken: UUID? = nil,
+        fallbackSystemImage: String,
+        size: CGFloat
+    ) {
+        self.url = url
+        self.reloadToken = reloadToken
+        self.fallbackSystemImage = fallbackSystemImage
+        self.size = size
+    }
 
     var body: some View {
         ZStack {
@@ -269,7 +407,7 @@ private struct RemoteThumbnailView: View {
                 .fill(Color(.secondarySystemBackground))
 
             if let url {
-                AsyncImage(url: url) { phase in
+                CachedRemoteImage(url: url, reloadToken: reloadToken) { phase in
                     switch phase {
                     case let .success(image):
                         image
@@ -279,8 +417,6 @@ private struct RemoteThumbnailView: View {
                         fallback
                     case .empty:
                         ProgressView()
-                    @unknown default:
-                        fallback
                     }
                 }
             } else {
@@ -295,27 +431,5 @@ private struct RemoteThumbnailView: View {
         Image(systemName: fallbackSystemImage)
             .font(.title2)
             .foregroundStyle(.secondary)
-    }
-}
-
-private struct MetricCard: View {
-    let title: String
-    let primaryValue: String
-    let secondaryValue: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(primaryValue)
-                .font(.headline)
-                .monospacedDigit()
-            Text(secondaryValue)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 4)
     }
 }

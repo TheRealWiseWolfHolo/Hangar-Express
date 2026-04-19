@@ -12,23 +12,23 @@ struct DashboardTabView: View {
                 }
                 .tag(AppModel.Tab.hangar)
 
-            FleetView(snapshot: snapshot)
+            FleetView(appModel: appModel, snapshot: snapshot)
                 .tabItem {
                     Label("Fleet", systemImage: "airplane")
                 }
                 .tag(AppModel.Tab.fleet)
 
-            BuybackView(snapshot: snapshot)
+            BuybackView(appModel: appModel, snapshot: snapshot)
                 .tabItem {
                     Label("Buy Back", systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90")
                 }
                 .tag(AppModel.Tab.buyback)
 
-            SettingsView(appModel: appModel, snapshot: snapshot)
+            AccountView(appModel: appModel, snapshot: snapshot)
                 .tabItem {
-                    Label("Settings", systemImage: "gearshape")
+                    Label("Account", systemImage: "person.crop.circle")
                 }
-                .tag(AppModel.Tab.settings)
+                .tag(AppModel.Tab.account)
         }
         .safeAreaInset(edge: .top) {
             if let progress = appModel.refreshProgress {
@@ -39,6 +39,31 @@ struct DashboardTabView: View {
             }
         }
         .animation(.snappy, value: appModel.refreshProgress)
+        .alert(item: dashboardAlert) { alert in
+            switch alert {
+            case let .reauthentication(prompt):
+                return Alert(
+                    title: Text(prompt.title),
+                    message: Text(prompt.message),
+                    primaryButton: .default(Text("Sign In Again")) {
+                        Task {
+                            await appModel.beginReauthentication()
+                        }
+                    },
+                    secondaryButton: .cancel(Text("Later")) {
+                        appModel.dismissReauthenticationPrompt()
+                    }
+                )
+            case let .refreshFailure(message):
+                return Alert(
+                    title: Text("Refresh Failed"),
+                    message: Text(message),
+                    dismissButton: .cancel(Text("OK")) {
+                        appModel.dismissRefreshError()
+                    }
+                )
+            }
+        }
     }
 
     private var selection: Binding<AppModel.Tab> {
@@ -46,5 +71,46 @@ struct DashboardTabView: View {
             get: { appModel.selectedTab },
             set: { appModel.selectedTab = $0 }
         )
+    }
+
+    private var dashboardAlert: Binding<DashboardAlert?> {
+        Binding(
+            get: {
+                if let prompt = appModel.reauthenticationPrompt {
+                    return .reauthentication(prompt)
+                }
+
+                if let message = appModel.lastRefreshErrorMessage {
+                    return .refreshFailure(message)
+                }
+
+                return nil
+            },
+            set: { alert in
+                guard alert == nil else {
+                    return
+                }
+
+                if appModel.reauthenticationPrompt != nil {
+                    appModel.dismissReauthenticationPrompt()
+                } else {
+                    appModel.dismissRefreshError()
+                }
+            }
+        )
+    }
+}
+
+private enum DashboardAlert: Identifiable {
+    case reauthentication(AppModel.ReauthenticationPrompt)
+    case refreshFailure(String)
+
+    var id: String {
+        switch self {
+        case let .reauthentication(prompt):
+            return "reauth:\(prompt.id.uuidString)"
+        case let .refreshFailure(message):
+            return "refresh:\(message)"
+        }
     }
 }

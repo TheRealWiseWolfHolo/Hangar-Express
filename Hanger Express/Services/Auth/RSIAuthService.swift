@@ -214,10 +214,28 @@ actor RSIAuthService: AuthenticationServicing {
             email: account.email ?? credentials.loginIdentifier,
             authMode: .rsiNativeLogin,
             notes: "Credentials and RSI cookies were stored in Keychain for future account actions.",
+            avatarURL: normalizedRSIURL(from: account.avatar),
             credentials: credentials,
             cookies: cookies,
             createdAt: .now
         )
+    }
+
+    private func normalizedRSIURL(from rawValue: String?) -> URL? {
+        guard let trimmedValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmedValue.isEmpty else {
+            return nil
+        }
+
+        if trimmedValue.hasPrefix("//") {
+            return URL(string: "https:\(trimmedValue)")
+        }
+
+        if trimmedValue.hasPrefix("/") {
+            return URL(string: "https://robertsspaceindustries.com\(trimmedValue)")
+        }
+
+        return URL(string: trimmedValue)
     }
 
     private func presentableMessage(for errors: [GraphQLError], context: FailureContext, fallback: String) -> String {
@@ -332,6 +350,7 @@ private nonisolated struct GraphQLResponse: Decodable {
         }
 
         return AuthenticatedAccount(
+            avatar: account["avatar"]?.stringValue,
             displayname: account["displayname"]?.stringValue,
             email: account["email"]?.stringValue,
             username: account["username"]?.stringValue
@@ -414,6 +433,7 @@ private nonisolated struct GraphQLErrorExtensions: Decodable {
 }
 
 private nonisolated struct AuthenticatedAccount: Sendable {
+    let avatar: String?
     let displayname: String?
     let email: String?
     let username: String?

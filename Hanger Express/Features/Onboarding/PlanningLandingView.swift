@@ -5,5 +5,6 @@ struct PlanningLandingView: View {
 
     var body: some View {
         AuthenticationFlowView(appModel: appModel)
+            .id(appModel.authenticationFlowID)
     }
 }

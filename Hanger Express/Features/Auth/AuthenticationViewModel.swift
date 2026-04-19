@@ -18,6 +18,7 @@ final class AuthenticationViewModel {
     var verificationCode = ""
     var deviceName = UIDevice.current.name
     var trustDuration: TrustedDeviceDuration = .year
+    var noticeMessage: String?
     var errorMessage: String?
     var errorDebugDetails: String?
     var isSubmitting = false
@@ -28,6 +29,17 @@ final class AuthenticationViewModel {
     init(appModel: AppModel) {
         self.appModel = appModel
         authService = appModel.authService
+
+        if let draft = appModel.consumePendingAuthenticationDraft() {
+            loginIdentifier = draft.loginIdentifier
+            password = draft.password
+            rememberMe = draft.rememberMe
+            noticeMessage = draft.notice
+        }
+    }
+
+    func updateVerificationCode(_ code: String) {
+        verificationCode = Self.normalizedVerificationCode(code)
     }
 
     func submitCredentials() async {
@@ -35,7 +47,7 @@ final class AuthenticationViewModel {
             return
         }
 
-        clearError()
+        clearMessages()
         isSubmitting = true
         defer { isSubmitting = false }
 
@@ -64,7 +76,8 @@ final class AuthenticationViewModel {
             return
         }
 
-        clearError()
+        clearMessages()
+        verificationCode = Self.normalizedVerificationCode(verificationCode)
         isSubmitting = true
         defer { isSubmitting = false }
 
@@ -84,7 +97,7 @@ final class AuthenticationViewModel {
     }
 
     func returnToSignIn() {
-        clearError()
+        clearMessages()
         verificationCode = ""
         step = .signIn
 
@@ -103,9 +116,18 @@ final class AuthenticationViewModel {
         errorDebugDetails = presentation.debugDetails
     }
 
-    private func clearError() {
+    private func clearMessages() {
+        noticeMessage = nil
         errorMessage = nil
         errorDebugDetails = nil
+    }
+
+    nonisolated static func normalizedVerificationCode(_ code: String) -> String {
+        let filteredScalars = code.unicodeScalars.filter { scalar in
+            scalar.isASCII && (CharacterSet.alphanumerics.contains(scalar))
+        }
+
+        return String(String.UnicodeScalarView(filteredScalars)).uppercased()
     }
 }
 

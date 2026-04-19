@@ -5,6 +5,7 @@ nonisolated enum RefreshStage: Hashable, Sendable {
     case preparingSession
     case pledges
     case buyback
+    case account
     case finalizing
 
     var title: String {
@@ -17,38 +18,18 @@ nonisolated enum RefreshStage: Hashable, Sendable {
             return "Refreshing hangar pledges"
         case .buyback:
             return "Refreshing buy-back pledges"
+        case .account:
+            return "Refreshing account overview"
         case .finalizing:
             return "Organizing your inventory"
-        }
-    }
-
-    var stepNumber: Int {
-        switch self {
-        case .preview:
-            return 1
-        case .preparingSession:
-            return 1
-        case .pledges:
-            return 2
-        case .buyback:
-            return 3
-        case .finalizing:
-            return 4
-        }
-    }
-
-    var stepCount: Int {
-        switch self {
-        case .preview:
-            return 1
-        case .preparingSession, .pledges, .buyback, .finalizing:
-            return 4
         }
     }
 }
 
 nonisolated struct RefreshProgress: Hashable, Sendable {
     let stage: RefreshStage
+    let stepNumber: Int
+    let stepCount: Int
     let detail: String
     let completedUnitCount: Int
     let totalUnitCount: Int?
@@ -63,7 +44,7 @@ nonisolated struct RefreshProgress: Hashable, Sendable {
     }
 
     var stepLabel: String {
-        "Step \(stage.stepNumber) of \(stage.stepCount)"
+        "Step \(stepNumber) of \(stepCount)"
     }
 }
 
@@ -72,6 +53,24 @@ typealias RefreshProgressHandler = @MainActor @Sendable (RefreshProgress) -> Voi
 protocol HangarRepository: Sendable {
     func fetchSnapshot(
         for session: UserSession,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot
+
+    func refreshHangarData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot
+
+    func refreshBuybackData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot
+
+    func refreshAccountData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
         progress: @escaping RefreshProgressHandler
     ) async throws -> HangarSnapshot
 }
