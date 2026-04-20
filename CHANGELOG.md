@@ -10,6 +10,7 @@
 
 ### Fixed
 - Stopped Fleet from silently dropping unmatched ship entries when the hosted catalog cannot identify an exact ship variant, which restores missing capitals like some Idris pledges.
+- Improved legacy fleet ship matching so older RSI names like `Idris-M Frigate`, `Idris-P Frigate`, `Mk1`, and older Hornet variants that omit `Super` now resolve to hosted MSRP, thumbnails, and full manufacturer names when the catalog has them.
 - Changed `Clear Local Cache` to warn that a full reload is required, then clear cached snapshots and images before immediately rebuilding the live account data.
 - Changed expired or missing RSI session cookies to trigger a dedicated re-login flow instead of a generic refresh failure, while keeping cached data visible when possible.
 

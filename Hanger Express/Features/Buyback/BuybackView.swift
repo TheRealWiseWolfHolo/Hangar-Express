@@ -52,7 +52,7 @@ struct BuybackView: View {
                     ForEach(filteredItemGroups) { itemGroup in
                         BuybackGroupRow(
                             itemGroup: itemGroup,
-                            reloadToken: appModel.imageReloadToken
+                            reloadToken: appModel.buybackImageReloadToken
                         )
                     }
                 }

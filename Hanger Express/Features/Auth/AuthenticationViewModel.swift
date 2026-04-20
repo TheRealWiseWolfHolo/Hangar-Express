@@ -11,6 +11,13 @@ final class AuthenticationViewModel {
         case twoFactor
     }
 
+    struct BrowserChallenge: Identifiable, Hashable {
+        let id = UUID()
+        let message: String
+        let loginIdentifier: String
+        let password: String
+    }
+
     var step: Step = .signIn
     var loginIdentifier = ""
     var password = ""
@@ -21,6 +28,7 @@ final class AuthenticationViewModel {
     var noticeMessage: String?
     var errorMessage: String?
     var errorDebugDetails: String?
+    var browserChallenge: BrowserChallenge?
     var isSubmitting = false
 
     private let appModel: AppModel
@@ -42,7 +50,7 @@ final class AuthenticationViewModel {
         verificationCode = Self.normalizedVerificationCode(code)
     }
 
-    func submitCredentials() async {
+    func submitCredentials(forceBrowserLogin: Bool = false) async {
         guard !isSubmitting else {
             return
         }
@@ -55,7 +63,8 @@ final class AuthenticationViewModel {
             let result = try await authService.signIn(
                 loginIdentifier: loginIdentifier,
                 password: password,
-                rememberMe: rememberMe
+                rememberMe: rememberMe,
+                forceBrowserLogin: forceBrowserLogin
             )
 
             switch result {
@@ -65,8 +74,23 @@ final class AuthenticationViewModel {
             case .requiresTwoFactor:
                 step = .twoFactor
                 verificationCode = ""
+            case let .requiresBrowserChallenge(message):
+                browserChallenge = BrowserChallenge(
+                    message: message,
+                    loginIdentifier: loginIdentifier,
+                    password: password
+                )
             }
         } catch {
+            if case let AuthenticationError.requiresBrowserChallenge(message) = error {
+                browserChallenge = BrowserChallenge(
+                    message: message,
+                    loginIdentifier: loginIdentifier,
+                    password: password
+                )
+                return
+            }
+
             showError(error)
         }
     }
@@ -92,7 +116,65 @@ final class AuthenticationViewModel {
             verificationCode = ""
             await appModel.completeAuthentication(session)
         } catch {
+            if case let AuthenticationError.requiresBrowserChallenge(message) = error {
+                browserChallenge = BrowserChallenge(
+                    message: message,
+                    loginIdentifier: loginIdentifier,
+                    password: password
+                )
+                return
+            }
+
             showError(error)
+        }
+    }
+
+    func finishBrowserChallengeUsingCachedCookies(trustBrowserSession: Bool) async -> String? {
+        guard !isSubmitting else {
+            return "Hangar Express is already finishing the current sign-in attempt."
+        }
+
+        clearMessages()
+        isSubmitting = true
+        defer { isSubmitting = false }
+
+        do {
+            appModel.authDiagnostics.record(
+                stage: "auth.browser-handoff",
+                summary: "Finishing the in-app browser sign-in using the latest cookie export already cached by Hangar Express.",
+                detail: "cookieSource=auth.browser-cache"
+            )
+            let session = try await authService.completeBrowserAuthentication(
+                cookies: [],
+                trustBrowserSession: trustBrowserSession
+            )
+            browserChallenge = nil
+            password = ""
+            verificationCode = ""
+            await appModel.completeAuthentication(session)
+            return nil
+        } catch {
+            let presentation = AuthenticationDebugFormatter.present(error)
+            errorMessage = presentation.message
+            errorDebugDetails = presentation.debugDetails
+            if let debugDetails = presentation.debugDetails {
+                return """
+                \(presentation.message)
+
+                \(debugDetails)
+                """
+            }
+            return presentation.message
+        }
+    }
+
+    func cancelBrowserChallenge() {
+        browserChallenge = nil
+        verificationCode = ""
+        step = .signIn
+
+        Task {
+            await authService.cancelPendingAuthentication()
         }
     }
 

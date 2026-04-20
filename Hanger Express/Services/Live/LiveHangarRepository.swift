@@ -6,10 +6,20 @@ final class LiveHangarRepository: HangarRepository {
     private let browser = RSIAccountPageBrowser()
     private let shipCatalogClient = HostedShipCatalogClient()
     private let previewRepository = PreviewHangarRepository()
+    private let maxHangarLogEntries = 500
     private let pledgePageSize = 50
     private let buybackPageSize = 100
     private let maxPledgePages = 200
     private let maxBuybackPages = 100
+
+    private var syncWorkerCount: Int {
+        let configuredValue = UserDefaults.standard.integer(forKey: SyncPreferences.workerCountKey)
+        let fallbackValue = configuredValue == 0 ? SyncPreferences.defaultWorkerCount : configuredValue
+        return min(
+            max(fallbackValue, SyncPreferences.minWorkerCount),
+            SyncPreferences.maxWorkerCount
+        )
+    }
 
     func fetchSnapshot(
         for session: UserSession,
@@ -20,30 +30,36 @@ final class LiveHangarRepository: HangarRepository {
         }
 
         try validate(session: session)
-        progress(preparationProgress(for: session, stepNumber: 1, stepCount: 4))
+        progress(preparationProgress(for: session, stepNumber: 1, stepCount: 5))
 
         let remotePledges = try await fetchRemotePledges(
             using: session.cookies,
             progress: progress,
             stepNumber: 2,
-            stepCount: 4
+            stepCount: 5
         )
         let remoteBuyback = try await fetchRemoteBuyback(
             using: session.cookies,
             progress: progress,
             stepNumber: 3,
-            stepCount: 4
+            stepCount: 5
+        )
+        let hangarLogs = try await fetchRemoteHangarLogs(
+            using: session.cookies,
+            progress: progress,
+            stepNumber: 4,
+            stepCount: 5
         )
         let shipCatalog = await fetchHostedShipCatalog(
             progress: progress,
-            stepNumber: 4,
-            stepCount: 4
+            stepNumber: 5,
+            stepCount: 5
         )
         let accountContext = try await fetchAccountContext(
             for: session,
             progress: progress,
-            stepNumber: 4,
-            stepCount: 4
+            stepNumber: 5,
+            stepCount: 5
         )
 
         let packages = remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) }
@@ -53,9 +69,9 @@ final class LiveHangarRepository: HangarRepository {
         progress(
             makeProgress(
                 stage: .finalizing,
-                stepNumber: 4,
-                stepCount: 4,
-                detail: "Organized \(remotePledges.count) pledges and \(remoteBuyback.count) buy-back items.",
+                stepNumber: 5,
+                stepCount: 5,
+                detail: "Organized \(remotePledges.count) pledges, \(remoteBuyback.count) buy-back items, and \(hangarLogs.count) hangar log entries.",
                 completedUnitCount: 3,
                 totalUnitCount: 3
             )
@@ -71,6 +87,7 @@ final class LiveHangarRepository: HangarRepository {
             packages: packages,
             fleet: fleet,
             buyback: buyback,
+            hangarLogs: hangarLogs,
             referralStats: accountContext.referralStats
         )
     }
@@ -151,6 +168,34 @@ final class LiveHangarRepository: HangarRepository {
         )
     }
 
+    func refreshHangarLogData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.refreshHangarLogData(
+                for: session,
+                from: snapshot,
+                progress: progress
+            )
+        }
+
+        try validate(session: session)
+        progress(preparationProgress(for: session, stepNumber: 1, stepCount: 2))
+
+        let hangarLogs = try await fetchRemoteHangarLogs(
+            using: session.cookies,
+            progress: progress,
+            stepNumber: 2,
+            stepCount: 2
+        )
+
+        return snapshot.updatingHangarLogs(
+            hangarLogs: hangarLogs
+        )
+    }
+
     func refreshAccountData(
         for session: UserSession,
         from snapshot: HangarSnapshot,
@@ -212,12 +257,310 @@ final class LiveHangarRepository: HangarRepository {
         stepNumber: Int,
         stepCount: Int
     ) async throws -> [RemotePledge] {
-        var remotePledges: [RemotePledge] = []
-        var pledgeTotalPages: Int?
-        var previousPledgePageSignature: String?
+        progress(
+            makeProgress(
+                stage: .pledges,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: pageDetail(
+                    for: "pledges",
+                    page: 1,
+                    totalPages: nil,
+                    loadedCount: 0,
+                    isLoading: true
+                ),
+                completedUnitCount: 0,
+                totalUnitCount: nil
+            )
+        )
+
+        let firstPage = try await browser.extractPledges(
+            using: cookies,
+            page: 1,
+            pageSize: pledgePageSize
+        )
+
+        if firstPage.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        var remotePledges = firstPage.items
+        let inferredTotalPages = inferredTotalPages(
+            reportedByPage: firstPage.totalPages,
+            page: 1,
+            pageItemCount: firstPage.items.count,
+            hasNextPage: firstPage.hasNextPage
+        )
+        let workerCount = syncWorkerCount
+
+        progress(
+            makeProgress(
+                stage: .pledges,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: pageDetail(
+                    for: "pledges",
+                    page: 1,
+                    totalPages: inferredTotalPages,
+                    loadedCount: remotePledges.count,
+                    isLoading: false
+                ),
+                completedUnitCount: 1,
+                totalUnitCount: inferredTotalPages
+            )
+        )
+
+        guard let totalPages = inferredTotalPages else {
+            return try await fetchRemotePledgesSequentially(
+                using: cookies,
+                startingFrom: 2,
+                initialItems: remotePledges,
+                knownTotalPages: nil,
+                previousPageSignature: firstPage.pageSignature,
+                progress: progress,
+                stepNumber: stepNumber,
+                stepCount: stepCount
+            )
+        }
+
+        if totalPages > maxPledgePages {
+            throw LiveHangarRepositoryError.pageLimitReached(
+                itemLabel: "hangar pledges",
+                limit: maxPledgePages
+            )
+        }
+
+        guard totalPages > 1 else {
+            return remotePledges
+        }
+
+        if workerCount <= 1 {
+            return try await fetchRemotePledgesSequentially(
+                using: cookies,
+                startingFrom: 2,
+                initialItems: remotePledges,
+                knownTotalPages: totalPages,
+                previousPageSignature: firstPage.pageSignature,
+                progress: progress,
+                stepNumber: stepNumber,
+                stepCount: stepCount
+            )
+        }
+
+        let warmedCookies = await browser.currentRSICookies()
+        let remainingPages = Array(2 ... totalPages)
+        let orderedResults: [RemotePledgePage]
+        do {
+            orderedResults = try await fetchPledgePagesConcurrently(
+                using: warmedCookies.isEmpty ? cookies : warmedCookies,
+                pages: remainingPages,
+                workerCount: workerCount,
+                initialLoadedCount: remotePledges.count
+            ) { completedPages, loadedCount in
+                progress(
+                    self.makeProgress(
+                        stage: .pledges,
+                        stepNumber: stepNumber,
+                        stepCount: stepCount,
+                        detail: self.parallelPageDetail(
+                            for: "pledges",
+                            completedPages: completedPages,
+                            totalPages: totalPages,
+                            loadedCount: loadedCount,
+                            workerCount: workerCount
+                        ),
+                        completedUnitCount: completedPages,
+                        totalUnitCount: totalPages
+                    )
+                )
+            }
+        } catch {
+            return try await fetchRemotePledgesSequentially(
+                using: cookies,
+                startingFrom: 2,
+                initialItems: remotePledges,
+                knownTotalPages: totalPages,
+                previousPageSignature: firstPage.pageSignature,
+                progress: progress,
+                stepNumber: stepNumber,
+                stepCount: stepCount
+            )
+        }
+
+        for result in orderedResults {
+            if result.accessDenied {
+                throw LiveHangarRepositoryError.sessionExpired
+            }
+
+            remotePledges.append(contentsOf: result.items)
+        }
+
+        return remotePledges
+    }
+
+    private func fetchRemoteBuyback(
+        using cookies: [SessionCookie],
+        progress: @escaping RefreshProgressHandler,
+        stepNumber: Int,
+        stepCount: Int
+    ) async throws -> [RemoteBuybackPledge] {
+        progress(
+            makeProgress(
+                stage: .buyback,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: pageDetail(
+                    for: "buy-back items",
+                    page: 1,
+                    totalPages: nil,
+                    loadedCount: 0,
+                    isLoading: true
+                ),
+                completedUnitCount: 0,
+                totalUnitCount: nil
+            )
+        )
+
+        let firstPage = try await browser.extractBuybackPledges(
+            using: cookies,
+            page: 1,
+            pageSize: buybackPageSize
+        )
+
+        if firstPage.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        var remoteBuyback = firstPage.items
+        let inferredTotalPages = inferredTotalPages(
+            reportedByPage: firstPage.totalPages,
+            page: 1,
+            pageItemCount: firstPage.items.count,
+            hasNextPage: firstPage.hasNextPage
+        )
+        let workerCount = syncWorkerCount
+
+        progress(
+            makeProgress(
+                stage: .buyback,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: pageDetail(
+                    for: "buy-back items",
+                    page: 1,
+                    totalPages: inferredTotalPages,
+                    loadedCount: remoteBuyback.count,
+                    isLoading: false
+                ),
+                completedUnitCount: 1,
+                totalUnitCount: inferredTotalPages
+            )
+        )
+
+        guard let totalPages = inferredTotalPages else {
+            return try await fetchRemoteBuybackSequentially(
+                using: cookies,
+                startingFrom: 2,
+                initialItems: remoteBuyback,
+                knownTotalPages: nil,
+                previousPageSignature: firstPage.pageSignature,
+                progress: progress,
+                stepNumber: stepNumber,
+                stepCount: stepCount
+            )
+        }
+
+        if totalPages > maxBuybackPages {
+            throw LiveHangarRepositoryError.pageLimitReached(
+                itemLabel: "buy-back pledges",
+                limit: maxBuybackPages
+            )
+        }
+
+        guard totalPages > 1 else {
+            return remoteBuyback
+        }
+
+        if workerCount <= 1 {
+            return try await fetchRemoteBuybackSequentially(
+                using: cookies,
+                startingFrom: 2,
+                initialItems: remoteBuyback,
+                knownTotalPages: totalPages,
+                previousPageSignature: firstPage.pageSignature,
+                progress: progress,
+                stepNumber: stepNumber,
+                stepCount: stepCount
+            )
+        }
+
+        let warmedCookies = await browser.currentRSICookies()
+        let remainingPages = Array(2 ... totalPages)
+        let orderedResults: [RemoteBuybackPage]
+        do {
+            orderedResults = try await fetchBuybackPagesConcurrently(
+                using: warmedCookies.isEmpty ? cookies : warmedCookies,
+                pages: remainingPages,
+                workerCount: workerCount,
+                initialLoadedCount: remoteBuyback.count
+            ) { completedPages, loadedCount in
+                progress(
+                    self.makeProgress(
+                        stage: .buyback,
+                        stepNumber: stepNumber,
+                        stepCount: stepCount,
+                        detail: self.parallelPageDetail(
+                            for: "buy-back items",
+                            completedPages: completedPages,
+                            totalPages: totalPages,
+                            loadedCount: loadedCount,
+                            workerCount: workerCount
+                        ),
+                        completedUnitCount: completedPages,
+                        totalUnitCount: totalPages
+                    )
+                )
+            }
+        } catch {
+            return try await fetchRemoteBuybackSequentially(
+                using: cookies,
+                startingFrom: 2,
+                initialItems: remoteBuyback,
+                knownTotalPages: totalPages,
+                previousPageSignature: firstPage.pageSignature,
+                progress: progress,
+                stepNumber: stepNumber,
+                stepCount: stepCount
+            )
+        }
+
+        for result in orderedResults {
+            if result.accessDenied {
+                throw LiveHangarRepositoryError.sessionExpired
+            }
+
+            remoteBuyback.append(contentsOf: result.items)
+        }
+
+        return remoteBuyback
+    }
+
+    private func fetchRemotePledgesSequentially(
+        using cookies: [SessionCookie],
+        startingFrom startPage: Int,
+        initialItems: [RemotePledge],
+        knownTotalPages: Int?,
+        previousPageSignature: String?,
+        progress: @escaping RefreshProgressHandler,
+        stepNumber: Int,
+        stepCount: Int
+    ) async throws -> [RemotePledge] {
+        var remotePledges = initialItems
+        var pledgeTotalPages = knownTotalPages
+        var previousSignature = previousPageSignature
         var didReachEndOfPledges = false
 
-        for page in 1 ... maxPledgePages {
+        for page in startPage ... maxPledgePages {
             progress(
                 makeProgress(
                     stage: .pledges,
@@ -280,13 +623,13 @@ final class LiveHangarRepository: HangarRepository {
                 knownTotalPages: pledgeTotalPages,
                 hasNextPage: result.hasNextPage,
                 pageSignature: result.pageSignature,
-                previousPageSignature: previousPledgePageSignature
+                previousPageSignature: previousSignature
             ) {
                 didReachEndOfPledges = true
                 break
             }
 
-            previousPledgePageSignature = result.pageSignature
+            previousSignature = result.pageSignature
         }
 
         guard didReachEndOfPledges else {
@@ -299,18 +642,22 @@ final class LiveHangarRepository: HangarRepository {
         return remotePledges
     }
 
-    private func fetchRemoteBuyback(
+    private func fetchRemoteBuybackSequentially(
         using cookies: [SessionCookie],
+        startingFrom startPage: Int,
+        initialItems: [RemoteBuybackPledge],
+        knownTotalPages: Int?,
+        previousPageSignature: String?,
         progress: @escaping RefreshProgressHandler,
         stepNumber: Int,
         stepCount: Int
     ) async throws -> [RemoteBuybackPledge] {
-        var remoteBuyback: [RemoteBuybackPledge] = []
-        var buybackTotalPages: Int?
-        var previousBuybackPageSignature: String?
+        var remoteBuyback = initialItems
+        var buybackTotalPages = knownTotalPages
+        var previousSignature = previousPageSignature
         var didReachEndOfBuyback = false
 
-        for page in 1 ... maxBuybackPages {
+        for page in startPage ... maxBuybackPages {
             progress(
                 makeProgress(
                     stage: .buyback,
@@ -373,13 +720,13 @@ final class LiveHangarRepository: HangarRepository {
                 knownTotalPages: buybackTotalPages,
                 hasNextPage: result.hasNextPage,
                 pageSignature: result.pageSignature,
-                previousPageSignature: previousBuybackPageSignature
+                previousPageSignature: previousSignature
             ) {
                 didReachEndOfBuyback = true
                 break
             }
 
-            previousBuybackPageSignature = result.pageSignature
+            previousSignature = result.pageSignature
         }
 
         guard didReachEndOfBuyback else {
@@ -390,6 +737,225 @@ final class LiveHangarRepository: HangarRepository {
         }
 
         return remoteBuyback
+    }
+
+    private func fetchPledgePagesConcurrently(
+        using cookies: [SessionCookie],
+        pages: [Int],
+        workerCount: Int,
+        initialLoadedCount: Int,
+        progress: @escaping (_ completedPages: Int, _ loadedCount: Int) -> Void
+    ) async throws -> [RemotePledgePage] {
+        let chunks = makePageChunks(
+            pages: pages,
+            preferredWorkerCount: workerCount
+        )
+        let pageSize = pledgePageSize
+        let progressTracker = ConcurrentPageProgress(
+            completedPages: 1,
+            loadedCount: initialLoadedCount
+        )
+        var resultsByPage: [Int: RemotePledgePage] = [:]
+
+        try await withThrowingTaskGroup(of: [(Int, RemotePledgePage)].self) { group in
+            for chunk in chunks {
+                group.addTask {
+                    try await RSIAccountPageBrowser.loadPledgeChunk(
+                        using: cookies,
+                        pages: chunk,
+                        pageSize: pageSize
+                    ) { _, itemCount in
+                        let totals = await progressTracker.record(
+                            completedPages: 1,
+                            loadedCount: itemCount
+                        )
+                        await MainActor.run {
+                            progress(totals.completedPages, totals.loadedCount)
+                        }
+                    }
+                }
+            }
+
+            while let chunkResults = try await group.next() {
+                for (page, result) in chunkResults {
+                    resultsByPage[page] = result
+                }
+            }
+        }
+
+        guard resultsByPage.count == pages.count else {
+            throw LiveHangarRepositoryError.unexpectedMarkup(
+                "Parallel pledge sync did not return every requested page."
+            )
+        }
+
+        return try pages.map { page in
+            guard let result = resultsByPage[page] else {
+                throw LiveHangarRepositoryError.unexpectedMarkup(
+                    "Parallel pledge sync missed page \(page)."
+                )
+            }
+            return result
+        }
+    }
+
+    private func fetchBuybackPagesConcurrently(
+        using cookies: [SessionCookie],
+        pages: [Int],
+        workerCount: Int,
+        initialLoadedCount: Int,
+        progress: @escaping (_ completedPages: Int, _ loadedCount: Int) -> Void
+    ) async throws -> [RemoteBuybackPage] {
+        let chunks = makePageChunks(
+            pages: pages,
+            preferredWorkerCount: workerCount
+        )
+        let pageSize = buybackPageSize
+        let progressTracker = ConcurrentPageProgress(
+            completedPages: 1,
+            loadedCount: initialLoadedCount
+        )
+        var resultsByPage: [Int: RemoteBuybackPage] = [:]
+
+        try await withThrowingTaskGroup(of: [(Int, RemoteBuybackPage)].self) { group in
+            for chunk in chunks {
+                group.addTask {
+                    try await RSIAccountPageBrowser.loadBuybackChunk(
+                        using: cookies,
+                        pages: chunk,
+                        pageSize: pageSize
+                    ) { _, itemCount in
+                        let totals = await progressTracker.record(
+                            completedPages: 1,
+                            loadedCount: itemCount
+                        )
+                        await MainActor.run {
+                            progress(totals.completedPages, totals.loadedCount)
+                        }
+                    }
+                }
+            }
+
+            while let chunkResults = try await group.next() {
+                for (page, result) in chunkResults {
+                    resultsByPage[page] = result
+                }
+            }
+        }
+
+        guard resultsByPage.count == pages.count else {
+            throw LiveHangarRepositoryError.unexpectedMarkup(
+                "Parallel buy-back sync did not return every requested page."
+            )
+        }
+
+        return try pages.map { page in
+            guard let result = resultsByPage[page] else {
+                throw LiveHangarRepositoryError.unexpectedMarkup(
+                    "Parallel buy-back sync missed page \(page)."
+                )
+            }
+            return result
+        }
+    }
+
+    private func makePageChunks(
+        pages: [Int],
+        preferredWorkerCount: Int
+    ) -> [[Int]] {
+        guard !pages.isEmpty else {
+            return []
+        }
+
+        let workerCount = min(max(preferredWorkerCount, 1), pages.count)
+        let baseChunkSize = max(pages.count / workerCount, 1)
+        let remainder = pages.count % workerCount
+
+        var chunks: [[Int]] = []
+        var index = 0
+
+        for workerIndex in 0 ..< workerCount {
+            var chunkSize = baseChunkSize
+            if workerIndex == workerCount - 1 {
+                chunkSize += remainder
+            }
+
+            let endIndex = min(index + chunkSize, pages.count)
+            if index < endIndex {
+                chunks.append(Array(pages[index ..< endIndex]))
+            }
+            index = endIndex
+        }
+
+        if index < pages.count {
+            chunks.append(Array(pages[index...]))
+        }
+
+        return chunks
+    }
+
+    private func fetchRemoteHangarLogs(
+        using cookies: [SessionCookie],
+        progress: @escaping RefreshProgressHandler,
+        stepNumber: Int,
+        stepCount: Int
+    ) async throws -> [HangarLogEntry] {
+        progress(
+            makeProgress(
+                stage: .hangarLog,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: "Opening RSI's hangar log window and loading the current entries.",
+                completedUnitCount: 0,
+                totalUnitCount: 1
+            )
+        )
+
+        let result = try await browser.fetchHangarLogPage(
+            using: cookies,
+            page: 1
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        if !(200 ..< 300).contains(result.statusCode) {
+            throw LiveHangarRepositoryError.unexpectedMarkup(
+                result.failureMessage
+                ?? "RSI hangar log returned HTTP \(result.statusCode)."
+            )
+        }
+
+        if let failureMessage = result.failureMessage {
+            throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
+        }
+
+        let hangarLogs = Array(HangarLogParser.parse(result.items).prefix(maxHangarLogEntries))
+
+        if hangarLogs.isEmpty {
+            throw LiveHangarRepositoryError.unexpectedMarkup(
+                result.debugSummary
+                ?? "RSI opened the hangar log window, but no log entries were discovered."
+            )
+        }
+
+        progress(
+            makeProgress(
+                stage: .hangarLog,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: hangarLogs.count >= maxHangarLogEntries
+                    ? "Loaded \(hangarLogs.count) hangar log entries from RSI (cap \(maxHangarLogEntries))."
+                    : "Loaded \(hangarLogs.count) hangar log entries from RSI.",
+                completedUnitCount: 1,
+                totalUnitCount: 1
+            )
+        )
+
+        return hangarLogs.sorted { lhs, rhs in
+            lhs.occurredAt > rhs.occurredAt
+        }
     }
 
     private func fetchHostedShipCatalog(
@@ -631,6 +1197,17 @@ final class LiveHangarRepository: HangarRepository {
         return "Finished \(pageLabel). \(countLabel) synced so far."
     }
 
+    private func parallelPageDetail(
+        for itemLabel: String,
+        completedPages: Int,
+        totalPages: Int,
+        loadedCount: Int,
+        workerCount: Int
+    ) -> String {
+        let countLabel = loadedCount == 1 ? "1 \(itemLabel.dropLast())" : "\(loadedCount) \(itemLabel)"
+        return "Loaded \(completedPages) of \(totalPages) pages across \(workerCount) workers. \(countLabel) synced so far."
+    }
+
     private func normalize(package remote: RemotePledge, shipCatalog: RSIShipCatalog?) -> HangarPackage {
         let containsSummary = remote.containsText.trimmingCharacters(in: .whitespacesAndNewlines)
         let packageValueUSD = parseMoney(remote.valueText)
@@ -738,6 +1315,13 @@ final class LiveHangarRepository: HangarRepository {
             return directURL
         }
 
+        if let specialEditionURL = specialEditionImageURL(
+            for: item.title,
+            packageThumbnailURL: packageThumbnailURL
+        ) {
+            return specialEditionURL
+        }
+
         switch category {
         case .upgrade:
             return targetShip?.imageURL ?? (usePackageThumbnailFallback ? packageThumbnailURL : nil)
@@ -746,6 +1330,17 @@ final class LiveHangarRepository: HangarRepository {
         case .gamePackage, .flair, .perk:
             return usePackageThumbnailFallback ? packageThumbnailURL : nil
         }
+    }
+
+    private func specialEditionImageURL(
+        for itemTitle: String,
+        packageThumbnailURL: URL?
+    ) -> URL? {
+        if itemTitle.localizedCaseInsensitiveContains("Dragonfly Star Kitten Edition") {
+            return packageThumbnailURL
+        }
+
+        return nil
     }
 
     private func upgradePricing(
@@ -1048,6 +1643,10 @@ enum FleetProjector {
                     return nil
                 }
 
+                if matchedShip == nil, !hasShipLikeInsurance(package.insurance) {
+                    return nil
+                }
+
                 return (item, matchedShip)
             }
 
@@ -1062,17 +1661,26 @@ enum FleetProjector {
                     manufacturer: manufacturer(for: item, matchedShip: matchedShip),
                     role: role(for: item, matchedShip: matchedShip),
                     roleCategories: roleCategories(for: item, matchedShip: matchedShip),
-                    msrpUSD: hostedMSRP(for: matchedShip),
+                    msrpUSD: hostedMSRP(for: item, matchedShip: matchedShip),
                     insurance: package.insurance,
                     sourcePackageID: package.id,
                     sourcePackageName: package.title,
                     meltValueUSD: meltValue,
                     canGift: package.canGift,
                     canReclaim: package.canReclaim,
-                    imageURL: matchedShip?.imageURL ?? item.imageURL
+                    imageURL: preferredImageURL(for: item, matchedShip: matchedShip)
                 )
             }
         }
+    }
+
+    private static func preferredImageURL(for item: PackageItem, matchedShip: RSIShipCatalog.Ship?) -> URL? {
+        if item.title.localizedCaseInsensitiveContains("Dragonfly Star Kitten Edition"),
+           let itemImageURL = item.imageURL {
+            return itemImageURL
+        }
+
+        return matchedShip?.imageURL ?? item.imageURL
     }
 
     private static func manufacturer(for item: PackageItem, matchedShip: RSIShipCatalog.Ship?) -> String {
@@ -1084,22 +1692,24 @@ enum FleetProjector {
         let manufacturers: [(match: String, display: String)] = [
             ("Grey's Market", "Grey's Market"),
             ("GREY", "Grey's Market"),
-            ("Aegis", "Aegis"),
-            ("Anvil", "Anvil"),
-            ("ARGO", "ARGO"),
+            ("Aegis", "Aegis Dynamics"),
+            ("Anvil", "Anvil Aerospace"),
+            ("Aopoa", "Aopoa"),
+            ("ARGO", "Argo Astronautics"),
             ("Banu", "Banu"),
             ("Consolidated Outland", "Consolidated Outland"),
-            ("Crusader", "Crusader"),
-            ("Drake", "Drake"),
+            ("Crusader", "Crusader Industries"),
+            ("Drake", "Drake Interplanetary"),
             ("Esperia", "Esperia"),
-            ("Gatac", "Gatac"),
-            ("Greycat", "Greycat"),
-            ("Kruger", "Kruger"),
+            ("Gatac", "Gatac Manufacture"),
+            ("Greycat", "Greycat Industrial"),
+            ("Kruger", "Kruger Intergalactic"),
             ("MISC", "MISC"),
             ("Mirai", "Mirai"),
-            ("Origin", "Origin"),
-            ("RSI", "RSI"),
-            ("Tumbril", "Tumbril")
+            ("Origin", "Origin Jumpworks"),
+            ("RSI", "Roberts Space Industries"),
+            ("Tumbril", "Tumbril"),
+            ("Vanduul", "Vanduul")
         ]
 
         for manufacturer in manufacturers {
@@ -1139,8 +1749,21 @@ enum FleetProjector {
         return fallbackCategories.isEmpty ? [fallbackRole] : fallbackCategories
     }
 
-    private static func hostedMSRP(for matchedShip: RSIShipCatalog.Ship?) -> Decimal? {
-        matchedShip?.msrpUSD
+    private static func hostedMSRP(for item: PackageItem, matchedShip: RSIShipCatalog.Ship?) -> Decimal? {
+        if item.title.localizedCaseInsensitiveContains("Dragonfly Star Kitten Edition") {
+            return nil
+        }
+
+        return matchedShip?.msrpUSD
+    }
+
+    private static func hasShipLikeInsurance(_ insurance: String) -> Bool {
+        let normalized = insurance.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
+        guard !normalized.isEmpty else {
+            return false
+        }
+
+        return normalized != "unknown"
     }
 
     private static func isObviousEquipmentItem(_ item: PackageItem) -> Bool {
@@ -1154,6 +1777,12 @@ enum FleetProjector {
             "attachment",
             "ammo",
             "backpack",
+            "banner",
+            "coin",
+            "decoration",
+            "decor",
+            "die",
+            "flag",
             "grenade",
             "helmet",
             "knife",
@@ -1162,23 +1791,47 @@ enum FleetProjector {
             "medpen",
             "multi-tool",
             "multitool",
+            "painting",
+            "pennant",
+            "plush",
+            "poster",
             "pistol",
             "rifle",
             "shotgun",
             "smg",
             "sniper",
+            "statue",
             "undersuit",
-            "weapon"
+            "weapon",
+            "trophy"
         ]
 
         return equipmentKeywords.contains(where: haystack.contains)
     }
 }
 
+private actor ConcurrentPageProgress {
+    private var completedPages: Int
+    private var loadedCount: Int
+
+    init(completedPages: Int, loadedCount: Int) {
+        self.completedPages = completedPages
+        self.loadedCount = loadedCount
+    }
+
+    func record(completedPages additionalPages: Int, loadedCount additionalItems: Int) -> (completedPages: Int, loadedCount: Int) {
+        completedPages += additionalPages
+        loadedCount += additionalItems
+        return (completedPages, loadedCount)
+    }
+}
+
 @MainActor
-private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
+final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     private let webView: WKWebView
     private var loadContinuation: CheckedContinuation<Void, Error>?
+    private var loadTimeoutTask: Task<Void, Never>?
+    private let loadTimeoutNanoseconds: UInt64 = 30_000_000_000
 
     override init() {
         let configuration = WKWebViewConfiguration()
@@ -1188,7 +1841,7 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         webView.navigationDelegate = self
     }
 
-    func extractPledges(
+    fileprivate func extractPledges(
         using cookies: [SessionCookie],
         page: Int,
         pageSize: Int
@@ -1199,7 +1852,7 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         return try await evaluate(script: Self.pledgesExtractionScript, as: RemotePledgePage.self)
     }
 
-    func extractBuybackPledges(
+    fileprivate func extractBuybackPledges(
         using cookies: [SessionCookie],
         page: Int,
         pageSize: Int
@@ -1210,7 +1863,72 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         return try await evaluate(script: Self.buybackExtractionScript, as: RemoteBuybackPage.self)
     }
 
-    func fetchShipCatalog(using cookies: [SessionCookie]) async throws -> RSIShipCatalog {
+    fileprivate func fetchHangarLogPage(
+        using cookies: [SessionCookie],
+        page: Int
+    ) async throws -> RemoteHangarLogPage {
+        let url = try storefrontURL(path: "/en/account/pledges")
+        try await prepareWebView(with: cookies)
+        try await ensureLoaded(url: url)
+        return try await evaluate(
+            script: Self.hangarLogExtractionScript,
+            arguments: ["page": page],
+            as: RemoteHangarLogPage.self
+        )
+    }
+
+    fileprivate func currentRSICookies() async -> [SessionCookie] {
+        let store = webView.configuration.websiteDataStore.httpCookieStore
+        let cookies = await allCookies(from: store)
+        return cookies
+            .filter { $0.domain.contains("robertsspaceindustries.com") }
+            .map(SessionCookie.init)
+    }
+
+    fileprivate static func loadPledgeChunk(
+        using cookies: [SessionCookie],
+        pages: [Int],
+        pageSize: Int,
+        onPageLoaded: @escaping @Sendable (_ page: Int, _ itemCount: Int) async -> Void
+    ) async throws -> [(Int, RemotePledgePage)] {
+        let browser = RSIAccountPageBrowser()
+        return try await browser.extractPledgeChunk(
+            using: cookies,
+            pages: pages,
+            pageSize: pageSize,
+            onPageLoaded: onPageLoaded
+        )
+    }
+
+    fileprivate static func loadBuybackChunk(
+        using cookies: [SessionCookie],
+        pages: [Int],
+        pageSize: Int,
+        onPageLoaded: @escaping @Sendable (_ page: Int, _ itemCount: Int) async -> Void
+    ) async throws -> [(Int, RemoteBuybackPage)] {
+        let browser = RSIAccountPageBrowser()
+        return try await browser.extractBuybackChunk(
+            using: cookies,
+            pages: pages,
+            pageSize: pageSize,
+            onPageLoaded: onPageLoaded
+        )
+    }
+
+    static func validateAuthenticatedPledgeAccess(using cookies: [SessionCookie]) async throws {
+        let browser = RSIAccountPageBrowser()
+        let result = try await browser.extractPledges(
+            using: cookies,
+            page: 1,
+            pageSize: 1
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+    }
+
+    fileprivate func fetchShipCatalog(using cookies: [SessionCookie]) async throws -> RSIShipCatalog {
         let url = try storefrontURL(path: "/pledge-store/ship-upgrades")
         try await prepareWebView(with: cookies)
         try await load(url: url)
@@ -1251,7 +1969,7 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         )
     }
 
-    func fetchAccountOverview(
+    fileprivate func fetchAccountOverview(
         using cookies: [SessionCookie],
         profileName: String
     ) async throws -> AccountOverview {
@@ -1296,7 +2014,7 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         )
     }
 
-    func fetchReferralStats(using cookies: [SessionCookie]) async throws -> ReferralStats {
+    fileprivate func fetchReferralStats(using cookies: [SessionCookie]) async throws -> ReferralStats {
         let referralURL = try storefrontURL(path: "/en/referral")
         try await prepareWebView(with: cookies)
         try await load(url: referralURL)
@@ -1349,18 +2067,15 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        loadContinuation?.resume()
-        loadContinuation = nil
+        finishLoading(with: .success(()))
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        loadContinuation?.resume(throwing: error)
-        loadContinuation = nil
+        finishLoading(with: .failure(error))
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        loadContinuation?.resume(throwing: error)
-        loadContinuation = nil
+        finishLoading(with: .failure(error))
     }
 
     private func prepareWebView(with cookies: [SessionCookie]) async throws {
@@ -1400,6 +2115,98 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         }
     }
 
+    private func extractPledgeChunk(
+        using cookies: [SessionCookie],
+        pages: [Int],
+        pageSize: Int,
+        onPageLoaded: @escaping @Sendable (_ page: Int, _ itemCount: Int) async -> Void
+    ) async throws -> [(Int, RemotePledgePage)] {
+        guard !pages.isEmpty else {
+            return []
+        }
+
+        try await prepareWebView(with: cookies)
+
+        var results: [(Int, RemotePledgePage)] = []
+        var previousSignature: String?
+
+        for page in pages {
+            let url = try pageURL(path: "/en/account/pledges", page: page, pageSize: pageSize)
+            try await load(url: url)
+            let result = try await evaluate(script: Self.pledgesExtractionScript, as: RemotePledgePage.self)
+
+            if result.accessDenied {
+                throw LiveHangarRepositoryError.sessionExpired
+            }
+
+            if result.items.isEmpty {
+                throw LiveHangarRepositoryError.unexpectedMarkup(
+                    "RSI returned an empty hangar page for page \(page) during parallel sync."
+                )
+            }
+
+            if let previousSignature,
+               previousSignature == result.pageSignature
+            {
+                throw LiveHangarRepositoryError.unexpectedMarkup(
+                    "RSI repeated the same hangar page content while loading page \(page) in parallel."
+                )
+            }
+
+            results.append((page, result))
+            previousSignature = result.pageSignature
+            await onPageLoaded(page, result.items.count)
+        }
+
+        return results
+    }
+
+    private func extractBuybackChunk(
+        using cookies: [SessionCookie],
+        pages: [Int],
+        pageSize: Int,
+        onPageLoaded: @escaping @Sendable (_ page: Int, _ itemCount: Int) async -> Void
+    ) async throws -> [(Int, RemoteBuybackPage)] {
+        guard !pages.isEmpty else {
+            return []
+        }
+
+        try await prepareWebView(with: cookies)
+
+        var results: [(Int, RemoteBuybackPage)] = []
+        var previousSignature: String?
+
+        for page in pages {
+            let url = try pageURL(path: "/en/account/buy-back-pledges", page: page, pageSize: pageSize)
+            try await load(url: url)
+            let result = try await evaluate(script: Self.buybackExtractionScript, as: RemoteBuybackPage.self)
+
+            if result.accessDenied {
+                throw LiveHangarRepositoryError.sessionExpired
+            }
+
+            if result.items.isEmpty {
+                throw LiveHangarRepositoryError.unexpectedMarkup(
+                    "RSI returned an empty buy-back page for page \(page) during parallel sync."
+                )
+            }
+
+            if let previousSignature,
+               previousSignature == result.pageSignature
+            {
+                throw LiveHangarRepositoryError.unexpectedMarkup(
+                    "RSI repeated the same buy-back page content while loading page \(page) in parallel."
+                )
+            }
+
+            results.append((page, result))
+            previousSignature = result.pageSignature
+            await onPageLoaded(page, result.items.count)
+        }
+
+        return results
+    }
+
     private func load(url: URL) async throws {
         if loadContinuation != nil {
             throw LiveHangarRepositoryError.unexpectedMarkup("The RSI page loader is already busy.")
@@ -1407,14 +2214,58 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             loadContinuation = continuation
+            loadTimeoutTask?.cancel()
+            loadTimeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: self?.loadTimeoutNanoseconds ?? 30_000_000_000)
+                await MainActor.run {
+                    guard let self, self.loadContinuation != nil else {
+                        return
+                    }
+
+                    self.webView.stopLoading()
+                    self.finishLoading(
+                        with: .failure(
+                            LiveHangarRepositoryError.unexpectedMarkup(
+                                "RSI page load timed out while opening \(url.absoluteString)."
+                            )
+                        )
+                    )
+                }
+            }
             webView.load(URLRequest(url: url))
         }
     }
 
+    private func finishLoading(with result: Result<Void, Error>) {
+        loadTimeoutTask?.cancel()
+        loadTimeoutTask = nil
+
+        guard let loadContinuation else {
+            return
+        }
+
+        self.loadContinuation = nil
+
+        switch result {
+        case .success:
+            loadContinuation.resume()
+        case let .failure(error):
+            loadContinuation.resume(throwing: error)
+        }
+    }
+
     private func evaluate<Value: Decodable>(script: String, as type: Value.Type) async throws -> Value {
+        try await evaluate(script: script, arguments: [:], as: type)
+    }
+
+    private func evaluate<Value: Decodable>(
+        script: String,
+        arguments: [String: Any],
+        as type: Value.Type
+    ) async throws -> Value {
         let result = try await webView.callAsyncJavaScript(
             script,
-            arguments: [:],
+            arguments: arguments,
             in: nil,
             contentWorld: .page
         )
@@ -1425,6 +2276,19 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
         let data = try JSONSerialization.data(withJSONObject: result)
         return try JSONDecoder().decode(Value.self, from: data)
+    }
+
+    private func ensureLoaded(url: URL) async throws {
+        guard webView.url?.host == url.host, webView.url?.path == url.path else {
+            try await load(url: url)
+            return
+        }
+
+        if webView.isLoading {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                loadContinuation = continuation
+            }
+        }
     }
 
     private func pageURL(path: String, page: Int, pageSize: Int) throws -> URL {
@@ -2919,6 +3783,332 @@ private final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       })
     };
     """
+
+    private static let hangarLogExtractionScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const maxEntries = 500;
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const waitFor = async (predicate, timeoutMs = 6000, intervalMs = 125) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (predicate()) {
+          return true;
+        }
+        await wait(intervalMs);
+      }
+      return predicate();
+    };
+    const isVisible = (node) => !!node && !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length);
+    const clickElement = (node) => {
+      if (!node) {
+        return false;
+      }
+      if (typeof node.click === 'function') {
+        node.click();
+      } else {
+        node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      }
+      return true;
+    };
+    const collectEntries = () =>
+      Array.from(document.querySelectorAll('.pledge-log-entry')).map((entry) => {
+        const paragraphText = normalizeText(entry.querySelector('p')?.textContent);
+        const itemName = normalizeText(entry.querySelector('span')?.textContent);
+        const splitIndex = paragraphText.indexOf(' - ');
+        const timeText = splitIndex >= 0
+          ? normalizeText(paragraphText.slice(0, splitIndex)).replace(/\\bam\\b/g, 'AM').replace(/\\bpm\\b/g, 'PM')
+          : '';
+        const messageText = splitIndex >= 0 ? normalizeText(paragraphText.slice(splitIndex + 3)) : paragraphText;
+        const contentText = itemName && messageText.startsWith(itemName)
+          ? normalizeText(messageText.slice(itemName.length))
+          : messageText;
+
+        return {
+          timeText,
+          itemName,
+          fullText: paragraphText,
+          contentText
+        };
+      });
+    const parseRenderedEntries = (rendered) => {
+      const container = document.createElement('div');
+      container.innerHTML = typeof rendered === 'string' ? rendered : '';
+      return Array.from(container.querySelectorAll('.pledge-log-entry')).map((entry) => {
+        const paragraphText = normalizeText(entry.querySelector('p')?.textContent);
+        const itemName = normalizeText(entry.querySelector('span')?.textContent);
+        const splitIndex = paragraphText.indexOf(' - ');
+        const timeText = splitIndex >= 0
+          ? normalizeText(paragraphText.slice(0, splitIndex)).replace(/\\bam\\b/g, 'AM').replace(/\\bpm\\b/g, 'PM')
+          : '';
+        const messageText = splitIndex >= 0 ? normalizeText(paragraphText.slice(splitIndex + 3)) : paragraphText;
+        const contentText = itemName && messageText.startsWith(itemName)
+          ? normalizeText(messageText.slice(itemName.length))
+          : messageText;
+
+        return {
+          timeText,
+          itemName,
+          fullText: paragraphText,
+          contentText
+        };
+      });
+    };
+    const dedupeEntries = (entries) => {
+      const seen = new Set();
+      const results = [];
+      for (const entry of entries) {
+        const key = [entry.timeText, entry.itemName, entry.contentText].join('•');
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        results.push(entry);
+        if (results.length >= maxEntries) {
+          break;
+        }
+      }
+      return results;
+    };
+    const findScrollableContainers = () =>
+      Array.from(document.querySelectorAll('*')).filter((node) => {
+        if (!(node instanceof HTMLElement)) {
+          return false;
+        }
+        const style = window.getComputedStyle(node);
+        const overflowY = style.overflowY;
+        const canScroll = /(auto|scroll|overlay)/.test(overflowY) && node.scrollHeight > node.clientHeight + 48;
+        return canScroll && node.querySelector('.pledge-log-entry');
+      });
+    const findLoadMoreButton = () =>
+      Array.from(document.querySelectorAll('button, a, [role=\"button\"], input[type=\"button\"], input[type=\"submit\"]'))
+        .find((node) => {
+          const label = normalizeText(node.textContent || node.value || '').toLowerCase();
+          return isVisible(node) && (
+            label.includes('load more') ||
+            label === 'more' ||
+            label.includes('show more')
+          );
+        });
+    const findHangarLogButton = () =>
+      Array.from(document.querySelectorAll('button, a, [role=\"button\"], input[type=\"button\"], input[type=\"submit\"]'))
+        .find((node) => {
+          const label = normalizeText(node.textContent || node.value || '').toLowerCase();
+          return isVisible(node) && label.includes('hangar log');
+        });
+
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      return {
+        accessDenied: true,
+        statusCode: 403,
+        items: [],
+        failureMessage: 'The RSI account page reported access denied before the hangar log request started.',
+        debugSummary: null
+      };
+    }
+
+    const hangarLogButton = findHangarLogButton();
+    if (!hangarLogButton) {
+      return {
+        accessDenied: false,
+        statusCode: 200,
+        items: [],
+        failureMessage: 'The RSI account page loaded, but the Hangar log button could not be found.',
+        debugSummary: normalizeText(document.body.innerText).slice(0, 500)
+      };
+    }
+
+    clickElement(hangarLogButton);
+
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
+    const rsiDevice = cookieValue('_rsi_device');
+    const requestHeaders = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Accept': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+    if (csrfToken) {
+      requestHeaders['x-csrf-token'] = csrfToken;
+    }
+    if (rsiToken) {
+      requestHeaders['x-rsi-token'] = rsiToken;
+    }
+    if (rsiDevice) {
+      requestHeaders['x-rsi-device'] = rsiDevice;
+    }
+
+    const modalAppeared = await waitFor(
+      () =>
+        document.querySelector('.pledge-log-entry') ||
+        document.querySelector('[class*=\"modal\"] [class*=\"pledge\"]') ||
+        document.querySelector('[class*=\"overlay\"] [class*=\"pledge\"]'),
+      8000,
+      150
+    );
+
+    if (!modalAppeared) {
+      return {
+        accessDenied: false,
+        statusCode: 200,
+        items: [],
+        failureMessage: 'RSI did not finish opening the Hangar log window.',
+        debugSummary: normalizeText(document.body.innerText).slice(0, 700)
+      };
+    }
+
+    let items = collectEntries();
+    let stablePasses = 0;
+    let pagedFetchStatus = 'not-started';
+    let pagedFetchPageCount = null;
+    let pagedFetchStoppedAt = 1;
+
+    for (let index = 0; index < 80 && items.length < maxEntries; index += 1) {
+      const beforeCount = items.length;
+
+      for (const container of findScrollableContainers()) {
+        container.scrollTop = container.scrollHeight;
+      }
+
+      window.scrollTo(0, document.body.scrollHeight);
+      clickElement(findLoadMoreButton());
+      await wait(250);
+
+      items = collectEntries().slice(0, maxEntries);
+
+      if (items.length > beforeCount) {
+        stablePasses = 0;
+        continue;
+      }
+
+      stablePasses += 1;
+      if (stablePasses >= 4) {
+        break;
+      }
+    }
+
+    items = collectEntries().slice(0, maxEntries);
+
+    try {
+      const pageOneResponse = await fetch('/api/account/pledgeLog', {
+        method: 'POST',
+        credentials: 'include',
+        headers: requestHeaders,
+        body: JSON.stringify({ page: 1 })
+      });
+
+      const pageOneRawBody = await pageOneResponse.text();
+      let pageOnePayload = null;
+      try {
+        pageOnePayload = JSON.parse(pageOneRawBody);
+      } catch {}
+
+      if (pageOneResponse.ok && pageOnePayload?.data) {
+        const apiItems = parseRenderedEntries(pageOnePayload.data.rendered);
+        if (apiItems.length > 0) {
+          items = dedupeEntries(apiItems.concat(items));
+        }
+
+        const reportedPageCount = Number.parseInt(String(pageOnePayload.data.pagecount || ''), 10);
+        const pageCount = Number.isFinite(reportedPageCount) && reportedPageCount > 0 ? reportedPageCount : null;
+        pagedFetchPageCount = pageCount;
+        pagedFetchStatus = 'page-1-ok';
+
+        for (let page = 2; page <= (pageCount || 100) && items.length < maxEntries; page += 1) {
+          const response = await fetch('/api/account/pledgeLog', {
+            method: 'POST',
+            credentials: 'include',
+            headers: requestHeaders,
+            body: JSON.stringify({ page })
+          });
+
+          const rawBody = await response.text();
+          let payload = null;
+          try {
+            payload = JSON.parse(rawBody);
+          } catch {}
+
+          if (!response.ok || !payload?.data) {
+            pagedFetchStatus = `page-${page}-http-${response.status}`;
+            pagedFetchStoppedAt = page;
+            break;
+          }
+
+          const currentPage = Number.parseInt(String(payload.data.page || page), 10);
+          const currentPageCount = Number.parseInt(String(payload.data.pagecount || pageCount || ''), 10);
+          if (Number.isFinite(currentPageCount) && currentPageCount > 0) {
+            pagedFetchPageCount = currentPageCount;
+          }
+
+          if (Number.isFinite(currentPage) && Number.isFinite(currentPageCount) && currentPage > currentPageCount) {
+            pagedFetchStatus = `page-${page}-past-end`;
+            pagedFetchStoppedAt = page;
+            break;
+          }
+
+          const pageItems = parseRenderedEntries(payload.data.rendered);
+          if (pageItems.length === 0) {
+            pagedFetchStatus = `page-${page}-empty`;
+            pagedFetchStoppedAt = page;
+            break;
+          }
+
+          const beforeCount = items.length;
+          items = dedupeEntries(items.concat(pageItems));
+          pagedFetchStoppedAt = page;
+
+          if (items.length === beforeCount) {
+            pagedFetchStatus = `page-${page}-duplicate`;
+            break;
+          }
+
+          pagedFetchStatus = `page-${page}-ok`;
+        }
+
+        if (items.length >= maxEntries) {
+          pagedFetchStatus = `cap-${maxEntries}`;
+        }
+      } else {
+        pagedFetchStatus = `page-1-http-${pageOneResponse.status}`;
+      }
+    } catch (error) {
+      pagedFetchStatus = `fetch-error:${normalizeText(error?.message || String(error))}`;
+    }
+
+    items = dedupeEntries(items).slice(0, maxEntries);
+
+    const failureMessage = items.length === 0
+      ? 'RSI opened the Hangar log flow, but no .pledge-log-entry rows were rendered.'
+      : null;
+
+    const debugSummary = [
+      `button=${normalizeText(hangarLogButton.textContent || hangarLogButton.value || '')}`,
+      `entries=${items.length}`,
+      `max=${maxEntries}`,
+      `pagedStatus=${pagedFetchStatus}`,
+      `pagedCount=${pagedFetchPageCount ?? 'unknown'}`,
+      `pagedStop=${pagedFetchStoppedAt}`,
+      `scrollables=${findScrollableContainers().length}`,
+      `loadMoreVisible=${Boolean(findLoadMoreButton())}`,
+      `body=${normalizeText(document.body.innerText).slice(0, 500)}`
+    ].join(' | ');
+
+    return {
+      accessDenied: false,
+      statusCode: 200,
+      items,
+      failureMessage,
+      debugSummary
+    };
+    """
 }
 
 enum RSIStoreCreditParser {
@@ -3137,6 +4327,180 @@ private nonisolated struct RemoteBuybackPledge: Decodable {
             valueText,
             imageURL ?? ""
         ].joined(separator: "•")
+    }
+}
+
+private nonisolated struct RemoteHangarLogPage: Decodable {
+    let accessDenied: Bool
+    let statusCode: Int
+    let items: [RemoteHangarLogItem]
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
+private nonisolated struct RemoteHangarLogItem: Decodable {
+    let timeText: String
+    let itemName: String
+    let fullText: String
+    let contentText: String
+}
+
+private nonisolated enum HangarLogParser {
+    private static let createdPattern = #"^#(\d+?) - Created by ([\w\d-]+?) - order #([A-Z0-9]+?), value: \$([0-9.]+?) USD$"#
+    private static let reclaimedPattern = #"^#(\d+?) - Reclaimed by ([\w\d-]+?) for \$([0-9.]+?) USD$"#
+    private static let consumedPattern = #"^#(\d+?) - Consumed by ([\w\d-]+?) on pledge #(\d+?), value: \$([0-9.]+?) USD$"#
+    private static let appliedUpgradePattern = #"^#(\d+?) - Upgrade applied: #(\d+?) ([^,]+?), new value: \$([0-9.]+?) USD$"#
+    private static let buybackPattern = #"^#(\d+?) - Buy-back by ([\w\d-]+?) - order #([\w\d]+?)$"#
+    private static let giftPattern = #"^#(\d+?) - Gifted to ([^,]+?), value: \$([0-9.]+?) USD$"#
+    private static let giftClaimedPattern = #"^#(\d+) - Claimed as a gift by ([\w\d-]+?), value: \$([0-9.]+?) USD$"#
+    private static let giftCancelledPattern = #"^#(\d+?) - Gift cancelled by ([\d\w-]+?), value: \$([0-9.]+?) USD$"#
+    private static let nameChangePattern = #"^#(\d+) - Name Reservation: \((.+)\) on item (.+)$"#
+    private static let nameChangeReclaimedPattern = #"^#(\d+) - Name Release: \(([^\)]+)\) on item (\S+) Reclaimed$"#
+    private static let giveawayPattern = #"^#(\d+?) - (.*?)$"#
+
+    static func parse(_ items: [RemoteHangarLogItem]) -> [HangarLogEntry] {
+        items.compactMap(parse)
+    }
+
+    private static func parse(_ item: RemoteHangarLogItem) -> HangarLogEntry? {
+        let occurredAt = parsedDate(from: item.timeText) ?? .distantPast
+        let content = item.contentText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var action: HangarLogAction = .unknown
+        var priceUSD: Decimal?
+        var orderCode: String?
+        var sourcePledgeID: String?
+        var targetPledgeID: String?
+        var operatorName: String?
+        var reason: String?
+
+        if let groups = match(createdPattern, in: content) {
+            action = .created
+            targetPledgeID = groupValue(groups, 0)
+            operatorName = groupValue(groups, 1)
+            orderCode = groupValue(groups, 2)
+            priceUSD = parseMoney(groupValue(groups, 3))
+        } else if let groups = match(reclaimedPattern, in: content) {
+            action = .reclaimed
+            targetPledgeID = groupValue(groups, 0)
+            operatorName = groupValue(groups, 1)
+            priceUSD = parseMoney(groupValue(groups, 2))
+        } else if let groups = match(consumedPattern, in: content) {
+            action = .consumed
+            targetPledgeID = groupValue(groups, 0)
+            operatorName = groupValue(groups, 1)
+            sourcePledgeID = groupValue(groups, 2)
+            priceUSD = parseMoney(groupValue(groups, 3))
+        } else if let groups = match(appliedUpgradePattern, in: content) {
+            action = .appliedUpgrade
+            targetPledgeID = groupValue(groups, 0)
+            sourcePledgeID = groupValue(groups, 1)
+            reason = groupValue(groups, 2)
+            priceUSD = parseMoney(groupValue(groups, 3))
+            operatorName = "CIG"
+        } else if let groups = match(buybackPattern, in: content) {
+            action = .buyback
+            targetPledgeID = groupValue(groups, 0)
+            operatorName = groupValue(groups, 1)
+            orderCode = groupValue(groups, 2)
+        } else if let groups = match(giftPattern, in: content) {
+            action = .gift
+            targetPledgeID = groupValue(groups, 0)
+            operatorName = groupValue(groups, 1)
+            priceUSD = parseMoney(groupValue(groups, 2))
+        } else if let groups = match(giftClaimedPattern, in: content) {
+            action = .giftClaimed
+            targetPledgeID = groupValue(groups, 0)
+            operatorName = groupValue(groups, 1)
+            priceUSD = parseMoney(groupValue(groups, 2))
+        } else if let groups = match(giftCancelledPattern, in: content) {
+            action = .giftCancelled
+            targetPledgeID = groupValue(groups, 0)
+            operatorName = groupValue(groups, 1)
+            priceUSD = parseMoney(groupValue(groups, 2))
+        } else if let groups = match(nameChangePattern, in: content) {
+            action = .nameChange
+            targetPledgeID = groupValue(groups, 0)
+            sourcePledgeID = groupValue(groups, 1)
+            reason = groupValue(groups, 2)
+        } else if let groups = match(nameChangeReclaimedPattern, in: content) {
+            action = .nameChangeReclaimed
+            targetPledgeID = groupValue(groups, 0)
+            sourcePledgeID = groupValue(groups, 1)
+            reason = groupValue(groups, 2)
+        } else if let groups = match(giveawayPattern, in: content) {
+            action = .giveaway
+            targetPledgeID = groupValue(groups, 0)
+            reason = groupValue(groups, 1)
+        }
+
+        let resolvedOperatorName = operatorName?.nilIfEmpty ?? "CIG"
+        let resolvedTargetID = targetPledgeID?.nilIfEmpty
+        let identifier = [
+            action.rawValue,
+            resolvedTargetID ?? "unknown",
+            String(Int(occurredAt.timeIntervalSince1970)),
+            content
+        ].joined(separator: "#")
+
+        return HangarLogEntry(
+            id: identifier,
+            occurredAt: occurredAt,
+            action: action,
+            itemName: item.itemName.nilIfEmpty ?? "Unknown item",
+            operatorName: resolvedOperatorName,
+            priceUSD: priceUSD,
+            sourcePledgeID: sourcePledgeID?.nilIfEmpty,
+            targetPledgeID: resolvedTargetID,
+            orderCode: orderCode?.nilIfEmpty,
+            reason: reason?.nilIfEmpty,
+            rawText: item.fullText.nilIfEmpty ?? content
+        )
+    }
+
+    private static func parsedDate(from rawValue: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "MMM d yyyy, h:mm a"
+        return formatter.date(from: rawValue)
+    }
+
+    private static func parseMoney(_ rawValue: String?) -> Decimal? {
+        guard let rawValue else {
+            return nil
+        }
+
+        return Decimal(string: rawValue, locale: Locale(identifier: "en_US_POSIX"))
+    }
+
+    private static func groupValue(_ groups: [String], _ index: Int) -> String? {
+        guard groups.indices.contains(index) else {
+            return nil
+        }
+
+        return groups[index]
+    }
+
+    private static func match(_ pattern: String, in text: String) -> [String]? {
+        guard let expression = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+
+        let range = NSRange(text.startIndex ..< text.endIndex, in: text)
+        guard let match = expression.firstMatch(in: text, options: [], range: range) else {
+            return nil
+        }
+
+        return (1 ..< match.numberOfRanges).compactMap { index in
+            let captureRange = match.range(at: index)
+            guard captureRange.location != NSNotFound,
+                  let range = Range(captureRange, in: text) else {
+                return nil
+            }
+
+            return String(text[range])
+        }
     }
 }
 

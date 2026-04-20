@@ -97,6 +97,38 @@ struct PreviewHangarRepository: HangarRepository {
         )
     }
 
+    func refreshHangarLogData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot {
+        progress(
+            RefreshProgress(
+                stage: .preview,
+                stepNumber: 1,
+                stepCount: 1,
+                detail: "Refreshing the preview hangar log.",
+                completedUnitCount: 0,
+                totalUnitCount: 1
+            )
+        )
+
+        progress(
+            RefreshProgress(
+                stage: .preview,
+                stepNumber: 1,
+                stepCount: 1,
+                detail: "Preview hangar log ready.",
+                completedUnitCount: 1,
+                totalUnitCount: 1
+            )
+        )
+
+        return snapshot.updatingHangarLogs(
+            hangarLogs: Self.sampleHangarLogs
+        )
+    }
+
     func refreshAccountData(
         for session: UserSession,
         from snapshot: HangarSnapshot,
@@ -148,6 +180,7 @@ struct PreviewHangarRepository: HangarRepository {
         packages: samplePackages,
         fleet: sampleFleet,
         buyback: sampleBuyback,
+        hangarLogs: sampleHangarLogs,
         referralStats: sampleReferralStats
     )
 
@@ -161,6 +194,7 @@ struct PreviewHangarRepository: HangarRepository {
             packages: samplePackages,
             fleet: sampleFleet,
             buyback: sampleBuyback,
+            hangarLogs: sampleHangarLogs,
             referralStats: sampleReferralStats
         )
     }
@@ -170,6 +204,61 @@ struct PreviewHangarRepository: HangarRepository {
         legacyLadderCount: 7,
         hasLegacyLadder: true
     )
+
+    private static let sampleHangarLogs: [HangarLogEntry] = [
+        HangarLogEntry(
+            id: "preview-created-1001",
+            occurredAt: referenceDate(year: 2026, month: 4, day: 18),
+            action: .created,
+            itemName: "Polaris Expedition Pack",
+            operatorName: "WiseWolfHolo",
+            priceUSD: 750,
+            sourcePledgeID: nil,
+            targetPledgeID: "1001",
+            orderCode: "ORD-EXAMPLE-1001",
+            reason: nil,
+            rawText: "#1001 - Created by WiseWolfHolo - order #ORD-EXAMPLE-1001, value: $750.00 USD"
+        ),
+        HangarLogEntry(
+            id: "preview-upgrade-1003",
+            occurredAt: referenceDate(year: 2026, month: 4, day: 10),
+            action: .appliedUpgrade,
+            itemName: "Zeus Mk II MR Patrol Build",
+            operatorName: "CIG",
+            priceUSD: 190,
+            sourcePledgeID: "1002",
+            targetPledgeID: "1003",
+            orderCode: nil,
+            reason: "Zeus MR upgrade",
+            rawText: "#1003 - Upgrade applied: #1002 Zeus MR upgrade, new value: $190.00 USD"
+        ),
+        HangarLogEntry(
+            id: "preview-gift-1004",
+            occurredAt: referenceDate(year: 2026, month: 3, day: 27),
+            action: .gift,
+            itemName: "Vulture Foundation Token",
+            operatorName: "friend@example.com",
+            priceUSD: 150,
+            sourcePledgeID: nil,
+            targetPledgeID: "1004",
+            orderCode: nil,
+            reason: nil,
+            rawText: "#1004 - Gifted to friend@example.com, value: $150.00 USD"
+        ),
+        HangarLogEntry(
+            id: "preview-reclaim-1005",
+            occurredAt: referenceDate(year: 2026, month: 2, day: 14),
+            action: .reclaimed,
+            itemName: "Legacy Aurora Starter",
+            operatorName: "WiseWolfHolo",
+            priceUSD: 45,
+            sourcePledgeID: nil,
+            targetPledgeID: "1005",
+            orderCode: nil,
+            reason: nil,
+            rawText: "#1005 - Reclaimed by WiseWolfHolo for $45.00 USD"
+        )
+    ]
 
     private static let samplePackages: [HangarPackage] = [
         HangarPackage(

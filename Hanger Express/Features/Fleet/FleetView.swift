@@ -37,7 +37,7 @@ struct FleetView: View {
                                         shipGroup: shipGroup,
                                         subtitle: cardSubtitle(for: shipGroup),
                                         msrpSummary: msrpSummary(for: shipGroup),
-                                        reloadToken: appModel.imageReloadToken
+                                        reloadToken: appModel.hangarFleetImageReloadToken
                                     )
                                 }
                             }
@@ -80,7 +80,8 @@ struct FleetView: View {
         switch sortMode {
         case .manufacturer:
             return groupedSections(for: sortedShipGroups) { shipGroup in
-                normalizedHeaderTitle(shipGroup.representative.manufacturer) ?? "Unknown Manufacturer"
+                normalizedHeaderTitle(FleetPresentationFormatter.manufacturerDisplayName(shipGroup.representative.manufacturer))
+                    ?? "Unknown Manufacturer"
             }
         case .function:
             return functionSections(from: filteredShipGroups)
@@ -229,7 +230,12 @@ struct FleetView: View {
     }
 
     private func cardSubtitle(for shipGroup: GroupedFleetShip) -> String? {
-        normalizedHeaderTitle(shipGroup.representative.manufacturer)
+        normalizedHeaderTitle(
+            FleetPresentationFormatter.roleSummary(
+                role: shipGroup.representative.role,
+                categories: shipGroup.representative.roleCategories
+            ) ?? shipGroup.representative.role
+        )
     }
 
     private func normalizedHeaderTitle(_ rawValue: String) -> String? {
@@ -300,7 +306,7 @@ private struct FleetShipHeroCard: View {
 
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(ship.manufacturer.uppercased())
+                    Text(FleetPresentationFormatter.manufacturerDisplayName(ship.manufacturer).uppercased())
                         .font(.caption2.weight(.semibold))
                         .tracking(3)
                         .foregroundStyle(Color.cyan.opacity(0.92))
