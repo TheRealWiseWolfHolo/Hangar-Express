@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(SyncPreferences.workerCountKey) private var syncWorkerCount = Double(SyncPreferences.defaultWorkerCount)
     @State private var isShowingClearCacheAlert = false
 
     let appModel: AppModel
@@ -44,7 +45,7 @@ struct SettingsView: View {
                                 }
                             )
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                Button("Forget", role: .destructive) {
+                                Button("Remove", role: .destructive) {
                                     if savedSession.id == appModel.session?.id {
                                         dismiss()
                                     }
@@ -68,7 +69,28 @@ struct SettingsView: View {
                 } header: {
                     Text("Accounts")
                 } footer: {
-                    Text("Each saved account keeps its own RSI cookies and stored credentials in Keychain so you can switch accounts without logging in again.")
+                    Text("Each saved account keeps its own RSI cookies and stored credentials in Keychain so you can switch accounts without logging in again. Swipe left on an account to remove it.")
+                }
+
+                Section {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Refresh Workers")
+                            Spacer()
+                            Text("\(resolvedWorkerCount)")
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Slider(
+                            value: $syncWorkerCount,
+                            in: Double(SyncPreferences.minWorkerCount) ... Double(SyncPreferences.maxWorkerCount),
+                            step: 1
+                        )
+                    }
+                } header: {
+                    Text("Sync")
+                } footer: {
+                    Text("Controls how many hangar and buy-back pages Hangar Express refreshes in parallel. Higher values can finish faster on large inventories, but they also send more requests at once.")
                 }
 
                 Section {
@@ -156,6 +178,13 @@ struct SettingsView: View {
         }
 
         return lastRefreshAt.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private var resolvedWorkerCount: Int {
+        min(
+            max(Int(syncWorkerCount.rounded()), SyncPreferences.minWorkerCount),
+            SyncPreferences.maxWorkerCount
+        )
     }
 }
 

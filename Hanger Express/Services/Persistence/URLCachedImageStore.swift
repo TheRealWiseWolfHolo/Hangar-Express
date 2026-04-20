@@ -21,7 +21,7 @@ actor URLCachedImageStore: RemoteImageCaching {
     }
 
     func image(for url: URL, maxRetries: Int = 5) async throws -> UIImage {
-        let request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30)
+        let request = Self.makeRequest(for: url)
 
         if let cachedResponse = cache.cachedResponse(for: request),
            let image = UIImage(data: cachedResponse.data) {
@@ -69,7 +69,14 @@ actor URLCachedImageStore: RemoteImageCaching {
         cache.removeAllCachedResponses()
     }
 
-    private static func makeCache(fileManager: FileManager = .default) -> URLCache {
+    func clear(urls: [URL]) async {
+        let uniqueURLs = Array(Set(urls))
+        for url in uniqueURLs {
+            cache.removeCachedResponse(for: Self.makeRequest(for: url))
+        }
+    }
+
+    private nonisolated static func makeCache(fileManager: FileManager = .default) -> URLCache {
         let cachesDirectory = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? fileManager.temporaryDirectory
         let diskPath = cachesDirectory
@@ -82,6 +89,10 @@ actor URLCachedImageStore: RemoteImageCaching {
             diskCapacity: 512 * 1024 * 1024,
             diskPath: diskPath
         )
+    }
+
+    private nonisolated static func makeRequest(for url: URL) -> URLRequest {
+        URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30)
     }
 }
 

@@ -77,12 +77,12 @@ struct HangarDashboardView: View {
                         NavigationLink {
                             HangarPackageDetailView(
                                 packageGroup: packageGroup,
-                                reloadToken: appModel.imageReloadToken
+                                reloadToken: appModel.hangarFleetImageReloadToken
                             )
                         } label: {
                             HangarPackageGroupRow(
                                 packageGroup: packageGroup,
-                                reloadToken: appModel.imageReloadToken
+                                reloadToken: appModel.hangarFleetImageReloadToken
                             )
                         }
                     }

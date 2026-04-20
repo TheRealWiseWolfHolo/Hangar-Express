@@ -7,6 +7,7 @@ struct AppEnvironment {
     let hangarRepository: any HangarRepository
     let authService: any AuthenticationServicing
     let recaptchaBroker: RecaptchaBroker
+    let authDiagnostics: AuthenticationDiagnosticsStore
 
     init(
         sessionStore: any SessionStore,
@@ -14,7 +15,8 @@ struct AppEnvironment {
         imageCache: any RemoteImageCaching = URLCachedImageStore.shared,
         hangarRepository: any HangarRepository,
         authService: any AuthenticationServicing,
-        recaptchaBroker: RecaptchaBroker
+        recaptchaBroker: RecaptchaBroker,
+        authDiagnostics: AuthenticationDiagnosticsStore
     ) {
         self.sessionStore = sessionStore
         self.snapshotStore = snapshotStore
@@ -22,27 +24,32 @@ struct AppEnvironment {
         self.hangarRepository = hangarRepository
         self.authService = authService
         self.recaptchaBroker = recaptchaBroker
+        self.authDiagnostics = authDiagnostics
     }
 
     static var preview: AppEnvironment {
-        let broker = RecaptchaBroker()
+        let diagnostics = AuthenticationDiagnosticsStore()
+        let broker = RecaptchaBroker(diagnostics: diagnostics)
         return AppEnvironment(
             sessionStore: PreviewSessionStore(),
             snapshotStore: PreviewSnapshotStore(),
             hangarRepository: PreviewHangarRepository(),
-            authService: PreviewAuthenticationService(),
-            recaptchaBroker: broker
+            authService: PreviewAuthenticationService(diagnostics: diagnostics),
+            recaptchaBroker: broker,
+            authDiagnostics: diagnostics
         )
     }
 
     static var live: AppEnvironment {
-        let broker = RecaptchaBroker()
+        let diagnostics = AuthenticationDiagnosticsStore()
+        let broker = RecaptchaBroker(diagnostics: diagnostics)
         return AppEnvironment(
             sessionStore: KeychainSessionStore(),
             snapshotStore: FileSnapshotStore(),
             hangarRepository: LiveHangarRepository(),
-            authService: RSIAuthService(recaptchaBroker: broker),
-            recaptchaBroker: broker
+            authService: RSIAuthService(recaptchaBroker: broker, diagnostics: diagnostics),
+            recaptchaBroker: broker,
+            authDiagnostics: diagnostics
         )
     }
 }

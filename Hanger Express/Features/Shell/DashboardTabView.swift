@@ -64,6 +64,22 @@ struct DashboardTabView: View {
                 )
             }
         }
+        .sheet(item: versionRefreshPromptBinding) { prompt in
+            VersionRefreshPromptSheet(
+                prompt: prompt,
+                onRefreshNow: {
+                    appModel.dismissVersionRefreshPrompt()
+                    Task {
+                        await appModel.refresh(scope: .full)
+                    }
+                },
+                onLater: {
+                    appModel.dismissVersionRefreshPrompt()
+                }
+            )
+            .presentationDetents([.height(240)])
+            .presentationDragIndicator(.visible)
+        }
     }
 
     private var selection: Binding<AppModel.Tab> {
@@ -99,6 +115,17 @@ struct DashboardTabView: View {
             }
         )
     }
+
+    private var versionRefreshPromptBinding: Binding<AppModel.VersionRefreshPrompt?> {
+        Binding(
+            get: { appModel.versionRefreshPrompt },
+            set: { newValue in
+                if newValue == nil {
+                    appModel.dismissVersionRefreshPrompt()
+                }
+            }
+        )
+    }
 }
 
 private enum DashboardAlert: Identifiable {
@@ -111,6 +138,35 @@ private enum DashboardAlert: Identifiable {
             return "reauth:\(prompt.id.uuidString)"
         case let .refreshFailure(message):
             return "refresh:\(message)"
+        }
+    }
+}
+
+private struct VersionRefreshPromptSheet: View {
+    let prompt: AppModel.VersionRefreshPrompt
+    let onRefreshNow: () -> Void
+    let onLater: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(prompt.title)
+                    .font(.title3.bold())
+
+                Text(prompt.message)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 12) {
+                    Button("Later", action: onLater)
+                        .buttonStyle(.bordered)
+
+                    Button("Refresh Now", action: onRefreshNow)
+                        .buttonStyle(.borderedProminent)
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 }

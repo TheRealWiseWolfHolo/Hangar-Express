@@ -18,7 +18,7 @@ struct AccountView: View {
                         email: profileEmail,
                         avatarURL: profileAvatarURL,
                         backgroundImageURL: profileBackgroundImageURL,
-                        reloadToken: appModel.imageReloadToken,
+                        reloadToken: appModel.accountImageReloadToken,
                         onChangeBackground: profileBackgroundOptions.isEmpty ? nil : {
                             isShowingBackgroundPicker = true
                         }

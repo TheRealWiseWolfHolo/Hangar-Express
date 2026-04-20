@@ -53,62 +53,143 @@ actor RSIAuthService: AuthenticationServicing {
     """
 
     private let webSession: any AuthenticationWebSessionProviding
+    private let diagnostics: AuthenticationDiagnosticsStore
+    // Pending state for the browserless GraphQL + verification-code flow.
     private var pendingCredentials: AccountCredentials?
+    // Pending state for the separate in-app browser login flow.
+    private var pendingBrowserCredentials: AccountCredentials?
+    private var pendingBrowserExportedCookies: [SessionCookie] = []
 
-    init(recaptchaBroker: any AuthenticationWebSessionProviding) {
+    init(
+        recaptchaBroker: any AuthenticationWebSessionProviding,
+        diagnostics: AuthenticationDiagnosticsStore
+    ) {
         webSession = recaptchaBroker
+        self.diagnostics = diagnostics
     }
 
-    func signIn(loginIdentifier: String, password: String, rememberMe: Bool) async throws -> SignInOutcome {
+    func signIn(
+        loginIdentifier: String,
+        password: String,
+        rememberMe: Bool,
+        forceBrowserLogin: Bool
+    ) async throws -> SignInOutcome {
         let trimmedLoginIdentifier = loginIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !trimmedLoginIdentifier.isEmpty, !password.isEmpty else {
+            await log(
+                stage: "auth.sign-in",
+                summary: "The sign-in attempt was blocked because credentials were incomplete.",
+                level: .warning
+            )
             throw AuthenticationError.invalidInput("Enter your RSI email or Login ID and password.")
         }
 
-        pendingCredentials = nil
-        try await webSession.resetAuthenticationSession()
-
-        let signInResponse = try await webSession.signIn(
-            loginIdentifier: trimmedLoginIdentifier,
-            password: password,
-            rememberMe: rememberMe,
-            query: Self.signInMutation
+        let credentials = AccountCredentials(loginIdentifier: trimmedLoginIdentifier, password: password)
+        await resetDiagnostics(
+            context: "Starting sign-in for \(maskedIdentifier(trimmedLoginIdentifier))."
         )
-        let response = try decodeGraphQL(signInResponse, context: "signin")
+        await log(
+            stage: "auth.sign-in",
+            summary: "Starting the RSI sign-in pipeline.",
+            detail: "loginIdentifier=\(maskedIdentifier(trimmedLoginIdentifier)), rememberMe=\(rememberMe), forceBrowserLogin=\(forceBrowserLogin)"
+        )
+        pendingCredentials = nil
+        pendingBrowserCredentials = nil
+        pendingBrowserExportedCookies = []
 
-        let errors = response.errors ?? []
-
-        if errors.contains(where: { $0.message == "MultiStepRequired" }) {
-            pendingCredentials = AccountCredentials(loginIdentifier: trimmedLoginIdentifier, password: password)
-            return .requiresTwoFactor
-        }
-
-        if let account = response.authenticatedAccount(for: "account_signin") {
-            let session = makeSession(
-                from: account,
-                credentials: AccountCredentials(loginIdentifier: trimmedLoginIdentifier, password: password),
-                cookies: try await webSession.currentRSICookies()
+        if forceBrowserLogin {
+            pendingBrowserCredentials = credentials
+            await log(
+                stage: "auth.browser-start",
+                summary: "Force Browser Login is enabled. Starting the separate in-app browser sign-in flow."
             )
-            pendingCredentials = nil
-            return .authenticated(session)
-        }
-
-        if errors.isEmpty {
-            throw makeDecodeError(
-                response: signInResponse,
-                context: "signin",
-                reason: "RSI returned a sign-in response the app could not understand yet."
+            return .requiresBrowserChallenge(
+                "Forced browser login is enabled. Continue in the in-app browser to finish signing in."
             )
         }
 
-        throw AuthenticationError.signInFailed(
-            presentableMessage(
+        // The browserless path stays on the original GraphQL flow from v0.4 and does not
+        // switch into the in-app browser flow automatically.
+        do {
+            try await webSession.resetAuthenticationSession()
+            await log(
+                stage: "auth.graphql-sign-in",
+                summary: "Submitting the GraphQL sign-in mutation through the RSI verification helper."
+            )
+            let signInResponse = try await webSession.signIn(
+                loginIdentifier: trimmedLoginIdentifier,
+                password: password,
+                rememberMe: rememberMe,
+                query: Self.signInMutation
+            )
+            let response = try decodeGraphQL(signInResponse, context: "signin")
+
+            let errors = response.errors ?? []
+
+            if errors.contains(where: { $0.message == "MultiStepRequired" }) {
+                pendingCredentials = credentials
+                await log(
+                    stage: "auth.graphql-sign-in",
+                    summary: "RSI requested a verification code after the GraphQL sign-in step."
+                )
+                return .requiresTwoFactor
+            }
+
+            if let account = response.authenticatedAccount(for: "account_signin") {
+                await log(
+                    stage: "auth.graphql-sign-in",
+                    summary: "The GraphQL sign-in mutation returned an authenticated account."
+                )
+                let session = makeSession(
+                    from: account,
+                    credentials: credentials,
+                    cookies: try await webSession.currentRSICookies()
+                )
+                pendingCredentials = nil
+                return .authenticated(session)
+            }
+
+            if errors.isEmpty {
+                throw makeDecodeError(
+                    response: signInResponse,
+                    context: "signin",
+                    reason: "RSI returned a sign-in response the app could not understand yet."
+                )
+            }
+
+            let message = presentableMessage(
                 for: errors,
                 context: .signIn,
                 fallback: "RSI rejected the sign-in attempt. Check the account email or Login ID and password, then try again."
             )
-        )
+            await log(
+                stage: "auth.graphql-sign-in",
+                summary: "The GraphQL sign-in mutation returned an auth failure.",
+                detail: message,
+                level: .warning
+            )
+            throw AuthenticationError.signInFailed(message)
+        } catch {
+            if shouldSuggestBrowserLogin(for: error) {
+                let message = "RSI requested an interactive browser challenge for this sign-in. Turn on Force Browser Login in Advanced and try again."
+                await log(
+                    stage: "auth.graphql-sign-in",
+                    summary: "The browserless sign-in path hit a captcha or challenge that needs the separate browser flow.",
+                    detail: AuthenticationDebugFormatter.debugDescription(for: error),
+                    level: .warning
+                )
+                throw AuthenticationError.signInFailed(message)
+            }
+
+            await log(
+                stage: "auth.graphql-sign-in",
+                summary: "The GraphQL sign-in path failed.",
+                detail: AuthenticationDebugFormatter.debugDescription(for: error),
+                level: .error
+            )
+            throw error
+        }
     }
 
     func submitTwoFactor(code: String, deviceName: String, trustDuration: TrustedDeviceDuration) async throws -> UserSession {
@@ -124,8 +205,19 @@ actor RSIAuthService: AuthenticationServicing {
         }
 
         guard let pendingCredentials else {
+            await log(
+                stage: "auth.two-factor",
+                summary: "The verification-code step expired before it could be submitted.",
+                level: .warning
+            )
             throw AuthenticationError.pendingVerificationExpired
         }
+
+        await log(
+            stage: "auth.two-factor",
+            summary: "Submitting the RSI verification code through the browserless GraphQL flow.",
+            detail: "deviceName=\(trimmedDeviceName), trustDuration=\(trustDuration.rawValue)"
+        )
 
         let twoFactorResponse = try await webSession.submitTwoFactor(
             code: trimmedCode,
@@ -136,6 +228,10 @@ actor RSIAuthService: AuthenticationServicing {
         let response = try decodeGraphQL(twoFactorResponse, context: "multistep")
 
         if let account = response.authenticatedAccount(for: "account_multistep") {
+            await log(
+                stage: "auth.two-factor",
+                summary: "The GraphQL verification mutation returned an authenticated account."
+            )
             let session = makeSession(
                 from: account,
                 credentials: pendingCredentials,
@@ -150,6 +246,11 @@ actor RSIAuthService: AuthenticationServicing {
         if errors.contains(where: \.hasExpiredCSRFContext) {
             self.pendingCredentials = nil
             try? await webSession.resetAuthenticationSession()
+            await log(
+                stage: "auth.two-factor",
+                summary: "The verification step expired because the RSI CSRF context was no longer valid.",
+                level: .warning
+            )
             throw AuthenticationError.pendingVerificationExpired
         }
 
@@ -161,18 +262,226 @@ actor RSIAuthService: AuthenticationServicing {
             )
         }
 
-        throw AuthenticationError.signInFailed(
-            presentableMessage(
-                for: errors,
-                context: .twoFactor,
-                fallback: "The verification code could not be accepted. Try again."
-            )
+        let message = presentableMessage(
+            for: errors,
+            context: .twoFactor,
+            fallback: "The verification code could not be accepted. Try again."
         )
+        await log(
+            stage: "auth.two-factor",
+            summary: "The verification code was rejected.",
+            detail: message,
+            level: .warning
+        )
+        throw AuthenticationError.signInFailed(message)
+    }
+
+    func completeBrowserAuthentication(cookies: [SessionCookie], trustBrowserSession: Bool) async throws -> UserSession {
+        guard let pendingBrowserCredentials else {
+            await log(
+                stage: "auth.browser-complete",
+                summary: "The browser-assisted sign-in no longer had a pending browser credential set to finish.",
+                level: .warning
+            )
+            throw AuthenticationError.pendingVerificationExpired
+        }
+
+        let exportedCookies = resolvedBrowserCookies(primary: cookies)
+        // The browser path only converges with the rest of authentication here, once the
+        // browser-exported cookies are validated and converted into a reusable session.
+        if cookies.isEmpty, !exportedCookies.isEmpty {
+            await log(
+                stage: "auth.browser-complete",
+                summary: "The browser finish step arrived without cookies, so Hangar Express reused the last cached browser export.",
+                detail: browserCookieDebugSummary(for: exportedCookies),
+                level: .warning
+            )
+        }
+        await log(
+            stage: "auth.browser-complete",
+            summary: "Trying to complete sign-in from the exported in-app browser cookies.",
+            detail: browserCookieDebugSummary(for: exportedCookies)
+        )
+
+        do {
+            let session = try await completeAuthentication(
+                credentials: pendingBrowserCredentials,
+                cookies: exportedCookies
+            )
+            self.pendingBrowserCredentials = nil
+            self.pendingBrowserExportedCookies = []
+            await log(
+                stage: "auth.browser-complete",
+                summary: "The exported in-app browser cookies were accepted as a reusable RSI session."
+            )
+            return session
+        } catch let authError as AuthenticationError {
+            if trustBrowserSession {
+                await log(
+                    stage: "auth.browser-complete",
+                    summary: "The exported in-app browser cookies were not accepted yet.",
+                    detail: authError.localizedDescription,
+                    level: .warning
+                )
+                throw remapBrowserImportFailure(authError, cookies: exportedCookies)
+            }
+            throw authError
+        } catch {
+            let wrappedError = AuthenticationError.unavailable(
+                "Hangar Express could not confirm the exported RSI browser session. \(error.localizedDescription)"
+            )
+            if trustBrowserSession {
+                await log(
+                    stage: "auth.browser-complete",
+                    summary: "An unexpected error occurred while finishing browser-assisted sign-in.",
+                    detail: AuthenticationDebugFormatter.debugDescription(for: error),
+                    level: .error
+                )
+                throw remapBrowserImportFailure(wrappedError, cookies: exportedCookies)
+            }
+            throw wrappedError
+        }
+    }
+
+    func rememberBrowserExportedCookies(_ cookies: [SessionCookie]) async {
+        guard !cookies.isEmpty else {
+            await log(
+                stage: "auth.browser-cache",
+                summary: "The browser handoff reached the auth service without cookies, so Hangar Express kept the previous cached browser export.",
+                detail: browserCookieDebugSummary(for: pendingBrowserExportedCookies),
+                level: .warning
+            )
+            return
+        }
+
+        pendingBrowserExportedCookies = cloneCookies(cookies)
+        await log(
+            stage: "auth.browser-cache",
+            summary: "Stored the latest cookies exported from the in-app browser for the pending sign-in.",
+            detail: browserCookieDebugSummary(for: pendingBrowserExportedCookies)
+        )
+    }
+
+    func canCompleteBrowserAuthentication(cookies: [SessionCookie]) async -> Bool {
+        guard pendingBrowserCredentials != nil else {
+            return false
+        }
+
+        do {
+            _ = try await AccountSessionClient.fetchAuthenticatedAccount(using: resolvedBrowserCookies(primary: cookies))
+            return true
+        } catch {
+            return false
+        }
     }
 
     func cancelPendingAuthentication() async {
         pendingCredentials = nil
+        pendingBrowserCredentials = nil
+        pendingBrowserExportedCookies = []
+        await log(
+            stage: "auth.cancel",
+            summary: "Cancelled the pending RSI authentication flow."
+        )
         try? await webSession.resetAuthenticationSession()
+    }
+
+    private func remapBrowserImportFailure(_ error: AuthenticationError, cookies: [SessionCookie]) -> AuthenticationError {
+        let debugSummary = browserCookieDebugSummary(for: cookies)
+
+        switch error {
+        case let .unavailable(message):
+            return .unavailable(
+                """
+                Stage: imported-cookie-reuse
+                Result: the in-app browser exported RSI cookies, but Hangar Express could not verify them as a reusable signed-in session yet.
+                Details: \(debugSummary)
+
+                \(message)
+                """
+            )
+        default:
+            return .unavailable(
+                """
+                Stage: imported-cookie-reuse
+                Result: the in-app browser exported RSI cookies, but Hangar Express could not verify them as a reusable signed-in session yet.
+                Details: \(debugSummary)
+
+                \(error.localizedDescription)
+                """
+            )
+        }
+    }
+
+    private func browserCookieDebugSummary(for cookies: [SessionCookie]) -> String {
+        let exportedCookieCount = cookies.count
+        let cookieNames = cookies.map(\.name).sorted()
+        let authCookieNames = cookies
+            .map(\.name)
+            .filter { name in
+                let lowercasedName = name.lowercased()
+                return lowercasedName.contains("rsi")
+                    || lowercasedName.contains("csrf")
+                    || lowercasedName == "_rsi_device"
+            }
+            .sorted()
+
+        let requiredNames = ["Rsi-Token", "_rsi_device", "Rsi-Account-Auth"]
+        let presentNames = Set(cookies.map { $0.name.lowercased() })
+        let missingRequiredNames = requiredNames.filter { !presentNames.contains($0.lowercased()) }
+
+        return [
+            "exportedCookieCount=\(exportedCookieCount)",
+            "cookieNames=\(cookieNames.isEmpty ? "none" : cookieNames.joined(separator: ","))",
+            "authCookies=\(authCookieNames.isEmpty ? "none" : authCookieNames.joined(separator: ","))",
+            "missingPreferredCookies=\(missingRequiredNames.isEmpty ? "none" : missingRequiredNames.joined(separator: ","))"
+        ].joined(separator: ", ")
+    }
+
+    private func resolvedBrowserCookies(primary cookies: [SessionCookie]) -> [SessionCookie] {
+        let primaryCookies = cloneCookies(cookies)
+        guard !primaryCookies.isEmpty else {
+            return pendingBrowserExportedCookies
+        }
+
+        return primaryCookies
+    }
+
+    private func cloneCookies(_ cookies: [SessionCookie]) -> [SessionCookie] {
+        cookies.map { cookie in
+            SessionCookie(
+                name: cookie.name,
+                value: cookie.value,
+                domain: cookie.domain,
+                path: cookie.path,
+                expiresAt: cookie.expiresAt,
+                isSecure: cookie.isSecure,
+                isHTTPOnly: cookie.isHTTPOnly,
+                version: cookie.version
+            )
+        }
+    }
+
+    private func completeAuthentication(
+        credentials: AccountCredentials,
+        cookies: [SessionCookie]
+    ) async throws -> UserSession {
+        await log(
+            stage: "auth.account-lookup",
+            summary: "Validating the RSI session by loading the authenticated account profile.",
+            detail: browserCookieDebugSummary(for: cookies)
+        )
+        let account = try await AccountSessionClient.fetchAuthenticatedAccount(using: cookies)
+        await log(
+            stage: "auth.account-lookup",
+            summary: "RSI account validation succeeded.",
+            detail: "displayName=\(account.displayname ?? "n/a"), username=\(account.username ?? "n/a"), emailPresent=\(account.email != nil)"
+        )
+        return makeSession(
+            from: account,
+            credentials: credentials,
+            cookies: cookies
+        )
     }
 
     private func decodeGraphQL(_ response: BrowserGraphQLResponse, context: String) throws -> GraphQLResponse {
@@ -219,6 +528,23 @@ actor RSIAuthService: AuthenticationServicing {
             cookies: cookies,
             createdAt: .now
         )
+    }
+
+    private func shouldSuggestBrowserLogin(for error: Error) -> Bool {
+        let nsError = error as NSError
+        let searchSpace = [
+            nsError.localizedDescription,
+            nsError.userInfo["WKJavaScriptExceptionMessage"] as? String,
+            nsError.userInfo["RSIResponseBody"] as? String
+        ]
+            .compactMap { $0?.lowercased() }
+            .joined(separator: " ")
+
+        return searchSpace.contains("captcha")
+            || searchSpace.contains("recaptcha")
+            || searchSpace.contains("grecaptcha")
+            || searchSpace.contains("verification helper")
+            || searchSpace.contains("csrf token")
     }
 
     private func normalizedRSIURL(from rawValue: String?) -> URL? {
@@ -290,7 +616,7 @@ actor RSIAuthService: AuthenticationServicing {
         }
 
         if normalized.contains("captcha") || normalized.contains("recaptcha") {
-            return "RSI requested an additional CAPTCHA challenge. Try signing in again in a fresh session."
+            return "RSI requested an additional CAPTCHA challenge. Turn on Force Browser Login in Advanced and try again."
         }
 
         if normalized.contains("csrf") {
@@ -332,6 +658,208 @@ actor RSIAuthService: AuthenticationServicing {
 
         return NSError(domain: "RSIAuthService", code: response.statusCode, userInfo: userInfo)
     }
+
+    private func resetDiagnostics(context: String) async {
+        await MainActor.run {
+            diagnostics.reset(context: context)
+        }
+    }
+
+    private func log(
+        stage: String,
+        summary: String,
+        detail: String? = nil,
+        level: AuthenticationDiagnosticsStore.Entry.Level = .info
+    ) async {
+        await MainActor.run {
+            diagnostics.record(stage: stage, summary: summary, detail: detail, level: level)
+        }
+    }
+
+    private func maskedIdentifier(_ value: String) -> String {
+        guard let atIndex = value.firstIndex(of: "@") else {
+            let prefix = String(value.prefix(2))
+            return prefix + String(repeating: "*", count: max(0, value.count - prefix.count))
+        }
+
+        let name = String(value[..<atIndex])
+        let domain = String(value[atIndex...])
+        let visiblePrefix = String(name.prefix(2))
+        return visiblePrefix + String(repeating: "*", count: max(0, name.count - visiblePrefix.count)) + domain
+    }
+}
+
+private enum AccountSessionClient {
+    private static let accountQuery = """
+    query account {
+      account {
+        isAnonymous
+        ... on RsiAuthenticatedAccount {
+          avatar
+          displayname
+          email
+          username
+        }
+      }
+    }
+    """
+
+    static func fetchAuthenticatedAccount(using cookies: [SessionCookie]) async throws -> AuthenticatedAccount {
+        let debugSummary = cookieDebugSummary(for: cookies)
+
+        if let missingCriticalCookiesMessage = missingCriticalCookiesMessage(for: cookies) {
+            throw AuthenticationError.unavailable(
+                """
+                Stage: reusable-account-check
+                Result: the exported browser cookies do not include the core RSI auth fields Hangar Express needs for account verification.
+                Details: \(debugSummary), \(missingCriticalCookiesMessage)
+                Action: finish signing in in the in-app browser, wait for the signed-in page to settle, then tap Finished Login again.
+                """
+            )
+        }
+
+        let storage = HTTPCookieStorage()
+        cookies.compactMap(\.httpCookie).forEach(storage.setCookie)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpCookieStorage = storage
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 60
+
+        let session = URLSession(configuration: configuration)
+        var request = URLRequest(url: URL(string: "https://robertsspaceindustries.com/graphql")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        request.setValue(Locale.preferredLanguages.first ?? "en-US", forHTTPHeaderField: "Accept-Language")
+
+        if let rsiToken = cookieValue(in: cookies, names: ["Rsi-Token", "rsi-token"]) {
+            request.setValue(rsiToken, forHTTPHeaderField: "x-rsi-token")
+        }
+
+        if let rsiDevice = cookieValue(in: cookies, names: ["_rsi_device"]) {
+            request.setValue(rsiDevice, forHTTPHeaderField: "x-rsi-device")
+        }
+
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: [
+                "query": accountQuery,
+                "variables": [:]
+            ]
+        )
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw AuthenticationError.unavailable(
+                """
+                Stage: reusable-account-check
+                Result: RSI account lookup did not return a valid network response.
+                Details: \(debugSummary)
+                """
+            )
+        }
+
+        guard (200 ..< 300).contains(httpResponse.statusCode) else {
+            throw AuthenticationError.unavailable(
+                """
+                Stage: reusable-account-check
+                Result: RSI account lookup returned a non-success HTTP response.
+                Details: \(debugSummary), httpStatus=\(httpResponse.statusCode)
+                """
+            )
+        }
+
+        let graphQLResponse = try JSONDecoder().decode(GraphQLResponse.self, from: data)
+        if let account = graphQLResponse.authenticatedAccount(for: "account") {
+            return account
+        }
+
+        if let renderedErrors = renderedGraphQLErrors(from: graphQLResponse), !renderedErrors.isEmpty {
+            throw AuthenticationError.unavailable(
+                """
+                Stage: reusable-account-check
+                Result: RSI received the exported browser cookies, but the account GraphQL query still returned errors.
+                Details: \(debugSummary), graphQLErrors=\(renderedErrors)
+                """
+            )
+        }
+
+        if graphQLResponse.accountIsAnonymous(for: "account") == true {
+            throw AuthenticationError.unavailable(
+                """
+                Stage: reusable-account-check
+                Result: RSI still treated the exported browser session as anonymous.
+                Details: \(debugSummary), accountIsAnonymous=true
+                Action: stay in the signed-in browser for a moment longer, make sure the account is fully logged in, then tap Finished Login again.
+                """
+            )
+        }
+
+        let responseBody = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .prefix(400) ?? ""
+
+        throw AuthenticationError.unavailable(
+            """
+            Stage: reusable-account-check
+            Result: RSI accepted the account lookup request, but Hangar Express still could not read an authenticated account profile from the exported browser session.
+            Details: \(debugSummary), responsePreview=\(responseBody.isEmpty ? "n/a" : String(responseBody))
+            """
+        )
+    }
+
+    private static func cookieValue(in cookies: [SessionCookie], names: [String]) -> String? {
+        let lowercaseNames = Set(names.map { $0.lowercased() })
+        return cookies.first { cookie in
+            lowercaseNames.contains(cookie.name.lowercased())
+        }?.value
+    }
+
+    private static func missingCriticalCookiesMessage(for cookies: [SessionCookie]) -> String? {
+        let lowercasedNames = Set(cookies.map { $0.name.lowercased() })
+        let requiredNames = ["rsi-token", "_rsi_device"]
+        let missingNames = requiredNames.filter { !lowercasedNames.contains($0) }
+
+        guard !missingNames.isEmpty else {
+            return nil
+        }
+
+        return "missingCriticalCookies=\(missingNames.joined(separator: ","))"
+    }
+
+    private static func cookieDebugSummary(for cookies: [SessionCookie]) -> String {
+        let cookieNames = cookies.map(\.name).sorted()
+        let authCookieNames = cookies
+            .map(\.name)
+            .filter { name in
+                let lowercasedName = name.lowercased()
+                return lowercasedName.contains("rsi")
+                    || lowercasedName.contains("csrf")
+                    || lowercasedName == "_rsi_device"
+            }
+            .sorted()
+
+        return [
+            "cookieCount=\(cookies.count)",
+            "cookieNames=\(cookieNames.isEmpty ? "none" : cookieNames.joined(separator: ","))",
+            "authCookies=\(authCookieNames.isEmpty ? "none" : authCookieNames.joined(separator: ","))"
+        ].joined(separator: ", ")
+    }
+
+    private static func renderedGraphQLErrors(from response: GraphQLResponse) -> String? {
+        let renderedErrors = (response.errors ?? [])
+            .map(\.renderedDescription)
+            .filter { !$0.isEmpty }
+
+        guard !renderedErrors.isEmpty else {
+            return nil
+        }
+
+        return renderedErrors.joined(separator: " || ")
+    }
 }
 
 private nonisolated struct GraphQLResponse: Decodable {
@@ -355,6 +883,17 @@ private nonisolated struct GraphQLResponse: Decodable {
             email: account["email"]?.stringValue,
             username: account["username"]?.stringValue
         )
+    }
+
+    func accountIsAnonymous(for key: String) -> Bool? {
+        guard case let .object(values)? = data,
+              let value = values[key],
+              !value.isNull,
+              case let .object(account) = value else {
+            return nil
+        }
+
+        return account["isAnonymous"]?.boolValue
     }
 }
 
@@ -466,6 +1005,28 @@ private nonisolated enum GraphQLJSONValue: Codable {
             return String(value)
         case let .bool(value):
             return String(value)
+        case .object, .array, .null:
+            return nil
+        }
+    }
+
+    var boolValue: Bool? {
+        switch self {
+        case let .bool(value):
+            return value
+        case let .string(value):
+            switch value.lowercased() {
+            case "true":
+                return true
+            case "false":
+                return false
+            default:
+                return nil
+            }
+        case let .int(value):
+            return value != 0
+        case let .double(value):
+            return value != 0
         case .object, .array, .null:
             return nil
         }

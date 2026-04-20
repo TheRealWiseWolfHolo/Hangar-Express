@@ -37,7 +37,7 @@ struct FleetView: View {
                                         shipGroup: shipGroup,
                                         subtitle: cardSubtitle(for: shipGroup),
                                         msrpSummary: msrpSummary(for: shipGroup),
-                                        reloadToken: appModel.imageReloadToken
+                                        reloadToken: appModel.hangarFleetImageReloadToken
                                     )
                                 }
                             }
