@@ -1,7 +1,9 @@
 import SwiftUI
+import UIKit
 
 struct RootView: View {
     let appModel: AppModel
+    @State private var didCopyRefreshDebugReport = false
 
     var body: some View {
         ZStack {
@@ -13,7 +15,11 @@ struct RootView: View {
                     case .idle, .loading:
                         NavigationStack {
                             VStack(spacing: 24) {
-                                RefreshProgressCard(progress: appModel.refreshProgress ?? fallbackProgress)
+                                if !appModel.concurrentRefreshEntries.isEmpty {
+                                    ConcurrentRefreshProgressStrip(entries: appModel.concurrentRefreshEntries)
+                                } else {
+                                    RefreshProgressCard(progress: appModel.refreshProgress ?? fallbackProgress)
+                                }
                             }
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .padding()
@@ -29,12 +35,19 @@ struct RootView: View {
                                 Text(message)
                                     .foregroundStyle(.secondary)
 
-                                Button("Try Again") {
-                                    Task {
-                                        await appModel.refresh()
+                                VStack(spacing: 12) {
+                                    Button("Try Again") {
+                                        Task {
+                                            await appModel.refresh()
+                                        }
                                     }
+                                    .buttonStyle(.borderedProminent)
+
+                                    Button("Copy Logs") {
+                                        copyRefreshDebugReport(errorMessage: message)
+                                    }
+                                    .buttonStyle(.bordered)
                                 }
-                                .buttonStyle(.borderedProminent)
                             }
                             .padding()
                             .navigationTitle("Connection")
@@ -50,6 +63,11 @@ struct RootView: View {
                 )
             }
         }
+        .alert("Refresh Debug Report Copied", isPresented: $didCopyRefreshDebugReport) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("The refresh diagnostics log was copied to the clipboard so the tester can send it to you.")
+        }
     }
 
     private var fallbackProgress: RefreshProgress {
@@ -61,6 +79,21 @@ struct RootView: View {
             completedUnitCount: 0,
             totalUnitCount: nil
         )
+    }
+
+    private func copyRefreshDebugReport(errorMessage: String? = nil) {
+        let report = RefreshDebugReportBuilder.build(
+            entries: appModel.refreshDiagnostics.entries,
+            scope: appModel.lastRefreshErrorScope,
+            errorMessage: errorMessage ?? appModel.lastRefreshErrorMessage
+        )
+
+        guard !report.isEmpty else {
+            return
+        }
+
+        UIPasteboard.general.string = report
+        didCopyRefreshDebugReport = true
     }
 }
 

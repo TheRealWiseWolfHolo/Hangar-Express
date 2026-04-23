@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import UIKit
 import WebKit
 @testable import Hanger_Express
 
@@ -71,6 +72,117 @@ struct Hanger_ExpressTests {
         let deletedSnapshot = await store.load(for: session)
 
         #expect(deletedSnapshot == nil)
+    }
+
+    @Test func urlCachedImageStoreLoadsPersistedThumbnailWithoutNetwork() async throws {
+        defer {
+            MockURLProtocol.requestHandler = nil
+        }
+
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let imageURL = try #require(URL(string: "https://example.com/ship.jpg"))
+        let targetSize = CGSize(width: 84, height: 84)
+        let redImageData = makeSolidImageData(color: .systemRed)
+
+        let initialSession = makeMockURLSession { request in
+            (
+                try #require(HTTPURLResponse(url: request.url ?? imageURL, statusCode: 200, httpVersion: nil, headerFields: nil)),
+                redImageData
+            )
+        }
+
+        let firstStore = URLCachedImageStore(
+            cache: URLCache(memoryCapacity: 0, diskCapacity: 0),
+            session: initialSession,
+            storageDirectoryURL: tempDirectory
+        )
+        let initialImage = try await firstStore.image(
+            for: imageURL,
+            targetPointSize: targetSize,
+            displayScale: 2,
+            maxRetries: 1
+        )
+
+        #expect(colorMatches(sampledColor(from: initialImage), UIColor.systemRed))
+
+        let offlineSession = makeMockURLSession { _ in
+            throw URLError(.notConnectedToInternet)
+        }
+
+        let secondStore = URLCachedImageStore(
+            cache: URLCache(memoryCapacity: 0, diskCapacity: 0),
+            session: offlineSession,
+            storageDirectoryURL: tempDirectory
+        )
+        let restoredImage = try await secondStore.image(
+            for: imageURL,
+            targetPointSize: targetSize,
+            displayScale: 2,
+            maxRetries: 1
+        )
+
+        #expect(colorMatches(sampledColor(from: restoredImage), UIColor.systemRed))
+    }
+
+    @Test func urlCachedImageStoreClearsCompositeImagesWhenSourceURLsInvalidate() async throws {
+        defer {
+            MockURLProtocol.requestHandler = nil
+        }
+
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceURL = try #require(URL(string: "https://example.com/source.jpg"))
+        let targetURL = try #require(URL(string: "https://example.com/target.jpg"))
+        let targetSize = CGSize(width: 96, height: 96)
+        let sourceDataBox = MutableImageDataBox(data: makeSolidImageData(color: .systemRed))
+        let targetImageData = makeSolidImageData(color: .systemBlue)
+
+        let session = makeMockURLSession { request in
+            let response = try #require(
+                HTTPURLResponse(url: request.url ?? sourceURL, statusCode: 200, httpVersion: nil, headerFields: nil)
+            )
+
+            switch request.url?.lastPathComponent {
+            case "source.jpg":
+                return (response, sourceDataBox.data)
+            case "target.jpg":
+                return (response, targetImageData)
+            default:
+                throw URLError(.badURL)
+            }
+        }
+
+        let store = URLCachedImageStore(
+            cache: URLCache(memoryCapacity: 0, diskCapacity: 0),
+            session: session,
+            storageDirectoryURL: tempDirectory
+        )
+
+        let firstComposite = try await store.compositeImage(
+            sourceURL: sourceURL,
+            targetURL: targetURL,
+            targetPointSize: targetSize,
+            displayScale: 2,
+            maxRetries: 1
+        )
+
+        #expect(colorMatches(sampledColor(from: firstComposite, normalizedPoint: CGPoint(x: 0.25, y: 0.5)), UIColor.systemRed))
+        #expect(colorMatches(sampledColor(from: firstComposite, normalizedPoint: CGPoint(x: 0.75, y: 0.5)), UIColor.systemBlue))
+
+        sourceDataBox.data = makeSolidImageData(color: .systemGreen)
+        await store.clear(urls: [sourceURL])
+
+        let refreshedComposite = try await store.compositeImage(
+            sourceURL: sourceURL,
+            targetURL: targetURL,
+            targetPointSize: targetSize,
+            displayScale: 2,
+            maxRetries: 1
+        )
+
+        #expect(colorMatches(sampledColor(from: refreshedComposite, normalizedPoint: CGPoint(x: 0.25, y: 0.5)), UIColor.systemGreen))
+        #expect(colorMatches(sampledColor(from: refreshedComposite, normalizedPoint: CGPoint(x: 0.75, y: 0.5)), UIColor.systemBlue))
     }
 
     @Test func trustedDeviceDurationIncludesYearOption() async throws {
@@ -177,6 +289,227 @@ struct Hanger_ExpressTests {
         #expect(package.hasLifetimeInsurance)
         #expect(package.hasUpgradeItems)
         #expect(!package.isMultiShipPackage)
+    }
+
+    @Test func genericUpgradeableShipDoesNotSurfaceOwnedUpgradeActionWithoutMetadata() async throws {
+        let package = HangarPackage(
+            id: 11,
+            title: "Standalone Ship - Hornet Ghost",
+            status: "Attributed",
+            insurance: "LTI",
+            acquiredAt: .now,
+            originalValueUSD: 185,
+            currentValueUSD: 185,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: true,
+            upgradeMetadata: nil,
+            contents: [
+                PackageItem(
+                    id: "ship-11",
+                    title: "F7C-S Hornet Ghost Mk II",
+                    detail: "Standalone Ship",
+                    category: .ship,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+
+        #expect(package.canUpgrade)
+        #expect(!package.isOwnedUpgradeItem)
+        #expect(!package.canApplyStoredUpgrade)
+    }
+
+    @Test func hornetLegacyPackageTitleDoesNotTriggerFalseUpgradedDetection() async throws {
+        let package = HangarPackage(
+            id: 81560414,
+            title: "Standalone Ships - F7C-S Hornet Mk II - Ghost",
+            status: "Attributed",
+            insurance: "LTI",
+            insuranceOptions: ["LTI"],
+            acquiredAt: Date(timeIntervalSince1970: 1_737_244_800),
+            originalValueUSD: 132,
+            currentValueUSD: 185,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: false,
+            packageThumbnailURL: URL(string: "https://example.com/package.jpg"),
+            contents: [
+                PackageItem(
+                    id: "81560414-0",
+                    title: "F7C-S Hornet Ghost Mk II",
+                    detail: "Anvil Aerospace (ANVL)",
+                    category: .ship,
+                    imageURL: URL(string: "https://example.com/ghost.jpg"),
+                    upgradePricing: nil
+                ),
+                PackageItem(
+                    id: "81560414-1",
+                    title: "Lifetime Insurance",
+                    detail: "Insurance",
+                    category: .perk,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+
+        #expect(!package.isUpgradedShipPledge)
+        #expect(package.upgradedShipDisplayTitle == nil)
+    }
+
+    @Test func missingUpgradedStatusFlagDoesNotMarkPledgeAsUpgraded() async throws {
+        let package = HangarPackage(
+            id: 101,
+            title: "Standalone Ships - UTV plus Wilderness Camo Paint",
+            status: "Attributed",
+            insurance: "LTI",
+            insuranceOptions: ["LTI"],
+            acquiredAt: .now,
+            originalValueUSD: 35,
+            currentValueUSD: 40,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: false,
+            contents: [
+                PackageItem(
+                    id: "ship-101",
+                    title: "Mustang Gamma",
+                    detail: "Consolidated Outland (CNOU)",
+                    category: .ship,
+                    imageURL: nil,
+                    upgradePricing: nil
+                ),
+                PackageItem(
+                    id: "insurance-101",
+                    title: "Lifetime Insurance",
+                    detail: "Insurance",
+                    category: .perk,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+
+        #expect(!package.isUpgradedShipPledge)
+        #expect(package.upgradedShipDisplayTitle == nil)
+    }
+
+    @Test func explicitNonUpgradedStatusKeepsPledgeMarkedAsBase() async throws {
+        let package = HangarPackage(
+            id: 81560414,
+            title: "Standalone Ships - F7C-S Hornet Mk II - Ghost",
+            status: "Attributed",
+            insurance: "LTI",
+            insuranceOptions: ["LTI"],
+            acquiredAt: Date(timeIntervalSince1970: 1_737_244_800),
+            originalValueUSD: 132,
+            currentValueUSD: 185,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: false,
+            isUpgradedStatusFlag: false,
+            packageThumbnailURL: URL(string: "https://example.com/package.jpg"),
+            contents: [
+                PackageItem(
+                    id: "81560414-0",
+                    title: "F7C-S Hornet Ghost Mk II",
+                    detail: "Anvil Aerospace (ANVL)",
+                    category: .ship,
+                    imageURL: URL(string: "https://example.com/ghost.jpg"),
+                    upgradePricing: nil
+                ),
+                PackageItem(
+                    id: "81560414-1",
+                    title: "Lifetime Insurance",
+                    detail: "Insurance",
+                    category: .perk,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+
+        #expect(!package.isUpgradedShipPledge)
+        #expect(package.upgradedShipDisplayTitle == nil)
+    }
+
+    @Test func explicitUpgradedStatusMarksPledgeAsUpgraded() async throws {
+        let package = HangarPackage(
+            id: 101,
+            title: "Standalone Ships - UTV plus Wilderness Camo Paint",
+            status: "Attributed",
+            insurance: "LTI",
+            insuranceOptions: ["LTI"],
+            acquiredAt: .now,
+            originalValueUSD: 35,
+            currentValueUSD: 40,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: false,
+            isUpgradedStatusFlag: true,
+            contents: [
+                PackageItem(
+                    id: "ship-101",
+                    title: "Mustang Gamma",
+                    detail: "Consolidated Outland (CNOU)",
+                    category: .ship,
+                    imageURL: nil,
+                    upgradePricing: nil
+                ),
+                PackageItem(
+                    id: "insurance-101",
+                    title: "Lifetime Insurance",
+                    detail: "Insurance",
+                    category: .perk,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+
+        #expect(package.isUpgradedShipPledge)
+        #expect(package.upgradedShipDisplayTitle == "Mustang Gamma")
+    }
+
+    @Test func ownedUpgradeItemSurfacesStoredUpgradeActionWhenMetadataExists() async throws {
+        let package = HangarPackage(
+            id: 12,
+            title: "Upgrade - Gladius to Hawk Imperator Subscribers Edition",
+            status: "Attributed",
+            insurance: "Unknown",
+            acquiredAt: .now,
+            originalValueUSD: 10,
+            currentValueUSD: 10,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: false,
+            upgradeMetadata: HangarPackage.UpgradeMetadata(
+                id: 501,
+                name: "Gladius to Hawk Imperator Subscribers Edition",
+                upgradeType: "ship_upgrade",
+                matchItems: [
+                    .init(id: 201, name: "Gladius")
+                ],
+                targetItems: [
+                    .init(id: 202, name: "Hawk Imperator Subscribers Edition")
+                ]
+            ),
+            contents: [
+                PackageItem(
+                    id: "upgrade-12",
+                    title: "Upgrade - Gladius to Hawk Imperator Subscribers Edition",
+                    detail: "Ship upgrade",
+                    category: .upgrade,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+
+        #expect(package.isOwnedUpgradeItem)
+        #expect(package.canApplyStoredUpgrade)
     }
 
     @Test func upgradeOnlyPledgeHidesUnknownInsurance() async throws {
@@ -426,6 +759,102 @@ struct Hanger_ExpressTests {
         #expect(grouped.last?.quantity == 1)
     }
 
+    @Test func hangarUpgradePackagesGroupWhenOnlyHiddenUnknownInsuranceDiffers() async throws {
+        let upgradeContents = [
+            PackageItem(
+                id: "upgrade-1",
+                title: "Upgrade - Freelancer DUR to Hull B Standard Edition",
+                detail: "Ship upgrade",
+                category: .upgrade,
+                imageURL: nil,
+                upgradePricing: nil
+            )
+        ]
+
+        let emptyInsurance = HangarPackage(
+            id: 200,
+            title: "Upgrade - Freelancer DUR to Hull B Standard Edition",
+            status: "Attributed",
+            insurance: "",
+            acquiredAt: .now,
+            originalValueUSD: 5,
+            currentValueUSD: 5,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: false,
+            contents: upgradeContents
+        )
+        let unknownInsurance = HangarPackage(
+            id: 201,
+            title: "Upgrade - Freelancer DUR to Hull B Standard Edition",
+            status: "Attributed",
+            insurance: "Unknown",
+            acquiredAt: .now,
+            originalValueUSD: 5,
+            currentValueUSD: 5,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: false,
+            contents: upgradeContents
+        )
+
+        let grouped = [emptyInsurance, unknownInsurance].groupedForInventoryDisplay
+
+        #expect(grouped.count == 1)
+        #expect(grouped.first?.quantity == 2)
+    }
+
+    @Test func hangarPackagesGroupWhenContentsMatchButAppearInDifferentOrder() async throws {
+        let prospector = PackageItem(
+            id: "ship-1",
+            title: "Prospector",
+            detail: "Ship",
+            category: .ship,
+            imageURL: nil,
+            upgradePricing: nil
+        )
+        let roc = PackageItem(
+            id: "vehicle-1",
+            title: "ROC",
+            detail: "Vehicle",
+            category: .vehicle,
+            imageURL: nil,
+            upgradePricing: nil
+        )
+
+        let firstOrder = HangarPackage(
+            id: 300,
+            title: "Mining Starter Pair",
+            status: "Attributed",
+            insurance: "LTI",
+            acquiredAt: .now,
+            originalValueUSD: 200,
+            currentValueUSD: 200,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: false,
+            contents: [prospector, roc]
+        )
+        let secondOrder = HangarPackage(
+            id: 301,
+            title: "Mining Starter Pair",
+            status: "Attributed",
+            insurance: "LTI",
+            acquiredAt: .now,
+            originalValueUSD: 200,
+            currentValueUSD: 200,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: false,
+            contents: [roc, prospector]
+        )
+
+        let grouped = [firstOrder, secondOrder].groupedForInventoryDisplay
+
+        #expect(grouped.count == 1)
+        #expect(grouped.first?.quantity == 2)
+    }
+
     @Test func hangarPackageThumbnailPrefersThePledgeCardThumbnail() async throws {
         let packageThumbnailURL = try #require(URL(string: "https://example.com/package-thumb.jpg"))
         let itemImageURL = try #require(URL(string: "https://example.com/item-detail.jpg"))
@@ -572,11 +1001,15 @@ struct Hanger_ExpressTests {
             )
         )
 
-        let service = RSIAuthService(recaptchaBroker: webSession)
+        let service = RSIAuthService(
+            recaptchaBroker: webSession,
+            diagnostics: AuthenticationDiagnosticsStore()
+        )
         let outcome = try await service.signIn(
             loginIdentifier: "pilot@example.com",
             password: "secret-password",
-            rememberMe: true
+            rememberMe: true,
+            forceBrowserLogin: false
         )
 
         switch outcome {
@@ -584,6 +1017,61 @@ struct Hanger_ExpressTests {
             break
         case .authenticated:
             Issue.record("Expected the auth flow to require a verification code.")
+        case let .requiresBrowserChallenge(message):
+            Issue.record("Expected a two-factor response, but the service requested browser login instead: \(message)")
+        }
+    }
+
+    @Test func signInAcceptsAuthenticatedCookieFallbackWhenTwoFactorIsNotRequired() async throws {
+        let webSession = FakeAuthenticationWebSession(
+            signInResponse: BrowserGraphQLResponse(
+                statusCode: 200,
+                body: """
+                {
+                  "data": {
+                    "account_signin": false
+                  },
+                  "errors": []
+                }
+                """
+            ),
+            cookies: [
+                makeSessionCookie(name: "Rsi-Token", value: "rsi-token"),
+                makeSessionCookie(name: "_rsi_device", value: "device-token")
+            ]
+        )
+
+        let service = RSIAuthService(
+            recaptchaBroker: webSession,
+            diagnostics: AuthenticationDiagnosticsStore(),
+            accountFetcher: { cookies in
+                #expect(cookies.map(\.name).sorted() == ["Rsi-Token", "_rsi_device"])
+                return AuthenticatedAccount(
+                    avatar: "/avatar.png",
+                    displayname: "Pilot Example",
+                    email: "pilot@example.com",
+                    username: "PilotHandle"
+                )
+            }
+        )
+
+        let outcome = try await service.signIn(
+            loginIdentifier: "pilot@example.com",
+            password: "secret-password",
+            rememberMe: true,
+            forceBrowserLogin: false
+        )
+
+        switch outcome {
+        case let .authenticated(session):
+            #expect(session.displayName == "Pilot Example")
+            #expect(session.handle == "PilotHandle")
+            #expect(session.email == "pilot@example.com")
+            #expect(session.cookies.count == 2)
+        case .requiresTwoFactor:
+            Issue.record("Expected browserless sign-in to authenticate immediately when RSI had already issued reusable session cookies.")
+        case let .requiresBrowserChallenge(message):
+            Issue.record("Expected browserless sign-in to authenticate immediately, but the service requested browser login instead: \(message)")
         }
     }
 
@@ -612,13 +1100,17 @@ struct Hanger_ExpressTests {
             )
         )
 
-        let service = RSIAuthService(recaptchaBroker: webSession)
+        let service = RSIAuthService(
+            recaptchaBroker: webSession,
+            diagnostics: AuthenticationDiagnosticsStore()
+        )
 
         do {
             _ = try await service.signIn(
                 loginIdentifier: "pilot@example.com",
                 password: "wrong-password",
-                rememberMe: true
+                rememberMe: true,
+                forceBrowserLogin: false
             )
             Issue.record("Expected invalid credentials to throw an authentication error.")
         } catch let error as AuthenticationError {
@@ -658,13 +1150,17 @@ struct Hanger_ExpressTests {
             )
         )
 
-        let service = RSIAuthService(recaptchaBroker: webSession)
+        let service = RSIAuthService(
+            recaptchaBroker: webSession,
+            diagnostics: AuthenticationDiagnosticsStore()
+        )
 
         do {
             _ = try await service.signIn(
                 loginIdentifier: "pilot@example.com",
                 password: "wrong-password",
-                rememberMe: true
+                rememberMe: true,
+                forceBrowserLogin: false
             )
             Issue.record("Expected RSI lockout to throw an authentication error.")
         } catch let error as AuthenticationError {
@@ -705,13 +1201,17 @@ struct Hanger_ExpressTests {
             )
         )
 
-        let service = RSIAuthService(recaptchaBroker: webSession)
+        let service = RSIAuthService(
+            recaptchaBroker: webSession,
+            diagnostics: AuthenticationDiagnosticsStore()
+        )
 
         do {
             _ = try await service.signIn(
                 loginIdentifier: "pilot@example.com",
                 password: "secret-password",
-                rememberMe: true
+                rememberMe: true,
+                forceBrowserLogin: false
             )
             Issue.record("Expected the unknown RSI error to throw an authentication error.")
         } catch let error as AuthenticationError {
@@ -774,11 +1274,15 @@ struct Hanger_ExpressTests {
             )
         )
 
-        let service = RSIAuthService(recaptchaBroker: webSession)
+        let service = RSIAuthService(
+            recaptchaBroker: webSession,
+            diagnostics: AuthenticationDiagnosticsStore()
+        )
         _ = try await service.signIn(
             loginIdentifier: "pilot@example.com",
             password: "secret-password",
-            rememberMe: true
+            rememberMe: true,
+            forceBrowserLogin: false
         )
 
         do {
@@ -855,12 +1359,22 @@ struct Hanger_ExpressTests {
                     manufacturer: "Anvil Aerospace",
                     msrpUSD: 200,
                     imageURL: URL(string: "https://example.com/heartseeker.jpg")
+                ),
+                .init(
+                    id: 5,
+                    name: "Mustang Gamma",
+                    manufacturer: "Consolidated Outland",
+                    msrpUSD: 65,
+                    imageURL: URL(string: "https://example.com/mustang-gamma.jpg")
                 )
             ]
         )
 
         #expect(catalog.matchShip(named: "Idris-M Frigate")?.name == "Idris-M")
         #expect(catalog.matchShip(named: "Idris-P Frigate")?.name == "Idris-P")
+        #expect(catalog.matchShip(named: "Ursa Rover")?.name == "Ursa")
+        #expect(catalog.matchShip(named: "315p Explorer")?.name == "315p")
+        #expect(catalog.matchShip(named: "Mustang Gamma Standard Edition")?.name == "Mustang Gamma")
         #expect(catalog.matchShip(named: "F7A Hornet Mk1")?.name == "F7A Hornet Mk I")
         #expect(catalog.matchShip(named: "F7C-M Hornet Heartseeker Mk I")?.name == "F7C-M Super Hornet Heartseeker Mk I")
     }
@@ -911,7 +1425,8 @@ struct Hanger_ExpressTests {
                   "focus": "Capital",
                   "minCrew": 6,
                   "maxCrew": 14,
-                  "thumbnailUrl": "https://example.com/polaris.webp"
+                  "thumbnailUrl": "https://mirror.example.com/polaris.webp",
+                  "sourceThumbnailUrl": "https://robertsspaceindustries.com/media/polaris.webp"
                 }
               ]
             }
@@ -928,7 +1443,12 @@ struct Hanger_ExpressTests {
         #expect(match.roleSummary == "Combat / Capital")
         #expect(match.minCrew == 6)
         #expect(match.maxCrew == 14)
-        #expect(match.imageURL == URL(string: "https://example.com/polaris.webp"))
+        #expect(match.imageURL == URL(string: "https://mirror.example.com/polaris.webp"))
+        #expect(
+            catalog.mirroredAssetURL(
+                for: URL(string: "https://robertsspaceindustries.com/media/polaris.webp")
+            ) == URL(string: "https://mirror.example.com/polaris.webp")
+        )
     }
 
     @Test func hostedShipCatalogSplitsMultiRoleShipsIntoDistinctCategories() async throws {
@@ -958,6 +1478,226 @@ struct Hanger_ExpressTests {
         #expect(match.roleSummary == "Multi: Starter | Light Freight")
         #expect(match.roleCategories == ["Multi", "Starter", "Light Freight"])
         #expect(match.msrpUSD == 65)
+    }
+
+    @Test func hostedShipFeedEndpointsPreferPagesDevAndFallbackToGitHubPages() async throws {
+        #expect(
+            HostedShipFeedEndpoints.catalogURLs == [
+                URL(string: "https://starcitizen-info.remote.example.invalid/ships.json")!,
+                URL(string: "https://fallback.example.invalid/ships.json")!
+            ]
+        )
+        #expect(
+            HostedShipFeedEndpoints.detailCatalogURLs == [
+                URL(string: "https://starcitizen-info.remote.example.invalid/ship-details.json")!,
+                URL(string: "https://fallback.example.invalid/ship-details.json")!
+            ]
+        )
+    }
+
+    @Test func hostedShipDetailCatalogDecodesCurrentHostedPayloadShape() async throws {
+        let data = Data(
+            """
+            {
+              "generatedAt": "2026-04-23T18:47:05.397Z",
+              "sourcePageUrl": "https://starcitizen.tools/List_of_pledge_vehicles",
+              "shipCount": 244,
+              "ships": [
+                {
+                  "name": "100i",
+                  "pageUrl": "https://starcitizen.tools/100i",
+                  "manufacturer": "Origin Jumpworks",
+                  "career": "Multi-role",
+                  "role": "Starter / Touring",
+                  "size": "Small",
+                  "inGameStatus": "Flight ready",
+                  "pledgeAvailability": "Always available",
+                  "minCrew": 1,
+                  "maxCrew": 1,
+                  "description": "A compact starter ship.",
+                  "technicalSpecs": [
+                    { "label": "Length", "value": "19 m" }
+                  ],
+                  "technicalSections": [
+                    {
+                      "title": "Turret",
+                      "items": [
+                        { "label": "CF-337 Panther Repeater", "value": "2x · S3 · 1,500 ❤️ · A" }
+                      ]
+                    }
+                  ],
+                  "specificationSections": [
+                    {
+                      "tab": "Weapons & Utility",
+                      "title": "Turret",
+                      "items": [
+                        {
+                          "name": "CF-337 Panther Repeater",
+                          "count": 2,
+                          "size": "S3",
+                          "subtitle": "1,500 ❤️ · A",
+                          "level": 2
+                        }
+                      ],
+                      "summaryBySize": [
+                        { "size": "S3", "count": 2, "entryCount": 1 }
+                      ]
+                    }
+                  ],
+                  "componentEntries": [],
+                  "weaponsUtilityEntries": [
+                    {
+                      "tab": "Weapons & Utility",
+                      "section": "Turret",
+                      "name": "CF-337 Panther Repeater",
+                      "count": 2,
+                      "size": "S3"
+                    }
+                  ],
+                  "componentSummary": {
+                    "totalEntries": 0,
+                    "totalCount": 0,
+                    "bySection": [],
+                    "bySize": []
+                  },
+                  "weaponsUtilitySummary": {
+                    "totalEntries": 1,
+                    "totalCount": 2,
+                    "bySection": [
+                      {
+                        "tab": "Weapons & Utility",
+                        "section": "Turret",
+                        "size": "S3",
+                        "count": 2,
+                        "entryCount": 1
+                      }
+                    ],
+                    "bySize": [
+                      {
+                        "size": "S3",
+                        "count": 2,
+                        "entryCount": 1
+                      }
+                    ]
+                  },
+                  "unavailableReason": null
+                }
+              ]
+            }
+            """.utf8
+        )
+
+        let catalog = try HostedShipDetailCatalogClient.decodeCatalog(from: data)
+        let match = try #require(catalog.matchShip(named: "Origin 100i"))
+
+        #expect(match.name == "100i")
+        #expect(match.manufacturer == "Origin Jumpworks")
+        #expect(match.roleSummary == "Multi Role: Starter | Touring")
+        #expect(match.size == "Small")
+        #expect(match.minCrew == 1)
+        #expect(match.maxCrew == 1)
+        #expect(match.pageURL == URL(string: "https://starcitizen.tools/100i"))
+        #expect(match.technicalSpecs == [.init(label: "Length", value: "19 m")])
+        #expect(
+            match.technicalSections == [
+                .init(
+                    title: "Turret",
+                    items: [
+                        .init(label: "CF-337 Panther Repeater", value: "2x · S3 · 1,500 ❤️ · A")
+                    ]
+                )
+            ]
+        )
+    }
+
+    @Test func hostedShipDetailCatalogRequestsIgnoreLocalURLCacheData() async throws {
+        let url = try #require(URL(string: "https://example.com/ship-details.json"))
+        let payload = makeHostedShipDetailPayload(
+            description: "Fresh feed payload.",
+            technicalValue: "1x · S1 · 600 HP · Military (C)"
+        )
+        let session = makeMockURLSession { request in
+            #expect(request.url == url)
+            #expect(request.cachePolicy == .reloadIgnoringLocalCacheData)
+
+            return (
+                try #require(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)),
+                payload
+            )
+        }
+
+        let client = HostedShipDetailCatalogClient(urls: [url], urlSession: session)
+        let catalog = try await client.fetchCatalog()
+
+        #expect(catalog.matchShip(named: "100i")?.description == "Fresh feed payload.")
+    }
+
+    @Test func clearLocalCacheClearsHostedShipDetailCatalogAndSharedResponseCache() async throws {
+        await HostedShipDetailCatalogStore.shared.clear()
+        defer {
+            MockURLProtocol.requestHandler = nil
+        }
+
+        let feedURL = try #require(URL(string: "https://example.com/ship-details.json"))
+        let stalePayload = makeHostedShipDetailPayload(
+            description: "Stale cached description.",
+            technicalValue: "1x · S1 · 600 HP · Military (C)"
+        )
+        let freshPayload = makeHostedShipDetailPayload(
+            description: "Fresh description after clearing cache.",
+            technicalValue: "1x · S1 · 600 HP · Military (C)"
+        )
+
+        let staleSession = makeMockURLSession { request in
+            (
+                try #require(HTTPURLResponse(url: request.url ?? feedURL, statusCode: 200, httpVersion: nil, headerFields: nil)),
+                stalePayload
+            )
+        }
+        let staleCatalog = try await HostedShipDetailCatalogStore.shared.catalog(
+            using: HostedShipDetailCatalogClient(urls: [feedURL], urlSession: staleSession)
+        )
+        #expect(staleCatalog.matchShip(named: "100i")?.description == "Stale cached description.")
+
+        let cachedRequest = URLRequest(url: try #require(URL(string: "https://example.com/cached.json")))
+        let cachedResponse = try #require(
+            HTTPURLResponse(url: cachedRequest.url!, statusCode: 200, httpVersion: nil, headerFields: nil)
+        )
+        URLCache.shared.storeCachedResponse(
+            CachedURLResponse(response: cachedResponse, data: Data("{}".utf8)),
+            for: cachedRequest
+        )
+        #expect(URLCache.shared.cachedResponse(for: cachedRequest) != nil)
+
+        let imageCache = FakeRemoteImageCache()
+        let appModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(storedSnapshot: .empty),
+                snapshotStore: FakeSnapshotStore(snapshot: nil),
+                hangarRepository: FakeHangarRepository(),
+                imageCache: imageCache
+            )
+        )
+
+        await appModel.clearLocalCache()
+
+        #expect(URLCache.shared.cachedResponse(for: cachedRequest) == nil)
+        #expect(await imageCache.clearCallCount() == 1)
+
+        let freshSession = makeMockURLSession { request in
+            (
+                try #require(HTTPURLResponse(url: request.url ?? feedURL, statusCode: 200, httpVersion: nil, headerFields: nil)),
+                freshPayload
+            )
+        }
+        let refreshedCatalog = try await HostedShipDetailCatalogStore.shared.catalog(
+            using: HostedShipDetailCatalogClient(urls: [feedURL], urlSession: freshSession)
+        )
+        #expect(
+            refreshedCatalog.matchShip(named: "100i")?.description == "Fresh description after clearing cache."
+        )
+
+        await HostedShipDetailCatalogStore.shared.clear()
     }
 
     @Test func fleetRoleFormatterUsesTypeAndPipeSeparatedFocusSummary() async throws {
@@ -1489,12 +2229,10 @@ struct Hanger_ExpressTests {
 
         let appModel = await MainActor.run {
             AppModel(
-                environment: AppEnvironment(
+                environment: makeTestAppEnvironment(
                     sessionStore: sessionStore,
                     snapshotStore: snapshotStore,
-                    hangarRepository: failingRepository,
-                    authService: PreviewAuthenticationService(),
-                    recaptchaBroker: RecaptchaBroker()
+                    hangarRepository: failingRepository
                 )
             )
         }
@@ -1535,14 +2273,12 @@ struct Hanger_ExpressTests {
 
         let appModel = await MainActor.run {
             AppModel(
-                environment: AppEnvironment(
+                environment: makeTestAppEnvironment(
                     sessionStore: FakeSessionStore(
                         storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
                     ),
                     snapshotStore: FakeSnapshotStore(snapshot: cachedSnapshot),
-                    hangarRepository: repository,
-                    authService: PreviewAuthenticationService(),
-                    recaptchaBroker: RecaptchaBroker()
+                    hangarRepository: repository
                 )
             )
         }
@@ -1579,14 +2315,12 @@ struct Hanger_ExpressTests {
 
         let appModel = await MainActor.run {
             AppModel(
-                environment: AppEnvironment(
+                environment: makeTestAppEnvironment(
                     sessionStore: FakeSessionStore(
                         storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
                     ),
                     snapshotStore: FakeSnapshotStore(snapshot: cachedSnapshot),
-                    hangarRepository: repository,
-                    authService: PreviewAuthenticationService(),
-                    recaptchaBroker: RecaptchaBroker()
+                    hangarRepository: repository
                 )
             )
         }
@@ -1619,6 +2353,7 @@ struct Hanger_ExpressTests {
             accountHandle: "account-scope",
             avatarURL: URL(string: "https://example.com/avatar.png"),
             primaryOrganization: nil,
+            didRefreshPrimaryOrganization: true,
             storeCreditUSD: 999,
             totalSpendUSD: 1234,
             referralStats: ReferralStats(
@@ -1632,14 +2367,12 @@ struct Hanger_ExpressTests {
 
         let appModel = await MainActor.run {
             AppModel(
-                environment: AppEnvironment(
+                environment: makeTestAppEnvironment(
                     sessionStore: FakeSessionStore(
                         storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
                     ),
                     snapshotStore: FakeSnapshotStore(snapshot: cachedSnapshot),
-                    hangarRepository: repository,
-                    authService: PreviewAuthenticationService(),
-                    recaptchaBroker: RecaptchaBroker()
+                    hangarRepository: repository
                 )
             )
         }
@@ -1677,12 +2410,10 @@ struct Hanger_ExpressTests {
 
         let appModel = await MainActor.run {
             AppModel(
-                environment: AppEnvironment(
+                environment: makeTestAppEnvironment(
                     sessionStore: sessionStore,
                     snapshotStore: FakeSnapshotStore(snapshot: cachedSnapshot),
-                    hangarRepository: repository,
-                    authService: PreviewAuthenticationService(),
-                    recaptchaBroker: RecaptchaBroker()
+                    hangarRepository: repository
                 )
             )
         }
@@ -1716,14 +2447,12 @@ struct Hanger_ExpressTests {
 
         let appModel = await MainActor.run {
             AppModel(
-                environment: AppEnvironment(
+                environment: makeTestAppEnvironment(
                     sessionStore: FakeSessionStore(
                         storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
                     ),
                     snapshotStore: FakeSnapshotStore(snapshot: cachedSnapshot),
-                    hangarRepository: FakeHangarRepository(error: LiveHangarRepositoryError.sessionExpired),
-                    authService: PreviewAuthenticationService(),
-                    recaptchaBroker: RecaptchaBroker()
+                    hangarRepository: FakeHangarRepository(error: LiveHangarRepositoryError.sessionExpired)
                 )
             )
         }
@@ -1766,6 +2495,30 @@ private func makeUserSession(
     )
 }
 
+@MainActor
+private func makeTestAppEnvironment(
+    sessionStore: any SessionStore,
+    snapshotStore: any SnapshotStore,
+    hangarRepository: any HangarRepository,
+    imageCache: (any RemoteImageCaching)? = nil
+) -> AppEnvironment {
+    let diagnostics = AuthenticationDiagnosticsStore()
+    let refreshDiagnostics = RefreshDiagnosticsStore()
+    let recaptchaBroker = RecaptchaBroker(diagnostics: diagnostics)
+
+    return AppEnvironment(
+        sessionStore: sessionStore,
+        snapshotStore: snapshotStore,
+        imageCache: imageCache ?? URLCachedImageStore.shared,
+        hangarRepository: hangarRepository,
+        sensitiveActionAuthorizer: PreviewSensitiveActionAuthorizer(),
+        authService: PreviewAuthenticationService(diagnostics: diagnostics),
+        recaptchaBroker: recaptchaBroker,
+        authDiagnostics: diagnostics,
+        refreshDiagnostics: refreshDiagnostics
+    )
+}
+
 private func makeSessionCookie(name: String, value: String) -> SessionCookie {
     SessionCookie(
         name: name,
@@ -1777,6 +2530,126 @@ private func makeSessionCookie(name: String, value: String) -> SessionCookie {
         isHTTPOnly: true,
         version: 0
     )
+}
+
+private func makeHostedShipDetailPayload(description: String, technicalValue: String) -> Data {
+    Data(
+        """
+        {
+          "generatedAt": "2026-04-23T19:43:33.708Z",
+          "sourcePageUrl": "https://starcitizen.tools/List_of_pledge_vehicles",
+          "shipCount": 1,
+          "ships": [
+            {
+              "name": "100i",
+              "pageUrl": "https://starcitizen.tools/100i",
+              "manufacturer": "Origin Jumpworks",
+              "career": "Multi-role",
+              "role": "Starter / Touring",
+              "size": "Small",
+              "inGameStatus": "Flight ready",
+              "pledgeAvailability": "Always available",
+              "minCrew": 1,
+              "maxCrew": 1,
+              "description": \(jsonStringLiteral(description)),
+              "technicalSpecs": [
+                { "label": "Length", "value": "19 m" }
+              ],
+              "technicalSections": [
+                {
+                  "title": "Turret",
+                  "items": [
+                    { "label": "CF-337 Panther Repeater", "value": \(jsonStringLiteral(technicalValue)) }
+                  ]
+                }
+              ],
+              "unavailableReason": null
+            }
+          ]
+        }
+        """.utf8
+    )
+}
+
+private func jsonStringLiteral(_ value: String) -> String {
+    let data = try? JSONSerialization.data(withJSONObject: [value])
+    let arrayLiteral = data.flatMap { String(data: $0, encoding: .utf8) } ?? "[\"\"]"
+    return String(arrayLiteral.dropFirst().dropLast())
+}
+
+private func makeSolidImageData(
+    color: UIColor,
+    size: CGSize = CGSize(width: 240, height: 240)
+) -> Data {
+    let format = UIGraphicsImageRendererFormat.default()
+    format.scale = 1
+    format.opaque = true
+
+    let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+        color.setFill()
+        context.fill(CGRect(origin: .zero, size: size))
+    }
+
+    return image.jpegData(compressionQuality: 1) ?? Data()
+}
+
+private func sampledColor(
+    from image: UIImage,
+    normalizedPoint: CGPoint = CGPoint(x: 0.5, y: 0.5)
+) -> UIColor? {
+    guard let cgImage = image.cgImage else {
+        return nil
+    }
+
+    var pixel = [UInt8](repeating: 0, count: 4)
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    guard let context = CGContext(
+        data: &pixel,
+        width: 1,
+        height: 1,
+        bitsPerComponent: 8,
+        bytesPerRow: 4,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else {
+        return nil
+    }
+
+    let pixelX = CGFloat(min(max(Int(CGFloat(cgImage.width - 1) * normalizedPoint.x), 0), cgImage.width - 1))
+    let pixelY = CGFloat(min(max(Int(CGFloat(cgImage.height - 1) * normalizedPoint.y), 0), cgImage.height - 1))
+
+    context.translateBy(x: -pixelX, y: pixelY - CGFloat(cgImage.height) + 1)
+    context.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+
+    return UIColor(
+        red: CGFloat(pixel[0]) / 255,
+        green: CGFloat(pixel[1]) / 255,
+        blue: CGFloat(pixel[2]) / 255,
+        alpha: CGFloat(pixel[3]) / 255
+    )
+}
+
+private func colorMatches(_ lhs: UIColor?, _ rhs: UIColor, tolerance: CGFloat = 0.12) -> Bool {
+    guard let lhs,
+          let lhsComponents = lhs.cgColor.converted(to: CGColorSpaceCreateDeviceRGB(), intent: .defaultIntent, options: nil)?.components,
+          let rhsComponents = rhs.cgColor.converted(to: CGColorSpaceCreateDeviceRGB(), intent: .defaultIntent, options: nil)?.components,
+          lhsComponents.count >= 3,
+          rhsComponents.count >= 3 else {
+        return false
+    }
+
+    return abs(lhsComponents[0] - rhsComponents[0]) <= tolerance
+        && abs(lhsComponents[1] - rhsComponents[1]) <= tolerance
+        && abs(lhsComponents[2] - rhsComponents[2]) <= tolerance
+}
+
+private func makeMockURLSession(
+    handler: @escaping @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
+) -> URLSession {
+    MockURLProtocol.requestHandler = handler
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [MockURLProtocol.self]
+    return URLSession(configuration: configuration)
 }
 
 private final class FakeAuthenticationWebSession: AuthenticationWebSessionProviding, @unchecked Sendable {
@@ -1810,6 +2683,58 @@ private final class FakeAuthenticationWebSession: AuthenticationWebSessionProvid
     @MainActor
     func currentRSICookies() async throws -> [SessionCookie] {
         cookies
+    }
+}
+
+private actor FakeRemoteImageCache: RemoteImageCaching {
+    private var clearCalls = 0
+
+    func clear() async {
+        clearCalls += 1
+    }
+
+    func clear(urls _: [URL]) async {}
+
+    func clearCallCount() async -> Int {
+        clearCalls
+    }
+}
+
+private final class MockURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var requestHandler: (@Sendable (URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "example.com"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let handler = Self.requestHandler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private final class MutableImageDataBox: @unchecked Sendable {
+    var data: Data
+
+    init(data: Data) {
+        self.data = data
     }
 }
 
@@ -1943,6 +2868,21 @@ private actor FakeHangarRepository: HangarRepository {
         return hangarSnapshot ?? snapshot
     }
 
+    func refreshHangarData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        affectedPledgeIDs: [Int],
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot {
+        invokedScopes.append("hangar-partial")
+
+        if let hangarError {
+            throw hangarError
+        }
+
+        return hangarSnapshot ?? snapshot
+    }
+
     func refreshBuybackData(
         for session: UserSession,
         from snapshot: HangarSnapshot,
@@ -1960,6 +2900,7 @@ private actor FakeHangarRepository: HangarRepository {
     func refreshHangarLogData(
         for session: UserSession,
         from snapshot: HangarSnapshot,
+        mode _: HangarLogFetchMode,
         progress: @escaping RefreshProgressHandler
     ) async throws -> HangarSnapshot {
         invokedScopes.append("hangarLog")
@@ -1978,6 +2919,66 @@ private actor FakeHangarRepository: HangarRepository {
         }
 
         return accountSnapshot ?? snapshot
+    }
+
+    func meltPackages(
+        for session: UserSession,
+        pledgeIDs: [Int],
+        password: String
+    ) async throws -> MeltPackagesResult {
+        MeltPackagesResult(
+            requestedPledgeIDs: pledgeIDs,
+            completedPledgeIDs: pledgeIDs,
+            failedPledgeID: nil,
+            failureMessage: nil,
+            updatedCookies: session.cookies
+        )
+    }
+
+    func giftPackages(
+        for session: UserSession,
+        pledgeIDs: [Int],
+        password: String,
+        recipientEmail: String,
+        recipientName: String
+    ) async throws -> GiftPackagesResult {
+        GiftPackagesResult(
+            requestedPledgeIDs: pledgeIDs,
+            completedPledgeIDs: pledgeIDs,
+            failedPledgeID: nil,
+            failureMessage: nil,
+            updatedCookies: session.cookies
+        )
+    }
+
+    func fetchUpgradeTargets(
+        for _: UserSession,
+        upgradeItemPledgeID _: Int
+    ) async throws -> [UpgradeTargetCandidate] {
+        [
+            UpgradeTargetCandidate(
+                pledgeID: 5001,
+                title: "Test Target Pledge",
+                status: "Attributed",
+                insurance: "LTI",
+                thumbnailURL: nil
+            )
+        ]
+    }
+
+    func applyUpgrade(
+        for session: UserSession,
+        upgradeItemPledgeID: Int,
+        targetPledgeID: Int,
+        password _: String
+    ) async throws -> ApplyUpgradeResult {
+        ApplyUpgradeResult(
+            upgradeItemPledgeID: upgradeItemPledgeID,
+            targetPledgeID: targetPledgeID,
+            wasSuccessful: true,
+            failureMessage: nil,
+            updatedCookies: session.cookies
+        )
     }
 
     func invocationLog() -> [String] {

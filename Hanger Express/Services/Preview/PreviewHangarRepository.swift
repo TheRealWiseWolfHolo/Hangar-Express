@@ -65,6 +65,19 @@ struct PreviewHangarRepository: HangarRepository {
         )
     }
 
+    func refreshHangarData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        affectedPledgeIDs: [Int],
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot {
+        try await refreshHangarData(
+            for: session,
+            from: snapshot,
+            progress: progress
+        )
+    }
+
     func refreshBuybackData(
         for session: UserSession,
         from snapshot: HangarSnapshot,
@@ -100,6 +113,7 @@ struct PreviewHangarRepository: HangarRepository {
     func refreshHangarLogData(
         for session: UserSession,
         from snapshot: HangarSnapshot,
+        mode _: HangarLogFetchMode,
         progress: @escaping RefreshProgressHandler
     ) async throws -> HangarSnapshot {
         progress(
@@ -162,9 +176,70 @@ struct PreviewHangarRepository: HangarRepository {
             accountHandle: refreshedSnapshot.accountHandle,
             avatarURL: refreshedSnapshot.avatarURL,
             primaryOrganization: refreshedSnapshot.primaryOrganization,
+            didRefreshPrimaryOrganization: refreshedSnapshot.didRefreshPrimaryOrganization,
             storeCreditUSD: refreshedSnapshot.storeCreditUSD,
             totalSpendUSD: refreshedSnapshot.totalSpendUSD,
             referralStats: refreshedSnapshot.referralStats
+        )
+    }
+
+    func meltPackages(
+        for session: UserSession,
+        pledgeIDs: [Int],
+        password: String
+    ) async throws -> MeltPackagesResult {
+        MeltPackagesResult(
+            requestedPledgeIDs: pledgeIDs,
+            completedPledgeIDs: pledgeIDs,
+            failedPledgeID: nil,
+            failureMessage: nil,
+            updatedCookies: session.cookies
+        )
+    }
+
+    func giftPackages(
+        for session: UserSession,
+        pledgeIDs: [Int],
+        password _: String,
+        recipientEmail _: String,
+        recipientName _: String
+    ) async throws -> GiftPackagesResult {
+        GiftPackagesResult(
+            requestedPledgeIDs: pledgeIDs,
+            completedPledgeIDs: pledgeIDs,
+            failedPledgeID: nil,
+            failureMessage: nil,
+            updatedCookies: session.cookies
+        )
+    }
+
+    func fetchUpgradeTargets(
+        for _: UserSession,
+        upgradeItemPledgeID _: Int
+    ) async throws -> [UpgradeTargetCandidate] {
+        [
+            UpgradeTargetCandidate(
+                pledgeID: 1001,
+                title: "Polaris Expedition Pack",
+                status: "Attributed",
+                insurance: "LTI",
+                thumbnailURL: Self.samplePackages.first(where: { $0.id == 1001 })?.thumbnailURL
+            )
+        ]
+    }
+
+    func applyUpgrade(
+        for session: UserSession,
+        upgradeItemPledgeID: Int,
+        targetPledgeID: Int,
+        password _: String
+    ) async throws -> ApplyUpgradeResult {
+        ApplyUpgradeResult(
+            upgradeItemPledgeID: upgradeItemPledgeID,
+            targetPledgeID: targetPledgeID,
+            wasSuccessful: true,
+            failureMessage: nil,
+            updatedCookies: session.cookies
         )
     }
 
@@ -175,6 +250,7 @@ struct PreviewHangarRepository: HangarRepository {
             name: "Skewers Gentlemen's Club",
             rank: "President"
         ),
+        didRefreshPrimaryOrganization: true,
         storeCreditUSD: 145,
         totalSpendUSD: 1215,
         packages: samplePackages,
@@ -189,6 +265,7 @@ struct PreviewHangarRepository: HangarRepository {
             accountHandle: session.handle,
             lastSyncedAt: lastSyncedAt,
             avatarURL: session.avatarURL,
+            didRefreshPrimaryOrganization: false,
             storeCreditUSD: 145,
             totalSpendUSD: 1215,
             packages: samplePackages,
@@ -317,8 +394,10 @@ struct PreviewHangarRepository: HangarRepository {
                     upgradePricing: PackageItem.UpgradePricing(
                         sourceShipName: "Cutlass Black",
                         sourceShipMSRPUSD: 110,
+                        sourceShipImageURL: sampleURL("cutlass-black"),
                         targetShipName: "Zeus Mk II MR",
                         targetShipMSRPUSD: 190,
+                        targetShipImageURL: sampleURL("zeus-mk-ii-mr"),
                         actualValueUSD: 80,
                         meltValueUSD: 20
                     )

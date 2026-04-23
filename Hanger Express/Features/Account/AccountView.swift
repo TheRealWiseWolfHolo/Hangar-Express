@@ -6,7 +6,11 @@ struct AccountView: View {
 
     @State private var isShowingSettings = false
     @State private var isShowingBackgroundPicker = false
+    @State private var isShowingAccountTotalValueExplanation = false
+    @State private var isShowingConciergeLevels = false
     @State private var selectedBackgroundSelectionKey: String?
+    @State private var isOverviewEmailVisible = false
+    @State private var isOverviewSavedLoginVisible = false
 
     var body: some View {
         NavigationStack {
@@ -15,10 +19,17 @@ struct AccountView: View {
                     AccountProfileCard(
                         displayName: profileDisplayName,
                         organizationSummary: profileOrganizationSummary,
-                        email: profileEmail,
+                        totalValueLabel: accountTotalValueLabel,
+                        conciergeLevel: conciergeLevel,
                         avatarURL: profileAvatarURL,
                         backgroundImageURL: profileBackgroundImageURL,
                         reloadToken: appModel.accountImageReloadToken,
+                        onExplainTotalValue: {
+                            isShowingAccountTotalValueExplanation = true
+                        },
+                        onShowConciergeLevels: {
+                            isShowingConciergeLevels = true
+                        },
                         onChangeBackground: profileBackgroundOptions.isEmpty ? nil : {
                             isShowingBackgroundPicker = true
                         }
@@ -62,8 +73,20 @@ struct AccountView: View {
                 }
 
                 Section {
-                    LabeledContent("Account Email", value: profileEmail ?? "Unknown")
-                    LabeledContent("Saved Login", value: appModel.session?.credentials?.loginIdentifier ?? "None")
+                    SensitiveOverviewFieldRow(
+                        title: "Account Email",
+                        value: profileEmail,
+                        isVisible: $isOverviewEmailVisible,
+                        hiddenText: "Email Hidden",
+                        emptyText: "Unknown"
+                    )
+                    SensitiveOverviewFieldRow(
+                        title: "Saved Login",
+                        value: appModel.session?.credentials?.loginIdentifier,
+                        isVisible: $isOverviewSavedLoginVisible,
+                        hiddenText: "Saved Login Hidden",
+                        emptyText: "None"
+                    )
                     LabeledContent("Last Refresh", value: refreshLabel)
                 } header: {
                     Text("Overview")
@@ -111,6 +134,17 @@ struct AccountView: View {
                     updateProfileBackgroundSelection(selectionKey)
                 }
             }
+            .sheet(isPresented: $isShowingConciergeLevels) {
+                ConciergeLevelsSheetView(
+                    currentLevel: conciergeLevel,
+                    totalSpendUSD: snapshot.metrics.totalSpendUSD
+                )
+            }
+            .alert("Account Total Value", isPresented: $isShowingAccountTotalValueExplanation) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(accountTotalValueExplanation)
+            }
             .task(id: backgroundSelectionLoadID) {
                 loadSavedProfileBackgroundSelection()
             }
@@ -154,8 +188,43 @@ struct AccountView: View {
         return trimmedEmail.isEmpty ? nil : trimmedEmail
     }
 
+    private var accountTotalValueUSD: Decimal? {
+        guard let storeCreditUSD = snapshot.metrics.storeCreditUSD else {
+            return nil
+        }
+
+        return snapshot.metrics.totalCurrentValue + storeCreditUSD
+    }
+
+    private var accountTotalValueLabel: String {
+        accountTotalValueUSD?.usdString ?? "Unavailable"
+    }
+
+    private var accountTotalValueExplanation: String {
+        let currentValueText = snapshot.metrics.totalCurrentValue.usdString
+        let availableCreditText = snapshot.metrics.storeCreditUSD?.usdString ?? "Unavailable"
+        let totalValueText = accountTotalValueUSD?.usdString ?? "Unavailable"
+
+        return """
+        Account Current Value = \(currentValueText)
+        Combined MSRP of all ships + current value of all upgrades + combined value of the rest of the items in your hangar.
+
+        Available Credit = \(availableCreditText)
+
+        Account Total Value = \(currentValueText) + \(availableCreditText) = \(totalValueText)
+        """
+    }
+
+    private var conciergeLevel: ConciergeLevel? {
+        ConciergeLevel(totalSpendUSD: snapshot.metrics.totalSpendUSD)
+    }
+
     private var profileOrganizationSummary: String {
-        snapshot.primaryOrganization?.summaryText ?? "Organization unavailable"
+        if let organization = snapshot.primaryOrganization {
+            return organization.summaryText
+        }
+
+        return snapshot.didRefreshPrimaryOrganization ? "No Organization" : "Organization unavailable"
     }
 
     private var profileAvatarURL: URL? {
@@ -187,6 +256,7 @@ struct AccountView: View {
             let msrpUSD = ships.compactMap(\.msrpUSD).max { lhs, rhs in
                 NSDecimalNumber(decimal: lhs).compare(NSDecimalNumber(decimal: rhs)) == .orderedAscending
             }
+            let msrpLabel = msrpUSD == nil ? representative.msrpLabel : nil
 
             return ProfileBackgroundShipOption(
                 selectionKey: selectionKey,
@@ -194,6 +264,7 @@ struct AccountView: View {
                 manufacturer: representative.manufacturer,
                 quantity: ships.count,
                 msrpUSD: msrpUSD,
+                msrpLabel: msrpLabel,
                 imageURL: representative.imageURL
             )
         }
@@ -313,6 +384,103 @@ struct AccountView: View {
     }
 }
 
+private struct ConciergeLevel: Hashable {
+    let title: String
+    let minimumSpendUSD: Decimal
+    let upperBoundSpendUSD: Decimal?
+    let backgroundColor: Color
+    let textColor: Color
+
+    static let allLevels: [ConciergeLevel] = [
+        ConciergeLevel(
+            title: "High Admiral",
+            minimumSpendUSD: 1000,
+            upperBoundSpendUSD: 2500,
+            backgroundColor: Color(red: 0.11, green: 0.32, blue: 0.56).opacity(0.30),
+            textColor: Color(red: 0.77, green: 0.89, blue: 1.0)
+        ),
+        ConciergeLevel(
+            title: "Grand Admiral",
+            minimumSpendUSD: 2500,
+            upperBoundSpendUSD: 5000,
+            backgroundColor: Color(red: 0.23, green: 0.19, blue: 0.50).opacity(0.30),
+            textColor: Color(red: 0.88, green: 0.84, blue: 1.0)
+        ),
+        ConciergeLevel(
+            title: "Space Marshal",
+            minimumSpendUSD: 5000,
+            upperBoundSpendUSD: 10000,
+            backgroundColor: Color(red: 0.07, green: 0.38, blue: 0.34).opacity(0.28),
+            textColor: Color(red: 0.78, green: 0.97, blue: 0.88)
+        ),
+        ConciergeLevel(
+            title: "Wing Commander",
+            minimumSpendUSD: 10000,
+            upperBoundSpendUSD: 15000,
+            backgroundColor: Color(red: 0.42, green: 0.12, blue: 0.18).opacity(0.30),
+            textColor: Color(red: 1.0, green: 0.84, blue: 0.78)
+        ),
+        ConciergeLevel(
+            title: "Praetorian",
+            minimumSpendUSD: 15000,
+            upperBoundSpendUSD: 25000,
+            backgroundColor: Color(red: 0.48, green: 0.28, blue: 0.08).opacity(0.30),
+            textColor: Color(red: 1.0, green: 0.90, blue: 0.66)
+        ),
+        ConciergeLevel(
+            title: "Legatus Navium",
+            minimumSpendUSD: 25000,
+            upperBoundSpendUSD: nil,
+            backgroundColor: Color.black.opacity(0.46),
+            textColor: Color(red: 0.92, green: 0.78, blue: 0.32)
+        )
+    ]
+
+    init?(totalSpendUSD: Decimal?) {
+        guard let totalSpendUSD else {
+            return nil
+        }
+
+        guard let level = ConciergeLevel.allLevels.last(where: { level in
+            NSDecimalNumber(decimal: totalSpendUSD).compare(NSDecimalNumber(decimal: level.minimumSpendUSD)) != .orderedAscending
+        }) else {
+            return nil
+        }
+
+        self = level
+    }
+
+    private init(
+        title: String,
+        minimumSpendUSD: Decimal,
+        upperBoundSpendUSD: Decimal?,
+        backgroundColor: Color,
+        textColor: Color
+    ) {
+        self.title = title
+        self.minimumSpendUSD = minimumSpendUSD
+        self.upperBoundSpendUSD = upperBoundSpendUSD
+        self.backgroundColor = backgroundColor
+        self.textColor = textColor
+    }
+
+    var requirementSummary: String {
+        if upperBoundSpendUSD == nil {
+            return "Requires \(minimumSpendUSD.usdString)+ total spend"
+        }
+
+        return "Requires \(minimumSpendUSD.usdString) total spend"
+    }
+
+    func isUnlocked(totalSpendUSD: Decimal?) -> Bool {
+        guard let totalSpendUSD else {
+            return false
+        }
+
+        return NSDecimalNumber(decimal: totalSpendUSD).compare(NSDecimalNumber(decimal: minimumSpendUSD)) != .orderedAscending
+    }
+}
+
 private struct MetricCard: View {
     let title: String
     let primaryValue: String
@@ -340,16 +508,56 @@ private struct MetricCard: View {
     }
 }
 
+private struct SensitiveOverviewFieldRow: View {
+    let title: String
+    let value: String?
+    @Binding var isVisible: Bool
+    let hiddenText: String
+    let emptyText: String
+
+    private var trimmedValue: String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var body: some View {
+        LabeledContent {
+            if let trimmedValue {
+                Button {
+                    isVisible.toggle()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: isVisible ? "eye.fill" : "eye.slash.fill")
+                            .font(.caption.weight(.semibold))
+
+                        Text(isVisible ? trimmedValue : hiddenText)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text(emptyText)
+                    .foregroundStyle(.secondary)
+            }
+        } label: {
+            Text(title)
+        }
+    }
+}
+
 private struct AccountProfileCard: View {
     let displayName: String
     let organizationSummary: String
-    let email: String?
+    let totalValueLabel: String
+    let conciergeLevel: ConciergeLevel?
     let avatarURL: URL?
     let backgroundImageURL: URL?
     let reloadToken: UUID?
+    let onExplainTotalValue: () -> Void
+    let onShowConciergeLevels: () -> Void
     let onChangeBackground: (() -> Void)?
-
-    @State private var isEmailVisible = false
 
     private let cardShape = RoundedRectangle(cornerRadius: 24, style: .continuous)
 
@@ -377,9 +585,11 @@ private struct AccountProfileCard: View {
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                                     .clipped()
                             case .empty, .failure:
-                                Color.clear
+                                profileCardFallbackDecoration
                             }
                         }
+                    } else {
+                        profileCardFallbackDecoration
                     }
                 }
                 .overlay {
@@ -395,12 +605,6 @@ private struct AccountProfileCard: View {
                         endPoint: .trailing
                     )
                 }
-                .overlay(alignment: .bottomTrailing) {
-                    Circle()
-                        .fill(Color.white.opacity(0.08))
-                        .frame(width: 140, height: 140)
-                        .offset(x: 36, y: 46)
-                    }
                 .overlay(alignment: .topTrailing) {
                     if let onChangeBackground {
                         ProfileCardActionButton(
@@ -425,28 +629,10 @@ private struct AccountProfileCard: View {
                     .foregroundStyle(Color.white.opacity(0.76))
                     .lineLimit(2)
 
-                if let email {
-                    Button {
-                        isEmailVisible.toggle()
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: isEmailVisible ? "eye.fill" : "eye.slash.fill")
-                                .font(.caption.weight(.semibold))
-
-                            Text(isEmailVisible ? email : "Email Hidden")
-                                .font(.caption.weight(.medium))
-                                .lineLimit(1)
-                        }
-                        .foregroundStyle(Color.white.opacity(0.86))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(Color.white.opacity(0.12))
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
+                AccountTotalValueTag(
+                    totalValueLabel: totalValueLabel,
+                    onExplain: onExplainTotalValue
+                )
             }
             .frame(maxWidth: .infinity, minHeight: 150, alignment: .bottomLeading)
             .padding(18)
@@ -463,7 +649,146 @@ private struct AccountProfileCard: View {
             cardShape
                 .stroke(Color.white.opacity(0.06), lineWidth: 1)
         }
+        .overlay(alignment: .bottomTrailing) {
+            if let conciergeLevel {
+                Button(action: onShowConciergeLevels) {
+                    ConciergeLevelTag(level: conciergeLevel)
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 18)
+                .padding(.bottom, 18)
+            }
+        }
         .padding(.top, 18)
+        .padding(.vertical, 4)
+    }
+
+    private var profileCardFallbackDecoration: some View {
+        Circle()
+            .fill(Color.white.opacity(0.08))
+            .frame(width: 140, height: 140)
+            .offset(x: 36, y: 46)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+    }
+}
+
+private struct AccountTotalValueTag: View {
+    let totalValueLabel: String
+    let onExplain: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(totalValueLabel)
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+
+            Button(action: onExplain) {
+                Image(systemName: "questionmark.circle.fill")
+                    .font(.caption.weight(.semibold))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Explain account total value")
+        }
+        .foregroundStyle(Color.white.opacity(0.88))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.white.opacity(0.12))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+}
+
+private struct ConciergeLevelTag: View {
+    let level: ConciergeLevel
+
+    var body: some View {
+        Text(level.title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(level.textColor)
+            .lineLimit(1)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(level.backgroundColor)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(level.textColor.opacity(0.16), lineWidth: 1)
+            )
+    }
+}
+
+private struct ConciergeLevelsSheetView: View {
+    let currentLevel: ConciergeLevel?
+    let totalSpendUSD: Decimal?
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    LabeledContent("Current Spend", value: totalSpendUSD?.usdString ?? "Unavailable")
+                    LabeledContent("Current Tier", value: currentLevel?.title ?? "Below Concierge")
+                }
+
+                Section("Concierge Tiers") {
+                    ForEach(ConciergeLevel.allLevels, id: \.title) { level in
+                        ConciergeLevelRequirementRow(
+                            level: level,
+                            isCurrent: currentLevel?.title == level.title,
+                            isUnlocked: level.isUnlocked(totalSpendUSD: totalSpendUSD)
+                        )
+                    }
+                }
+            }
+            .navigationTitle("Concierge Levels")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+        }
+    }
+}
+
+private struct ConciergeLevelRequirementRow: View {
+    let level: ConciergeLevel
+    let isCurrent: Bool
+    let isUnlocked: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ConciergeLevelTag(level: level)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(level.requirementSummary)
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+
+                Text(isCurrent ? "Current tier" : (isUnlocked ? "Unlocked" : "Not reached yet"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 8)
+
+            if isCurrent {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(Color.accentColor)
+            }
+        }
         .padding(.vertical, 4)
     }
 }
@@ -502,7 +827,11 @@ private struct ProfileAvatarView: View {
     var body: some View {
         Group {
             if let avatarURL {
-                CachedRemoteImage(url: avatarURL, reloadToken: reloadToken) { phase in
+                CachedRemoteImage(
+                    url: avatarURL,
+                    targetSize: CGSize(width: size, height: size),
+                    reloadToken: reloadToken
+                ) { phase in
                     switch phase {
                     case let .success(image):
                         image
@@ -568,6 +897,7 @@ private struct ProfileBackgroundShipOption: Identifiable, Hashable {
     let manufacturer: String
     let quantity: Int
     let msrpUSD: Decimal?
+    let msrpLabel: String?
     let imageURL: URL?
 
     var id: String {
@@ -585,6 +915,11 @@ private struct ProfileBackgroundShipOption: Identifiable, Hashable {
     var pricingSummary: String {
         if let msrpUSD {
             return "MSRP \(msrpUSD.usdString)"
+        }
+
+        if let msrpLabel = msrpLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !msrpLabel.isEmpty {
+            return msrpLabel
         }
 
         return "MSRP unavailable"
@@ -763,7 +1098,11 @@ private struct ProfileBackgroundOptionThumbnail: View {
     var body: some View {
         Group {
             if let imageURL {
-                CachedRemoteImage(url: imageURL, reloadToken: reloadToken) { phase in
+                CachedRemoteImage(
+                    url: imageURL,
+                    targetSize: CGSize(width: 84, height: 56),
+                    reloadToken: reloadToken
+                ) { phase in
                     switch phase {
                     case let .success(image):
                         image

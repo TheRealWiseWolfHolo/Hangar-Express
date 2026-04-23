@@ -3,6 +3,10 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(SyncPreferences.workerCountKey) private var syncWorkerCount = Double(SyncPreferences.defaultWorkerCount)
+    @AppStorage(DisplayPreferences.compositeUpgradeThumbnailModeKey) private var usesCompositeUpgradeThumbnails = DisplayPreferences.compositeUpgradeThumbnailsEnabledByDefault
+    @AppStorage(DisplayPreferences.hangarUpgradedShipDisplayModeKey) private var showsUpgradedShipInHangar = DisplayPreferences.hangarUpgradedShipDisplayEnabledByDefault
+    @AppStorage(DisplayPreferences.hangarGiftedHighlightKey) private var highlightsGiftedHangarRows = DisplayPreferences.hangarGiftedHighlightEnabledByDefault
+    @AppStorage(DisplayPreferences.hangarUpgradedHighlightKey) private var highlightsUpgradedHangarRows = DisplayPreferences.hangarUpgradedHighlightEnabledByDefault
     @State private var isShowingClearCacheAlert = false
 
     let appModel: AppModel
@@ -94,10 +98,21 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("Composite Upgrade Thumbnails", isOn: $usesCompositeUpgradeThumbnails)
+                    Toggle("Show Final Upgraded Ship in Hangar", isOn: $showsUpgradedShipInHangar)
+                    Toggle("Highlight Gifted Hangar Rows", isOn: $highlightsGiftedHangarRows)
+                    Toggle("Highlight Upgraded Hangar Rows", isOn: $highlightsUpgradedHangarRows)
+                } header: {
+                    Text("Display")
+                } footer: {
+                    Text("When RSI does not provide upgrade artwork, Hangar Express can show a split thumbnail using the source ship on one side and the target ship on the other. Turn this off to keep the original default placeholder instead. You can also choose whether upgraded ship pledges use the original pledge card or the final upgraded ship in the hangar list, and whether gifted or upgraded rows are tinted in the hangar.")
+                }
+
+                Section {
                     Label("Read-only pledge sync", systemImage: "checkmark.circle")
                     Label("Buy-back visibility", systemImage: "checkmark.circle")
                     Label("Ship grouping and local notes", systemImage: "checkmark.circle")
-                    Label("Melt, gift, and upgrade actions", systemImage: "hourglass")
+                    Label("Melt, gift, and upgrade actions", systemImage: "checkmark.circle")
                     Label("Item-linked hangar log shortcuts from pledge details", systemImage: "hourglass")
                 } header: {
                     Text("Roadmap")

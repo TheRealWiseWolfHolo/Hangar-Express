@@ -54,6 +54,7 @@ actor RSIAuthService: AuthenticationServicing {
 
     private let webSession: any AuthenticationWebSessionProviding
     private let diagnostics: AuthenticationDiagnosticsStore
+    private let accountFetcher: @Sendable ([SessionCookie]) async throws -> AuthenticatedAccount
     // Pending state for the browserless GraphQL + verification-code flow.
     private var pendingCredentials: AccountCredentials?
     // Pending state for the separate in-app browser login flow.
@@ -62,10 +63,12 @@ actor RSIAuthService: AuthenticationServicing {
 
     init(
         recaptchaBroker: any AuthenticationWebSessionProviding,
-        diagnostics: AuthenticationDiagnosticsStore
+        diagnostics: AuthenticationDiagnosticsStore,
+        accountFetcher: @escaping @Sendable ([SessionCookie]) async throws -> AuthenticatedAccount = AccountSessionClient.fetchAuthenticatedAccount
     ) {
         webSession = recaptchaBroker
         self.diagnostics = diagnostics
+        self.accountFetcher = accountFetcher
     }
 
     func signIn(
@@ -151,11 +154,33 @@ actor RSIAuthService: AuthenticationServicing {
             }
 
             if errors.isEmpty {
-                throw makeDecodeError(
-                    response: signInResponse,
-                    context: "signin",
-                    reason: "RSI returned a sign-in response the app could not understand yet."
+                await log(
+                    stage: "auth.graphql-sign-in",
+                    summary: "The GraphQL sign-in mutation finished without a verification challenge or account payload. Checking whether RSI already authenticated the session cookies."
                 )
+
+                let cookies = try await webSession.currentRSICookies()
+
+                do {
+                    let session = try await completeAuthentication(
+                        credentials: credentials,
+                        cookies: cookies
+                    )
+                    pendingCredentials = nil
+                    await log(
+                        stage: "auth.graphql-sign-in",
+                        summary: "The browserless sign-in succeeded through the authenticated RSI cookie session, even though the GraphQL payload omitted the account object."
+                    )
+                    return .authenticated(session)
+                } catch {
+                    await log(
+                        stage: "auth.graphql-sign-in",
+                        summary: "The GraphQL sign-in response omitted the account payload, and the fallback authenticated-cookie lookup also failed.",
+                        detail: AuthenticationDebugFormatter.debugDescription(for: error),
+                        level: .warning
+                    )
+                    throw error
+                }
             }
 
             let message = presentableMessage(
@@ -471,7 +496,7 @@ actor RSIAuthService: AuthenticationServicing {
             summary: "Validating the RSI session by loading the authenticated account profile.",
             detail: browserCookieDebugSummary(for: cookies)
         )
-        let account = try await AccountSessionClient.fetchAuthenticatedAccount(using: cookies)
+        let account = try await accountFetcher(cookies)
         await log(
             stage: "auth.account-lookup",
             summary: "RSI account validation succeeded.",
@@ -971,7 +996,7 @@ private nonisolated struct GraphQLErrorExtensions: Decodable {
     let details: GraphQLJSONValue?
 }
 
-private nonisolated struct AuthenticatedAccount: Sendable {
+nonisolated struct AuthenticatedAccount: Sendable {
     let avatar: String?
     let displayname: String?
     let email: String?

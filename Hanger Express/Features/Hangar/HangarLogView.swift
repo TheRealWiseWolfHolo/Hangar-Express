@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct HangarLogView: View {
-    private let entryBatchSize = 100
+    private let entryBatchSize = HangarLogFetchMode.initial.entryLimit
 
     private enum TimeFilter: String, CaseIterable, Identifiable {
         case all = "All Time"
@@ -46,7 +46,9 @@ struct HangarLogView: View {
     @State private var timeFilter: TimeFilter = .all
     @State private var actionFilter: ActionFilter = .all
     @State private var didAttemptInitialLoad = false
-    @State private var visibleEntryCount = 100
+    @State private var visibleEntryCount = HangarLogFetchMode.initial.entryLimit
+    @State private var isRequestingOlderEntries = false
+    @State private var lastRemoteExpansionBaselineCount: Int?
 
     private var hangarLogs: [HangarLogEntry] {
         appModel.snapshot?.hangarLogs ?? []
@@ -205,6 +207,12 @@ struct HangarLogView: View {
             .onChange(of: actionFilter) { _, _ in
                 resetVisibleEntryCount()
             }
+            .onChange(of: hangarLogs.count) { _, newCount in
+                if let lastRemoteExpansionBaselineCount,
+                   newCount > lastRemoteExpansionBaselineCount {
+                    self.lastRemoteExpansionBaselineCount = nil
+                }
+            }
         }
     }
 
@@ -269,10 +277,12 @@ struct HangarLogView: View {
 
     private func resetVisibleEntryCount() {
         visibleEntryCount = min(entryBatchSize, filteredHangarLogs.count)
+        lastRemoteExpansionBaselineCount = nil
     }
 
     private func loadMoreIfNeeded(currentEntry: HangarLogEntry) {
         guard hasHiddenResults else {
+            attemptRemoteExpansionIfNeeded(currentEntry: currentEntry)
             return
         }
 
@@ -286,6 +296,31 @@ struct HangarLogView: View {
 
     private func revealNextBatch() {
         visibleEntryCount = min(visibleEntryCount + entryBatchSize, filteredHangarLogs.count)
+    }
+
+    private func attemptRemoteExpansionIfNeeded(currentEntry: HangarLogEntry) {
+        guard searchText.isEmpty,
+              timeFilter == .all,
+              actionFilter == .all,
+              !appModel.isRefreshing(.hangarLog),
+              !isRequestingOlderEntries,
+              displayedHangarLogs.last?.id == currentEntry.id,
+              displayedHangarLogs.count == hangarLogs.count,
+              hangarLogs.count >= HangarLogFetchMode.initial.entryLimit,
+              hangarLogs.count < HangarLogFetchMode.expanded.entryLimit,
+              lastRemoteExpansionBaselineCount != hangarLogs.count else {
+            return
+        }
+
+        lastRemoteExpansionBaselineCount = hangarLogs.count
+        isRequestingOlderEntries = true
+
+        Task {
+            await appModel.loadMoreHangarLogEntries()
+            await MainActor.run {
+                isRequestingOlderEntries = false
+            }
+        }
     }
 }
 

@@ -219,6 +219,21 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
             createdAt: createdAt
         )
     }
+
+    func updatingCookies(_ cookies: [SessionCookie], notes: String? = nil) -> UserSession {
+        UserSession(
+            id: id,
+            handle: handle,
+            displayName: displayName,
+            email: email,
+            authMode: authMode,
+            notes: notes ?? self.notes,
+            avatarURL: avatarURL,
+            credentials: credentials,
+            cookies: cookies,
+            createdAt: createdAt
+        )
+    }
 }
 
 nonisolated struct AccountCredentials: Hashable, Sendable, Codable {
@@ -364,6 +379,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
     let lastSyncedAt: Date
     let avatarURL: URL?
     let primaryOrganization: AccountOrganization?
+    let didRefreshPrimaryOrganization: Bool
     let storeCreditUSD: Decimal?
     let totalSpendUSD: Decimal?
     let packages: [HangarPackage]
@@ -377,6 +393,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
         lastSyncedAt: Date,
         avatarURL: URL? = nil,
         primaryOrganization: AccountOrganization? = nil,
+        didRefreshPrimaryOrganization: Bool = false,
         storeCreditUSD: Decimal?,
         totalSpendUSD: Decimal? = nil,
         packages: [HangarPackage],
@@ -389,6 +406,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
         self.lastSyncedAt = lastSyncedAt
         self.avatarURL = avatarURL
         self.primaryOrganization = primaryOrganization
+        self.didRefreshPrimaryOrganization = didRefreshPrimaryOrganization
         self.storeCreditUSD = storeCreditUSD
         self.totalSpendUSD = totalSpendUSD
         self.packages = packages
@@ -403,6 +421,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
         case lastSyncedAt
         case avatarURL
         case primaryOrganization
+        case didRefreshPrimaryOrganization
         case storeCreditUSD
         case totalSpendUSD
         case packages
@@ -419,6 +438,8 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
         lastSyncedAt = try container.decode(Date.self, forKey: .lastSyncedAt)
         avatarURL = try container.decodeIfPresent(URL.self, forKey: .avatarURL)
         primaryOrganization = try container.decodeIfPresent(AccountOrganization.self, forKey: .primaryOrganization)
+        didRefreshPrimaryOrganization = try container.decodeIfPresent(Bool.self, forKey: .didRefreshPrimaryOrganization)
+            ?? (primaryOrganization != nil)
         storeCreditUSD = try container.decodeIfPresent(Decimal.self, forKey: .storeCreditUSD)
         totalSpendUSD = try container.decodeIfPresent(Decimal.self, forKey: .totalSpendUSD)
         packages = try container.decodeIfPresent([HangarPackage].self, forKey: .packages) ?? []
@@ -434,6 +455,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
         try container.encode(lastSyncedAt, forKey: .lastSyncedAt)
         try container.encodeIfPresent(avatarURL, forKey: .avatarURL)
         try container.encodeIfPresent(primaryOrganization, forKey: .primaryOrganization)
+        try container.encode(didRefreshPrimaryOrganization, forKey: .didRefreshPrimaryOrganization)
         try container.encodeIfPresent(storeCreditUSD, forKey: .storeCreditUSD)
         try container.encodeIfPresent(totalSpendUSD, forKey: .totalSpendUSD)
         try container.encode(packages, forKey: .packages)
@@ -453,6 +475,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
             lastSyncedAt: lastSyncedAt,
             avatarURL: avatarURL,
             primaryOrganization: primaryOrganization,
+            didRefreshPrimaryOrganization: didRefreshPrimaryOrganization,
             storeCreditUSD: storeCreditUSD,
             totalSpendUSD: totalSpendUSD,
             packages: packages,
@@ -460,6 +483,20 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
             buyback: buyback,
             hangarLogs: hangarLogs,
             referralStats: referralStats
+        )
+    }
+
+    func removingPackages(
+        withIDs packageIDs: Set<Int>,
+        lastSyncedAt: Date
+    ) -> HangarSnapshot {
+        let remainingPackages = packages.filter { !packageIDs.contains($0.id) }
+        let remainingFleet = fleet.filter { !packageIDs.contains($0.sourcePackageID) }
+
+        return updatingHangar(
+            packages: remainingPackages,
+            fleet: remainingFleet,
+            lastSyncedAt: lastSyncedAt
         )
     }
 
@@ -472,6 +509,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
             lastSyncedAt: lastSyncedAt,
             avatarURL: avatarURL,
             primaryOrganization: primaryOrganization,
+            didRefreshPrimaryOrganization: didRefreshPrimaryOrganization,
             storeCreditUSD: storeCreditUSD,
             totalSpendUSD: totalSpendUSD,
             packages: packages,
@@ -491,6 +529,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
             lastSyncedAt: lastSyncedAt,
             avatarURL: avatarURL,
             primaryOrganization: primaryOrganization,
+            didRefreshPrimaryOrganization: didRefreshPrimaryOrganization,
             storeCreditUSD: storeCreditUSD,
             totalSpendUSD: totalSpendUSD,
             packages: packages,
@@ -505,6 +544,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
         accountHandle: String? = nil,
         avatarURL: URL?,
         primaryOrganization: AccountOrganization?,
+        didRefreshPrimaryOrganization: Bool,
         storeCreditUSD: Decimal?,
         totalSpendUSD: Decimal?,
         referralStats: ReferralStats,
@@ -515,6 +555,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
             lastSyncedAt: lastSyncedAt,
             avatarURL: avatarURL,
             primaryOrganization: primaryOrganization,
+            didRefreshPrimaryOrganization: didRefreshPrimaryOrganization,
             storeCreditUSD: storeCreditUSD,
             totalSpendUSD: totalSpendUSD,
             packages: packages,
@@ -688,6 +729,19 @@ private extension String {
 }
 
 struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
+    struct UpgradeMetadata: Hashable, Sendable, Codable {
+        struct MatchItem: Hashable, Sendable, Codable {
+            let id: Int?
+            let name: String
+        }
+
+        let id: Int?
+        let name: String?
+        let upgradeType: String?
+        let matchItems: [MatchItem]
+        let targetItems: [MatchItem]
+    }
+
     let id: Int
     let title: String
     let status: String
@@ -699,6 +753,10 @@ struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
     let canGift: Bool
     let canReclaim: Bool
     let canUpgrade: Bool
+    let isUpgradedStatusFlag: Bool?
+    let upgradeMetadata: UpgradeMetadata?
+    let sourcePage: Int?
+    let sourcePageIndex: Int?
     let packageThumbnailURL: URL?
     let contents: [PackageItem]
 
@@ -714,6 +772,10 @@ struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
         canGift: Bool,
         canReclaim: Bool,
         canUpgrade: Bool,
+        isUpgradedStatusFlag: Bool? = nil,
+        upgradeMetadata: UpgradeMetadata? = nil,
+        sourcePage: Int? = nil,
+        sourcePageIndex: Int? = nil,
         packageThumbnailURL: URL? = nil,
         contents: [PackageItem]
     ) {
@@ -728,6 +790,10 @@ struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
         self.canGift = canGift
         self.canReclaim = canReclaim
         self.canUpgrade = canUpgrade
+        self.isUpgradedStatusFlag = isUpgradedStatusFlag
+        self.upgradeMetadata = upgradeMetadata
+        self.sourcePage = sourcePage
+        self.sourcePageIndex = sourcePageIndex
         self.packageThumbnailURL = packageThumbnailURL
         self.contents = contents
     }
@@ -742,6 +808,14 @@ struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
 
     var hasUpgradeItems: Bool {
         contents.contains(where: { $0.category == .upgrade })
+    }
+
+    var isOwnedUpgradeItem: Bool {
+        upgradeMetadata != nil
+    }
+
+    var canApplyStoredUpgrade: Bool {
+        isOwnedUpgradeItem
     }
 
     var isUpgradeOnlyPledge: Bool {
@@ -804,35 +878,89 @@ struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
         contents.filter(\.isShipLike).count > 1
     }
 
+    var isUpgradedShipPledge: Bool {
+        isUpgradedStatusFlag == true
+    }
+
+    var upgradedShipContent: PackageItem? {
+        guard isUpgradedShipPledge else {
+            return nil
+        }
+
+        let shipLikeContents = contents.filter(\.isShipLike)
+        guard shipLikeContents.count == 1 else {
+            return nil
+        }
+
+        return shipLikeContents[0]
+    }
+
+    var upgradedShipDisplayTitle: String? {
+        guard let upgradedShipContent else {
+            return nil
+        }
+
+        let trimmedTitle = upgradedShipContent.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedTitle.isEmpty ? nil : trimmedTitle
+    }
+
+    var upgradedShipThumbnailURL: URL? {
+        upgradedShipContent?.imageURL
+    }
+
+    func debugDisplayTitle(showsUpgradedShipInHangar: Bool) -> String {
+        if showsUpgradedShipInHangar,
+           let upgradedShipDisplayTitle {
+            return upgradedShipDisplayTitle
+        }
+
+        return title
+    }
+
+    func debugDisplayThumbnailURL(showsUpgradedShipInHangar: Bool) -> URL? {
+        if showsUpgradedShipInHangar,
+           let upgradedShipThumbnailURL {
+            return upgradedShipThumbnailURL
+        }
+
+        return packageThumbnailURL
+    }
+
+    var containsSquadron42Content: Bool {
+        let searchableFields = [title] + contents.flatMap { [$0.title, $0.detail] }
+        let searchableText = searchableFields
+            .joined(separator: " ")
+            .localizedLowercase
+
+        return searchableText.contains("squadron 42")
+            || searchableText.contains("sq42")
+    }
+
     var inventoryGroupingKey: InventoryGroupingKey {
         InventoryGroupingKey(
             title: title,
             status: status,
-            insurance: insurance,
-            insuranceOptions: allInsuranceLevels,
-            acquiredAt: acquiredAt.inventoryGroupingDate,
+            displayedInsurance: displayedInsurance,
             originalValueUSD: originalValueUSD,
             currentValueUSD: currentValueUSD,
             canGift: canGift,
             canReclaim: canReclaim,
-            canUpgrade: canUpgrade,
-            packageThumbnailURL: packageThumbnailURL,
-            contents: contents.map(\.inventoryGroupingKey)
+            contents: contents
+                .map(\.inventoryGroupingKey)
+                .sorted { lhs, rhs in
+                    lhs.sortingSignature < rhs.sortingSignature
+                }
         )
     }
 
     struct InventoryGroupingKey: Hashable, Sendable {
         let title: String
         let status: String
-        let insurance: String
-        let insuranceOptions: [String]
-        let acquiredAt: Date
+        let displayedInsurance: String?
         let originalValueUSD: Decimal
         let currentValueUSD: Decimal
         let canGift: Bool
         let canReclaim: Bool
-        let canUpgrade: Bool
-        let packageThumbnailURL: URL?
         let contents: [PackageItem.InventoryGroupingKey]
     }
 
@@ -962,6 +1090,10 @@ struct GroupedHangarPackage: Identifiable, Hashable, Sendable {
     var containsMultipleCopies: Bool {
         quantity > 1
     }
+
+    var containsSquadron42Content: Bool {
+        representative.containsSquadron42Content
+    }
 }
 
 extension Sequence where Element == HangarPackage {
@@ -1004,8 +1136,10 @@ struct PackageItem: Identifiable, Hashable, Sendable, Codable {
     struct UpgradePricing: Hashable, Sendable, Codable {
         let sourceShipName: String
         let sourceShipMSRPUSD: Decimal?
+        let sourceShipImageURL: URL?
         let targetShipName: String
         let targetShipMSRPUSD: Decimal?
+        let targetShipImageURL: URL?
         let actualValueUSD: Decimal?
         let meltValueUSD: Decimal?
     }
@@ -1022,7 +1156,6 @@ struct PackageItem: Identifiable, Hashable, Sendable, Codable {
             title: title,
             detail: detail,
             category: category,
-            imageURL: imageURL,
             upgradePricing: upgradePricing
         )
     }
@@ -1040,8 +1173,40 @@ struct PackageItem: Identifiable, Hashable, Sendable, Codable {
         let title: String
         let detail: String
         let category: Category
-        let imageURL: URL?
         let upgradePricing: UpgradePricing?
+
+        var sortingSignature: String {
+            let sourceShipName = upgradePricing?.sourceShipName ?? ""
+            let sourceShipMSRPUSD = Self.decimalString(upgradePricing?.sourceShipMSRPUSD)
+            let sourceShipImageURL = upgradePricing?.sourceShipImageURL?.absoluteString ?? ""
+            let targetShipName = upgradePricing?.targetShipName ?? ""
+            let targetShipMSRPUSD = Self.decimalString(upgradePricing?.targetShipMSRPUSD)
+            let targetShipImageURL = upgradePricing?.targetShipImageURL?.absoluteString ?? ""
+            let actualValueUSD = Self.decimalString(upgradePricing?.actualValueUSD)
+            let meltValueUSD = Self.decimalString(upgradePricing?.meltValueUSD)
+
+            return [
+                title,
+                detail,
+                category.rawValue,
+                sourceShipName,
+                sourceShipMSRPUSD,
+                sourceShipImageURL,
+                targetShipName,
+                targetShipMSRPUSD,
+                targetShipImageURL,
+                actualValueUSD,
+                meltValueUSD
+            ].joined(separator: "•")
+        }
+
+        private static func decimalString(_ value: Decimal?) -> String {
+            guard let value else {
+                return ""
+            }
+
+            return NSDecimalNumber(decimal: value).stringValue
+        }
     }
 }
 
@@ -1052,6 +1217,8 @@ struct FleetShip: Identifiable, Hashable, Sendable, Codable {
     let role: String
     let roleCategories: [String]
     let msrpUSD: Decimal?
+    let msrpLabel: String?
+    let catalogWarning: String?
     let insurance: String
     let sourcePackageID: Int
     let sourcePackageName: String
@@ -1067,6 +1234,8 @@ struct FleetShip: Identifiable, Hashable, Sendable, Codable {
         role: String,
         roleCategories: [String] = [],
         msrpUSD: Decimal? = nil,
+        msrpLabel: String? = nil,
+        catalogWarning: String? = nil,
         insurance: String,
         sourcePackageID: Int,
         sourcePackageName: String,
@@ -1081,6 +1250,8 @@ struct FleetShip: Identifiable, Hashable, Sendable, Codable {
         self.role = role
         self.roleCategories = roleCategories
         self.msrpUSD = msrpUSD
+        self.msrpLabel = msrpLabel
+        self.catalogWarning = catalogWarning
         self.insurance = insurance
         self.sourcePackageID = sourcePackageID
         self.sourcePackageName = sourcePackageName
@@ -1097,6 +1268,8 @@ struct FleetShip: Identifiable, Hashable, Sendable, Codable {
         case role
         case roleCategories
         case msrpUSD
+        case msrpLabel
+        case catalogWarning
         case insurance
         case sourcePackageID
         case sourcePackageName
@@ -1119,6 +1292,8 @@ struct FleetShip: Identifiable, Hashable, Sendable, Codable {
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
         msrpUSD = try container.decodeIfPresent(Decimal.self, forKey: .msrpUSD)
+        msrpLabel = try container.decodeIfPresent(String.self, forKey: .msrpLabel)
+        catalogWarning = try container.decodeIfPresent(String.self, forKey: .catalogWarning)
         insurance = try container.decode(String.self, forKey: .insurance)
         sourcePackageID = try container.decode(Int.self, forKey: .sourcePackageID)
         sourcePackageName = try container.decode(String.self, forKey: .sourcePackageName)
@@ -1136,6 +1311,8 @@ struct FleetShip: Identifiable, Hashable, Sendable, Codable {
         try container.encode(role, forKey: .role)
         try container.encode(roleCategories, forKey: .roleCategories)
         try container.encodeIfPresent(msrpUSD, forKey: .msrpUSD)
+        try container.encodeIfPresent(msrpLabel, forKey: .msrpLabel)
+        try container.encodeIfPresent(catalogWarning, forKey: .catalogWarning)
         try container.encode(insurance, forKey: .insurance)
         try container.encode(sourcePackageID, forKey: .sourcePackageID)
         try container.encode(sourcePackageName, forKey: .sourcePackageName)
@@ -1255,7 +1432,9 @@ private extension FleetShip {
     var representativePriority: Int {
         var score = 0
 
-        if msrpUSD != nil {
+        let hasMSRPLabel = !(msrpLabel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+
+        if msrpUSD != nil || hasMSRPLabel {
             score += 8
         }
 
@@ -1466,13 +1645,5 @@ extension Sequence where Element == BuybackPledge {
                 pledges: pledges
             )
         }
-    }
-}
-
-private extension Date {
-    var inventoryGroupingDate: Date {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
-        return calendar.startOfDay(for: self)
     }
 }

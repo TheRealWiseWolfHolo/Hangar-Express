@@ -6,11 +6,16 @@ final class LiveHangarRepository: HangarRepository {
     private let browser = RSIAccountPageBrowser()
     private let shipCatalogClient = HostedShipCatalogClient()
     private let previewRepository = PreviewHangarRepository()
-    private let maxHangarLogEntries = 500
+    private let refreshDiagnostics: RefreshDiagnosticsStore
+    private let maxHangarLogEntries = HangarLogFetchMode.expanded.entryLimit
     private let pledgePageSize = 50
     private let buybackPageSize = 100
     private let maxPledgePages = 200
     private let maxBuybackPages = 100
+
+    init(diagnostics: RefreshDiagnosticsStore) {
+        refreshDiagnostics = diagnostics
+    }
 
     private var syncWorkerCount: Int {
         let configuredValue = UserDefaults.standard.integer(forKey: SyncPreferences.workerCountKey)
@@ -19,6 +24,27 @@ final class LiveHangarRepository: HangarRepository {
             max(fallbackValue, SyncPreferences.minWorkerCount),
             SyncPreferences.maxWorkerCount
         )
+    }
+
+    private enum FullRefreshTracker {
+        static let hangar = "hangar"
+        static let buyback = "buyback"
+        static let account = "account"
+    }
+
+    private struct FullHangarRefreshPayload {
+        let packages: [HangarPackage]
+        let fleet: [FleetShip]
+    }
+
+    private struct FullAccountRefreshPayload {
+        let avatarURL: URL?
+        let primaryOrganization: AccountOrganization?
+        let didRefreshPrimaryOrganization: Bool
+        let storeCreditUSD: Decimal?
+        let totalSpendUSD: Decimal?
+        let hangarLogs: [HangarLogEntry]
+        let referralStats: ReferralStats
     }
 
     func fetchSnapshot(
@@ -30,65 +56,43 @@ final class LiveHangarRepository: HangarRepository {
         }
 
         try validate(session: session)
-        progress(preparationProgress(for: session, stepNumber: 1, stepCount: 5))
+        let hangarBrowser = RSIAccountPageBrowser()
+        let buybackBrowser = RSIAccountPageBrowser()
+        let accountBrowser = RSIAccountPageBrowser()
 
-        let remotePledges = try await fetchRemotePledges(
+        async let hangarPayload = fetchFullHangarRefreshPayload(
             using: session.cookies,
-            progress: progress,
-            stepNumber: 2,
-            stepCount: 5
+            browser: hangarBrowser,
+            progress: progress
         )
-        let remoteBuyback = try await fetchRemoteBuyback(
+        async let buybackPayload = fetchFullBuybackRefreshPayload(
             using: session.cookies,
-            progress: progress,
-            stepNumber: 3,
-            stepCount: 5
+            browser: buybackBrowser,
+            progress: progress
         )
-        let hangarLogs = try await fetchRemoteHangarLogs(
-            using: session.cookies,
-            progress: progress,
-            stepNumber: 4,
-            stepCount: 5
-        )
-        let shipCatalog = await fetchHostedShipCatalog(
-            progress: progress,
-            stepNumber: 5,
-            stepCount: 5
-        )
-        let accountContext = try await fetchAccountContext(
+        async let accountPayload = fetchFullAccountRefreshPayload(
             for: session,
-            progress: progress,
-            stepNumber: 5,
-            stepCount: 5
+            browser: accountBrowser,
+            progress: progress
         )
 
-        let packages = remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) }
-        let fleet = FleetProjector.project(packages: packages, shipCatalog: shipCatalog)
-        let buyback = remoteBuyback.map(normalize(buyback:))
-
-        progress(
-            makeProgress(
-                stage: .finalizing,
-                stepNumber: 5,
-                stepCount: 5,
-                detail: "Organized \(remotePledges.count) pledges, \(remoteBuyback.count) buy-back items, and \(hangarLogs.count) hangar log entries.",
-                completedUnitCount: 3,
-                totalUnitCount: 3
-            )
-        )
+        let resolvedHangarPayload = try await hangarPayload
+        let resolvedBuyback = try await buybackPayload
+        let resolvedAccountPayload = try await accountPayload
 
         return HangarSnapshot(
             accountHandle: session.handle,
             lastSyncedAt: .now,
-            avatarURL: accountContext.avatarURL ?? session.avatarURL,
-            primaryOrganization: accountContext.primaryOrganization,
-            storeCreditUSD: accountContext.storeCreditUSD,
-            totalSpendUSD: accountContext.totalSpendUSD,
-            packages: packages,
-            fleet: fleet,
-            buyback: buyback,
-            hangarLogs: hangarLogs,
-            referralStats: accountContext.referralStats
+            avatarURL: resolvedAccountPayload.avatarURL ?? session.avatarURL,
+            primaryOrganization: resolvedAccountPayload.primaryOrganization,
+            didRefreshPrimaryOrganization: resolvedAccountPayload.didRefreshPrimaryOrganization,
+            storeCreditUSD: resolvedAccountPayload.storeCreditUSD,
+            totalSpendUSD: resolvedAccountPayload.totalSpendUSD,
+            packages: resolvedHangarPayload.packages,
+            fleet: resolvedHangarPayload.fleet,
+            buyback: resolvedBuyback,
+            hangarLogs: resolvedAccountPayload.hangarLogs,
+            referralStats: resolvedAccountPayload.referralStats
         )
     }
 
@@ -139,6 +143,83 @@ final class LiveHangarRepository: HangarRepository {
         )
     }
 
+    func refreshHangarData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
+        affectedPledgeIDs: [Int],
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.refreshHangarData(
+                for: session,
+                from: snapshot,
+                affectedPledgeIDs: affectedPledgeIDs,
+                progress: progress
+            )
+        }
+
+        let normalizedAffectedPledgeIDs = Array(Set(affectedPledgeIDs))
+        guard let partialRefreshStartPage = partialHangarRefreshStartPage(
+            from: snapshot,
+            affectedPledgeIDs: normalizedAffectedPledgeIDs
+        ) else {
+            return try await refreshHangarData(
+                for: session,
+                from: snapshot,
+                progress: progress
+            )
+        }
+
+        try validate(session: session)
+        progress(preparationProgress(for: session, stepNumber: 1, stepCount: 3))
+
+        async let remotePledgeTail = fetchRemotePledges(
+            using: session.cookies,
+            startingAtPage: partialRefreshStartPage,
+            progress: progress,
+            stepNumber: 2,
+            stepCount: 3
+        )
+        async let shipCatalog = fetchHostedShipCatalog(
+            progress: progress,
+            stepNumber: 3,
+            stepCount: 3
+        )
+
+        let refreshedRemotePledgeTail = try await remotePledgeTail
+        let resolvedShipCatalog = await shipCatalog
+        let unaffectedPrefix = snapshot.packages.filter { package in
+            guard let sourcePage = package.sourcePage else {
+                return false
+            }
+
+            return sourcePage < partialRefreshStartPage
+        }
+        let refreshedPackages = unaffectedPrefix + refreshedRemotePledgeTail.map {
+            normalize(package: $0, shipCatalog: resolvedShipCatalog)
+        }
+        let fleet = FleetProjector.project(
+            packages: refreshedPackages,
+            shipCatalog: resolvedShipCatalog
+        )
+
+        progress(
+            makeProgress(
+                stage: .finalizing,
+                stepNumber: 3,
+                stepCount: 3,
+                detail: "Rebuilt the hangar from cached pages 1-\(partialRefreshStartPage - 1) and refreshed pages \(partialRefreshStartPage)+.",
+                completedUnitCount: 2,
+                totalUnitCount: 2
+            )
+        )
+
+        return snapshot.updatingHangar(
+            packages: refreshedPackages,
+            fleet: fleet
+        )
+    }
+
     func refreshBuybackData(
         for session: UserSession,
         from snapshot: HangarSnapshot,
@@ -155,13 +236,21 @@ final class LiveHangarRepository: HangarRepository {
         try validate(session: session)
         progress(preparationProgress(for: session, stepNumber: 1, stepCount: 2))
 
-        let remoteBuyback = try await fetchRemoteBuyback(
+        async let remoteBuyback = fetchRemoteBuyback(
             using: session.cookies,
             progress: progress,
             stepNumber: 2,
             stepCount: 2
         )
-        let buyback = remoteBuyback.map(normalize(buyback:))
+        async let shipCatalog = fetchHostedShipCatalog(
+            progress: progress,
+            stepNumber: 2,
+            stepCount: 2
+        )
+
+        let resolvedRemoteBuyback = try await remoteBuyback
+        let resolvedShipCatalog = await shipCatalog
+        let buyback = resolvedRemoteBuyback.map { normalize(buyback: $0, shipCatalog: resolvedShipCatalog) }
 
         return snapshot.updatingBuyback(
             buyback: buyback
@@ -171,12 +260,14 @@ final class LiveHangarRepository: HangarRepository {
     func refreshHangarLogData(
         for session: UserSession,
         from snapshot: HangarSnapshot,
+        mode: HangarLogFetchMode,
         progress: @escaping RefreshProgressHandler
     ) async throws -> HangarSnapshot {
         if session.authMode == .developerPreview {
             return try await previewRepository.refreshHangarLogData(
                 for: session,
                 from: snapshot,
+                mode: mode,
                 progress: progress
             )
         }
@@ -186,6 +277,8 @@ final class LiveHangarRepository: HangarRepository {
 
         let hangarLogs = try await fetchRemoteHangarLogs(
             using: session.cookies,
+            existingLogs: snapshot.hangarLogs,
+            mode: mode,
             progress: progress,
             stepNumber: 2,
             stepCount: 2
@@ -223,6 +316,7 @@ final class LiveHangarRepository: HangarRepository {
             accountHandle: session.handle,
             avatarURL: accountContext.didRefreshAccountOverview ? accountContext.avatarURL : snapshot.avatarURL,
             primaryOrganization: accountContext.didRefreshPrimaryOrganization ? accountContext.primaryOrganization : snapshot.primaryOrganization,
+            didRefreshPrimaryOrganization: accountContext.didRefreshPrimaryOrganization || snapshot.didRefreshPrimaryOrganization,
             storeCreditUSD: accountContext.didRefreshAccountOverview ? accountContext.storeCreditUSD : snapshot.storeCreditUSD,
             totalSpendUSD: accountContext.didRefreshAccountOverview ? accountContext.totalSpendUSD : snapshot.totalSpendUSD,
             referralStats: accountContext.didRefreshReferralStats ? accountContext.referralStats : snapshot.referralStats,
@@ -230,10 +324,217 @@ final class LiveHangarRepository: HangarRepository {
         )
     }
 
+    private func fetchFullHangarRefreshPayload(
+        using cookies: [SessionCookie],
+        browser: RSIAccountPageBrowser,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> FullHangarRefreshPayload {
+        let remotePledges = try await fetchRemotePledges(
+            using: cookies,
+            browser: browser,
+            progress: progress,
+            stepNumber: 1,
+            stepCount: 2,
+            trackerID: FullRefreshTracker.hangar,
+            trackerTitle: "Hangar"
+        )
+        let shipCatalog = await fetchHostedShipCatalog(
+            progress: progress,
+            stepNumber: 2,
+            stepCount: 2,
+            trackerID: FullRefreshTracker.hangar,
+            trackerTitle: "Hangar"
+        )
+        let packages = remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) }
+        let fleet = FleetProjector.project(packages: packages, shipCatalog: shipCatalog)
+
+        return FullHangarRefreshPayload(
+            packages: packages,
+            fleet: fleet
+        )
+    }
+
+    private func fetchFullBuybackRefreshPayload(
+        using cookies: [SessionCookie],
+        browser: RSIAccountPageBrowser,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> [BuybackPledge] {
+        async let remoteBuyback = fetchRemoteBuyback(
+            using: cookies,
+            browser: browser,
+            progress: progress,
+            stepNumber: 1,
+            stepCount: 1,
+            trackerID: FullRefreshTracker.buyback,
+            trackerTitle: "Buy Back"
+        )
+        async let shipCatalog = fetchHostedShipCatalog(
+            progress: progress,
+            stepNumber: 1,
+            stepCount: 1,
+            trackerID: FullRefreshTracker.buyback,
+            trackerTitle: "Buy Back"
+        )
+
+        let resolvedRemoteBuyback = try await remoteBuyback
+        let resolvedShipCatalog = await shipCatalog
+        return resolvedRemoteBuyback.map { normalize(buyback: $0, shipCatalog: resolvedShipCatalog) }
+    }
+
+    private func fetchFullAccountRefreshPayload(
+        for session: UserSession,
+        browser: RSIAccountPageBrowser,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> FullAccountRefreshPayload {
+        let accountContext = try await fetchAccountContext(
+            for: session,
+            browser: browser,
+            progress: progress,
+            stepNumber: 1,
+            stepCount: 1,
+            trackerID: FullRefreshTracker.account,
+            trackerTitle: "Account"
+        )
+
+        return FullAccountRefreshPayload(
+            avatarURL: accountContext.avatarURL,
+            primaryOrganization: accountContext.primaryOrganization,
+            didRefreshPrimaryOrganization: accountContext.didRefreshPrimaryOrganization,
+            storeCreditUSD: accountContext.storeCreditUSD,
+            totalSpendUSD: accountContext.totalSpendUSD,
+            hangarLogs: [],
+            referralStats: accountContext.referralStats
+        )
+    }
+
+    func meltPackages(
+        for session: UserSession,
+        pledgeIDs: [Int],
+        password: String
+    ) async throws -> MeltPackagesResult {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.meltPackages(
+                for: session,
+                pledgeIDs: pledgeIDs,
+                password: password
+            )
+        }
+
+        try validate(session: session)
+        return try await browser.reclaimPledges(
+            using: session.cookies,
+            pledgeIDs: pledgeIDs,
+            password: password
+        )
+    }
+
+    func giftPackages(
+        for session: UserSession,
+        pledgeIDs: [Int],
+        password: String,
+        recipientEmail: String,
+        recipientName: String
+    ) async throws -> GiftPackagesResult {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.giftPackages(
+                for: session,
+                pledgeIDs: pledgeIDs,
+                password: password,
+                recipientEmail: recipientEmail,
+                recipientName: recipientName
+            )
+        }
+
+        try validate(session: session)
+        return try await browser.giftPledges(
+            using: session.cookies,
+            pledgeIDs: pledgeIDs,
+            password: password,
+            recipientEmail: recipientEmail,
+            recipientName: recipientName
+        )
+    }
+
+    func fetchUpgradeTargets(
+        for session: UserSession,
+        upgradeItemPledgeID: Int
+    ) async throws -> [UpgradeTargetCandidate] {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.fetchUpgradeTargets(
+                for: session,
+                upgradeItemPledgeID: upgradeItemPledgeID
+            )
+        }
+
+        try validate(session: session)
+        return try await browser.fetchUpgradeTargets(
+            using: session.cookies,
+            upgradeItemPledgeID: upgradeItemPledgeID
+        )
+    }
+
+    func applyUpgrade(
+        for session: UserSession,
+        upgradeItemPledgeID: Int,
+        targetPledgeID: Int,
+        password: String
+    ) async throws -> ApplyUpgradeResult {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.applyUpgrade(
+                for: session,
+                upgradeItemPledgeID: upgradeItemPledgeID,
+                targetPledgeID: targetPledgeID,
+                password: password
+            )
+        }
+
+        try validate(session: session)
+        return try await browser.applyUpgrade(
+            using: session.cookies,
+            upgradeItemPledgeID: upgradeItemPledgeID,
+            targetPledgeID: targetPledgeID,
+            password: password
+        )
+    }
+
     private func validate(session: UserSession) throws {
         guard !session.cookies.isEmpty else {
             throw LiveHangarRepositoryError.sessionUnavailable
         }
+    }
+
+    private func partialHangarRefreshStartPage(
+        from snapshot: HangarSnapshot,
+        affectedPledgeIDs: [Int]
+    ) -> Int? {
+        guard !affectedPledgeIDs.isEmpty else {
+            return nil
+        }
+
+        // Older cached snapshots do not know which RSI page each pledge came from.
+        // In that case we fall back to the existing full hangar refresh path.
+        guard !snapshot.packages.isEmpty,
+              !snapshot.packages.contains(where: { $0.sourcePage == nil }) else {
+            return nil
+        }
+
+        let affectedPages = snapshot.packages.compactMap { package -> Int? in
+            guard affectedPledgeIDs.contains(package.id) else {
+                return nil
+            }
+
+            return package.sourcePage
+        }
+
+        guard let earliestAffectedPage = affectedPages.min(),
+              earliestAffectedPage > 1 else {
+            return nil
+        }
+
+        // A successful melt removes rows and only causes later RSI pages to shift upward.
+        // Pages before the earliest affected pledge stay stable, so the smallest safe refresh
+        // range is that earliest affected page through the end of the hangar.
+        return earliestAffectedPage
     }
 
     private func preparationProgress(
@@ -253,10 +554,24 @@ final class LiveHangarRepository: HangarRepository {
 
     private func fetchRemotePledges(
         using cookies: [SessionCookie],
+        browser activeBrowser: RSIAccountPageBrowser? = nil,
         progress: @escaping RefreshProgressHandler,
         stepNumber: Int,
-        stepCount: Int
+        stepCount: Int,
+        trackerID: String? = nil,
+        trackerTitle: String? = nil
     ) async throws -> [RemotePledge] {
+        recordRefreshDiagnostics(
+            stage: "hangar.connect",
+            summary: "Connecting to RSI hangar pledge pages.",
+            detail: connectionDetail(
+                path: "/en/account/pledges",
+                page: 1,
+                pageSize: pledgePageSize,
+                workerCount: syncWorkerCount,
+                cookies: cookies
+            )
+        )
         progress(
             makeProgress(
                 stage: .pledges,
@@ -270,21 +585,43 @@ final class LiveHangarRepository: HangarRepository {
                     isLoading: true
                 ),
                 completedUnitCount: 0,
-                totalUnitCount: nil
+                totalUnitCount: nil,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         )
 
-        let firstPage = try await browser.extractPledges(
-            using: cookies,
-            page: 1,
-            pageSize: pledgePageSize
-        )
+        let activeBrowser = activeBrowser ?? browser
+        let firstPage: RemotePledgePage
+        do {
+            firstPage = try await activeBrowser.extractPledges(
+                using: cookies,
+                page: 1,
+                pageSize: pledgePageSize
+            )
+        } catch {
+            recordRefreshDiagnostics(
+                stage: "hangar.connect",
+                summary: "Hangar Express could not load RSI hangar page 1.",
+                detail: "errorType=\(String(reflecting: type(of: error))), localizedDescription=\(error.localizedDescription)",
+                level: .error
+            )
+            throw error
+        }
 
         if firstPage.accessDenied {
+            recordRefreshDiagnostics(
+                stage: "hangar.response",
+                summary: "RSI rejected the saved session while opening hangar page 1.",
+                detail: "accessDenied=true",
+                level: .warning
+            )
             throw LiveHangarRepositoryError.sessionExpired
         }
 
-        var remotePledges = firstPage.items
+        var remotePledges = firstPage.items.enumerated().map { itemOffset, pledge in
+            pledge.withSourcePage(1, index: itemOffset)
+        }
         let inferredTotalPages = inferredTotalPages(
             reportedByPage: firstPage.totalPages,
             page: 1,
@@ -292,6 +629,16 @@ final class LiveHangarRepository: HangarRepository {
             hasNextPage: firstPage.hasNextPage
         )
         let workerCount = syncWorkerCount
+        recordRefreshDiagnostics(
+            stage: "hangar.response",
+            summary: "Loaded RSI hangar page 1.",
+            detail: [
+                "itemCount=\(firstPage.items.count)",
+                "reportedTotalPages=\(firstPage.totalPages.map(String.init) ?? "unknown")",
+                "inferredTotalPages=\(inferredTotalPages.map(String.init) ?? "unknown")",
+                "hasNextPage=\(firstPage.hasNextPage.map { $0 ? "yes" : "no" } ?? "unknown")"
+            ].joined(separator: ", ")
+        )
 
         progress(
             makeProgress(
@@ -306,7 +653,9 @@ final class LiveHangarRepository: HangarRepository {
                     isLoading: false
                 ),
                 completedUnitCount: 1,
-                totalUnitCount: inferredTotalPages
+                totalUnitCount: inferredTotalPages,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         )
 
@@ -317,9 +666,12 @@ final class LiveHangarRepository: HangarRepository {
                 initialItems: remotePledges,
                 knownTotalPages: nil,
                 previousPageSignature: firstPage.pageSignature,
+                browser: activeBrowser,
                 progress: progress,
                 stepNumber: stepNumber,
-                stepCount: stepCount
+                stepCount: stepCount,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         }
 
@@ -341,13 +693,16 @@ final class LiveHangarRepository: HangarRepository {
                 initialItems: remotePledges,
                 knownTotalPages: totalPages,
                 previousPageSignature: firstPage.pageSignature,
+                browser: activeBrowser,
                 progress: progress,
                 stepNumber: stepNumber,
-                stepCount: stepCount
+                stepCount: stepCount,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         }
 
-        let warmedCookies = await browser.currentRSICookies()
+        let warmedCookies = await activeBrowser.currentRSICookies()
         let remainingPages = Array(2 ... totalPages)
         let orderedResults: [RemotePledgePage]
         do {
@@ -370,29 +725,271 @@ final class LiveHangarRepository: HangarRepository {
                             workerCount: workerCount
                         ),
                         completedUnitCount: completedPages,
-                        totalUnitCount: totalPages
+                        totalUnitCount: totalPages,
+                        trackerID: trackerID,
+                        trackerTitle: trackerTitle
                     )
                 )
             }
         } catch {
+            recordRefreshDiagnostics(
+                stage: "hangar.parallel-fallback",
+                summary: "Parallel hangar page loading failed, so Hangar Express is retrying sequentially.",
+                detail: "errorType=\(String(reflecting: type(of: error))), localizedDescription=\(error.localizedDescription)",
+                level: .warning
+            )
             return try await fetchRemotePledgesSequentially(
                 using: cookies,
                 startingFrom: 2,
                 initialItems: remotePledges,
                 knownTotalPages: totalPages,
                 previousPageSignature: firstPage.pageSignature,
+                browser: activeBrowser,
                 progress: progress,
                 stepNumber: stepNumber,
-                stepCount: stepCount
+                stepCount: stepCount,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         }
 
-        for result in orderedResults {
+        for (pageOffset, result) in orderedResults.enumerated() {
             if result.accessDenied {
                 throw LiveHangarRepositoryError.sessionExpired
             }
 
-            remotePledges.append(contentsOf: result.items)
+            let pageNumber = pageOffset + 2
+            remotePledges.append(
+                contentsOf: result.items.enumerated().map { itemOffset, pledge in
+                    pledge.withSourcePage(pageNumber, index: itemOffset)
+                }
+            )
+        }
+
+        return remotePledges
+    }
+
+    private func fetchRemotePledges(
+        using cookies: [SessionCookie],
+        startingAtPage startPage: Int,
+        browser activeBrowser: RSIAccountPageBrowser? = nil,
+        progress: @escaping RefreshProgressHandler,
+        stepNumber: Int,
+        stepCount: Int,
+        trackerID: String? = nil,
+        trackerTitle: String? = nil
+    ) async throws -> [RemotePledge] {
+        guard startPage > 1 else {
+            return try await fetchRemotePledges(
+                using: cookies,
+                browser: activeBrowser,
+                progress: progress,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
+            )
+        }
+
+        recordRefreshDiagnostics(
+            stage: "hangar.connect",
+            summary: "Connecting to the affected RSI hangar pages for a partial refresh.",
+            detail: connectionDetail(
+                path: "/en/account/pledges",
+                page: startPage,
+                pageSize: pledgePageSize,
+                workerCount: syncWorkerCount,
+                cookies: cookies,
+                extra: ["partialRefresh=yes"]
+            )
+        )
+        progress(
+            makeProgress(
+                stage: .pledges,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: "Refreshing the affected hangar tail beginning with page \(startPage).",
+                completedUnitCount: 0,
+                totalUnitCount: nil,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
+            )
+        )
+
+        let activeBrowser = activeBrowser ?? browser
+        let firstPage: RemotePledgePage
+        do {
+            firstPage = try await activeBrowser.extractPledges(
+                using: cookies,
+                page: startPage,
+                pageSize: pledgePageSize
+            )
+        } catch {
+            recordRefreshDiagnostics(
+                stage: "hangar.connect",
+                summary: "Hangar Express could not load the first affected RSI hangar page.",
+                detail: "page=\(startPage), errorType=\(String(reflecting: type(of: error))), localizedDescription=\(error.localizedDescription)",
+                level: .error
+            )
+            throw error
+        }
+
+        if firstPage.accessDenied {
+            recordRefreshDiagnostics(
+                stage: "hangar.response",
+                summary: "RSI rejected the saved session while opening the first affected hangar page.",
+                detail: "page=\(startPage), accessDenied=true",
+                level: .warning
+            )
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        var remotePledges = firstPage.items.enumerated().map { itemOffset, pledge in
+            pledge.withSourcePage(startPage, index: itemOffset)
+        }
+        let inferredTotalPages = inferredTotalPages(
+            reportedByPage: firstPage.totalPages,
+            page: startPage,
+            pageItemCount: firstPage.items.count,
+            hasNextPage: firstPage.hasNextPage
+        )
+        let workerCount = syncWorkerCount
+        recordRefreshDiagnostics(
+            stage: "hangar.response",
+            summary: "Loaded the first affected RSI hangar page.",
+            detail: [
+                "page=\(startPage)",
+                "itemCount=\(firstPage.items.count)",
+                "reportedTotalPages=\(firstPage.totalPages.map(String.init) ?? "unknown")",
+                "inferredTotalPages=\(inferredTotalPages.map(String.init) ?? "unknown")",
+                "hasNextPage=\(firstPage.hasNextPage.map { $0 ? "yes" : "no" } ?? "unknown")"
+            ].joined(separator: ", ")
+        )
+
+        progress(
+            makeProgress(
+                stage: .pledges,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: pageDetail(
+                    for: "pledges",
+                    page: startPage,
+                    totalPages: inferredTotalPages,
+                    loadedCount: remotePledges.count,
+                    isLoading: false
+                ),
+                completedUnitCount: 1,
+                totalUnitCount: inferredTotalPages.map { max($0 - startPage + 1, 1) },
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
+            )
+        )
+
+        guard let totalPages = inferredTotalPages else {
+            return try await fetchRemotePledgesSequentially(
+                using: cookies,
+                startingFrom: startPage + 1,
+                initialItems: remotePledges,
+                knownTotalPages: nil,
+                previousPageSignature: firstPage.pageSignature,
+                browser: activeBrowser,
+                progress: progress,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
+            )
+        }
+
+        if totalPages > maxPledgePages {
+            throw LiveHangarRepositoryError.pageLimitReached(
+                itemLabel: "hangar pledges",
+                limit: maxPledgePages
+            )
+        }
+
+        guard totalPages > startPage else {
+            return remotePledges
+        }
+
+        if workerCount <= 1 {
+            return try await fetchRemotePledgesSequentially(
+                using: cookies,
+                startingFrom: startPage + 1,
+                initialItems: remotePledges,
+                knownTotalPages: totalPages,
+                previousPageSignature: firstPage.pageSignature,
+                browser: activeBrowser,
+                progress: progress,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
+            )
+        }
+
+        let warmedCookies = await activeBrowser.currentRSICookies()
+        let remainingPages = Array((startPage + 1) ... totalPages)
+        let orderedResults: [RemotePledgePage]
+        do {
+            orderedResults = try await fetchPledgePagesConcurrently(
+                using: warmedCookies.isEmpty ? cookies : warmedCookies,
+                pages: remainingPages,
+                workerCount: workerCount,
+                initialLoadedCount: remotePledges.count
+            ) { completedPages, loadedCount in
+                progress(
+                    self.makeProgress(
+                        stage: .pledges,
+                        stepNumber: stepNumber,
+                        stepCount: stepCount,
+                        detail: self.parallelPageDetail(
+                            for: "pledges",
+                            completedPages: completedPages,
+                            totalPages: max(totalPages - startPage + 1, 1),
+                            loadedCount: loadedCount,
+                            workerCount: workerCount
+                        ),
+                        completedUnitCount: completedPages,
+                        totalUnitCount: max(totalPages - startPage + 1, 1),
+                        trackerID: trackerID,
+                        trackerTitle: trackerTitle
+                    )
+                )
+            }
+        } catch {
+            recordRefreshDiagnostics(
+                stage: "hangar.parallel-fallback",
+                summary: "Parallel partial hangar loading failed, so Hangar Express is retrying sequentially.",
+                detail: "errorType=\(String(reflecting: type(of: error))), localizedDescription=\(error.localizedDescription)",
+                level: .warning
+            )
+            return try await fetchRemotePledgesSequentially(
+                using: cookies,
+                startingFrom: startPage + 1,
+                initialItems: remotePledges,
+                knownTotalPages: totalPages,
+                previousPageSignature: firstPage.pageSignature,
+                browser: activeBrowser,
+                progress: progress,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
+            )
+        }
+
+        for (pageOffset, result) in orderedResults.enumerated() {
+            if result.accessDenied {
+                throw LiveHangarRepositoryError.sessionExpired
+            }
+
+            let pageNumber = startPage + pageOffset + 1
+            remotePledges.append(
+                contentsOf: result.items.enumerated().map { itemOffset, pledge in
+                    pledge.withSourcePage(pageNumber, index: itemOffset)
+                }
+            )
         }
 
         return remotePledges
@@ -400,10 +997,24 @@ final class LiveHangarRepository: HangarRepository {
 
     private func fetchRemoteBuyback(
         using cookies: [SessionCookie],
+        browser activeBrowser: RSIAccountPageBrowser? = nil,
         progress: @escaping RefreshProgressHandler,
         stepNumber: Int,
-        stepCount: Int
+        stepCount: Int,
+        trackerID: String? = nil,
+        trackerTitle: String? = nil
     ) async throws -> [RemoteBuybackPledge] {
+        recordRefreshDiagnostics(
+            stage: "buyback.connect",
+            summary: "Connecting to RSI buy-back pages.",
+            detail: connectionDetail(
+                path: "/en/account/buy-back-pledges",
+                page: 1,
+                pageSize: buybackPageSize,
+                workerCount: syncWorkerCount,
+                cookies: cookies
+            )
+        )
         progress(
             makeProgress(
                 stage: .buyback,
@@ -417,17 +1028,37 @@ final class LiveHangarRepository: HangarRepository {
                     isLoading: true
                 ),
                 completedUnitCount: 0,
-                totalUnitCount: nil
+                totalUnitCount: nil,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         )
 
-        let firstPage = try await browser.extractBuybackPledges(
-            using: cookies,
-            page: 1,
-            pageSize: buybackPageSize
-        )
+        let activeBrowser = activeBrowser ?? browser
+        let firstPage: RemoteBuybackPage
+        do {
+            firstPage = try await activeBrowser.extractBuybackPledges(
+                using: cookies,
+                page: 1,
+                pageSize: buybackPageSize
+            )
+        } catch {
+            recordRefreshDiagnostics(
+                stage: "buyback.connect",
+                summary: "Hangar Express could not load RSI buy-back page 1.",
+                detail: "errorType=\(String(reflecting: type(of: error))), localizedDescription=\(error.localizedDescription)",
+                level: .error
+            )
+            throw error
+        }
 
         if firstPage.accessDenied {
+            recordRefreshDiagnostics(
+                stage: "buyback.response",
+                summary: "RSI rejected the saved session while opening buy-back page 1.",
+                detail: "accessDenied=true",
+                level: .warning
+            )
             throw LiveHangarRepositoryError.sessionExpired
         }
 
@@ -439,6 +1070,16 @@ final class LiveHangarRepository: HangarRepository {
             hasNextPage: firstPage.hasNextPage
         )
         let workerCount = syncWorkerCount
+        recordRefreshDiagnostics(
+            stage: "buyback.response",
+            summary: "Loaded RSI buy-back page 1.",
+            detail: [
+                "itemCount=\(firstPage.items.count)",
+                "reportedTotalPages=\(firstPage.totalPages.map(String.init) ?? "unknown")",
+                "inferredTotalPages=\(inferredTotalPages.map(String.init) ?? "unknown")",
+                "hasNextPage=\(firstPage.hasNextPage.map { $0 ? "yes" : "no" } ?? "unknown")"
+            ].joined(separator: ", ")
+        )
 
         progress(
             makeProgress(
@@ -453,7 +1094,9 @@ final class LiveHangarRepository: HangarRepository {
                     isLoading: false
                 ),
                 completedUnitCount: 1,
-                totalUnitCount: inferredTotalPages
+                totalUnitCount: inferredTotalPages,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         )
 
@@ -464,9 +1107,12 @@ final class LiveHangarRepository: HangarRepository {
                 initialItems: remoteBuyback,
                 knownTotalPages: nil,
                 previousPageSignature: firstPage.pageSignature,
+                browser: activeBrowser,
                 progress: progress,
                 stepNumber: stepNumber,
-                stepCount: stepCount
+                stepCount: stepCount,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         }
 
@@ -488,13 +1134,16 @@ final class LiveHangarRepository: HangarRepository {
                 initialItems: remoteBuyback,
                 knownTotalPages: totalPages,
                 previousPageSignature: firstPage.pageSignature,
+                browser: activeBrowser,
                 progress: progress,
                 stepNumber: stepNumber,
-                stepCount: stepCount
+                stepCount: stepCount,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         }
 
-        let warmedCookies = await browser.currentRSICookies()
+        let warmedCookies = await activeBrowser.currentRSICookies()
         let remainingPages = Array(2 ... totalPages)
         let orderedResults: [RemoteBuybackPage]
         do {
@@ -517,20 +1166,31 @@ final class LiveHangarRepository: HangarRepository {
                             workerCount: workerCount
                         ),
                         completedUnitCount: completedPages,
-                        totalUnitCount: totalPages
+                        totalUnitCount: totalPages,
+                        trackerID: trackerID,
+                        trackerTitle: trackerTitle
                     )
                 )
             }
         } catch {
+            recordRefreshDiagnostics(
+                stage: "buyback.parallel-fallback",
+                summary: "Parallel buy-back page loading failed, so Hangar Express is retrying sequentially.",
+                detail: "errorType=\(String(reflecting: type(of: error))), localizedDescription=\(error.localizedDescription)",
+                level: .warning
+            )
             return try await fetchRemoteBuybackSequentially(
                 using: cookies,
                 startingFrom: 2,
                 initialItems: remoteBuyback,
                 knownTotalPages: totalPages,
                 previousPageSignature: firstPage.pageSignature,
+                browser: activeBrowser,
                 progress: progress,
                 stepNumber: stepNumber,
-                stepCount: stepCount
+                stepCount: stepCount,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         }
 
@@ -551,14 +1211,18 @@ final class LiveHangarRepository: HangarRepository {
         initialItems: [RemotePledge],
         knownTotalPages: Int?,
         previousPageSignature: String?,
+        browser activeBrowser: RSIAccountPageBrowser? = nil,
         progress: @escaping RefreshProgressHandler,
         stepNumber: Int,
-        stepCount: Int
+        stepCount: Int,
+        trackerID: String? = nil,
+        trackerTitle: String? = nil
     ) async throws -> [RemotePledge] {
         var remotePledges = initialItems
         var pledgeTotalPages = knownTotalPages
         var previousSignature = previousPageSignature
         var didReachEndOfPledges = false
+        let activeBrowser = activeBrowser ?? browser
 
         for page in startPage ... maxPledgePages {
             progress(
@@ -574,11 +1238,13 @@ final class LiveHangarRepository: HangarRepository {
                         isLoading: true
                     ),
                     completedUnitCount: max(page - 1, 0),
-                    totalUnitCount: pledgeTotalPages
+                    totalUnitCount: pledgeTotalPages,
+                    trackerID: trackerID,
+                    trackerTitle: trackerTitle
                 )
             )
 
-            let result = try await browser.extractPledges(
+            let result = try await activeBrowser.extractPledges(
                 using: cookies,
                 page: page,
                 pageSize: pledgePageSize
@@ -588,7 +1254,11 @@ final class LiveHangarRepository: HangarRepository {
                 throw LiveHangarRepositoryError.sessionExpired
             }
 
-            remotePledges.append(contentsOf: result.items)
+            remotePledges.append(
+                contentsOf: result.items.enumerated().map { itemOffset, pledge in
+                    pledge.withSourcePage(page, index: itemOffset)
+                }
+            )
 
             pledgeTotalPages = mergedTotalPages(
                 known: pledgeTotalPages,
@@ -613,7 +1283,9 @@ final class LiveHangarRepository: HangarRepository {
                         isLoading: false
                     ),
                     completedUnitCount: page,
-                    totalUnitCount: pledgeTotalPages
+                    totalUnitCount: pledgeTotalPages,
+                    trackerID: trackerID,
+                    trackerTitle: trackerTitle
                 )
             )
 
@@ -648,14 +1320,18 @@ final class LiveHangarRepository: HangarRepository {
         initialItems: [RemoteBuybackPledge],
         knownTotalPages: Int?,
         previousPageSignature: String?,
+        browser activeBrowser: RSIAccountPageBrowser? = nil,
         progress: @escaping RefreshProgressHandler,
         stepNumber: Int,
-        stepCount: Int
+        stepCount: Int,
+        trackerID: String? = nil,
+        trackerTitle: String? = nil
     ) async throws -> [RemoteBuybackPledge] {
         var remoteBuyback = initialItems
         var buybackTotalPages = knownTotalPages
         var previousSignature = previousPageSignature
         var didReachEndOfBuyback = false
+        let activeBrowser = activeBrowser ?? browser
 
         for page in startPage ... maxBuybackPages {
             progress(
@@ -671,11 +1347,13 @@ final class LiveHangarRepository: HangarRepository {
                         isLoading: true
                     ),
                     completedUnitCount: max(page - 1, 0),
-                    totalUnitCount: buybackTotalPages
+                    totalUnitCount: buybackTotalPages,
+                    trackerID: trackerID,
+                    trackerTitle: trackerTitle
                 )
             )
 
-            let result = try await browser.extractBuybackPledges(
+            let result = try await activeBrowser.extractBuybackPledges(
                 using: cookies,
                 page: page,
                 pageSize: buybackPageSize
@@ -710,7 +1388,9 @@ final class LiveHangarRepository: HangarRepository {
                         isLoading: false
                     ),
                     completedUnitCount: page,
-                    totalUnitCount: buybackTotalPages
+                    totalUnitCount: buybackTotalPages,
+                    trackerID: trackerID,
+                    trackerTitle: trackerTitle
                 )
             )
 
@@ -896,10 +1576,25 @@ final class LiveHangarRepository: HangarRepository {
 
     private func fetchRemoteHangarLogs(
         using cookies: [SessionCookie],
+        existingLogs: [HangarLogEntry],
+        mode: HangarLogFetchMode = .initial,
+        browser activeBrowser: RSIAccountPageBrowser? = nil,
         progress: @escaping RefreshProgressHandler,
         stepNumber: Int,
-        stepCount: Int
+        stepCount: Int,
+        trackerID: String? = nil,
+        trackerTitle: String? = nil
     ) async throws -> [HangarLogEntry] {
+        recordRefreshDiagnostics(
+            stage: "hangar-log.connect",
+            summary: "Opening RSI's hangar log window.",
+            detail: connectionDetail(
+                path: "/en/account/pledges",
+                page: 1,
+                cookies: cookies,
+                extra: ["knownMarkerCount=\(existingLogs.prefix(50).count)"]
+            )
+        )
         progress(
             makeProgress(
                 stage: .hangarLog,
@@ -907,20 +1602,52 @@ final class LiveHangarRepository: HangarRepository {
                 stepCount: stepCount,
                 detail: "Opening RSI's hangar log window and loading the current entries.",
                 completedUnitCount: 0,
-                totalUnitCount: 1
+                totalUnitCount: 1,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         )
 
-        let result = try await browser.fetchHangarLogPage(
-            using: cookies,
-            page: 1
-        )
+        let activeBrowser = activeBrowser ?? browser
+        let result: RemoteHangarLogPage
+        do {
+            result = try await activeBrowser.fetchHangarLogPage(
+                using: cookies,
+                page: 1,
+                maxEntries: mode.entryLimit,
+                knownRawTexts: hangarLogStopMarkers(from: existingLogs)
+            )
+        } catch {
+            recordRefreshDiagnostics(
+                stage: "hangar-log.connect",
+                summary: "Hangar Express could not load the RSI hangar log page.",
+                detail: "errorType=\(String(reflecting: type(of: error))), localizedDescription=\(error.localizedDescription)",
+                level: .error
+            )
+            throw error
+        }
 
         if result.accessDenied {
+            recordRefreshDiagnostics(
+                stage: "hangar-log.response",
+                summary: "RSI rejected the saved session while opening the hangar log window.",
+                detail: "statusCode=\(result.statusCode), accessDenied=true",
+                level: .warning
+            )
             throw LiveHangarRepositoryError.sessionExpired
         }
 
         if !(200 ..< 300).contains(result.statusCode) {
+            recordRefreshDiagnostics(
+                stage: "hangar-log.response",
+                summary: "RSI returned a non-success HTTP status while loading the hangar log.",
+                detail: [
+                    "statusCode=\(result.statusCode)",
+                    "failureMessage=\(result.failureMessage ?? "none")",
+                    "debugSummary=\(result.debugSummary ?? "none")"
+                ].joined(separator: "\n"),
+                level: .error
+            )
             throw LiveHangarRepositoryError.unexpectedMarkup(
                 result.failureMessage
                 ?? "RSI hangar log returned HTTP \(result.statusCode)."
@@ -928,16 +1655,53 @@ final class LiveHangarRepository: HangarRepository {
         }
 
         if let failureMessage = result.failureMessage {
+            recordRefreshDiagnostics(
+                stage: "hangar-log.response",
+                summary: "RSI opened the hangar log window but did not finish returning usable log data.",
+                detail: [
+                    "statusCode=\(result.statusCode)",
+                    "failureMessage=\(failureMessage)",
+                    "debugSummary=\(result.debugSummary ?? "none")"
+                ].joined(separator: "\n"),
+                level: .error
+            )
             throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
         }
 
-        let hangarLogs = Array(HangarLogParser.parse(result.items).prefix(maxHangarLogEntries))
+        let fetchedLogs = Array(HangarLogParser.parse(result.items).prefix(mode.entryLimit))
+        let hangarLogs = mergedHangarLogs(
+            fetchedLogs: fetchedLogs,
+            existingLogs: existingLogs,
+            entryLimit: mode.entryLimit
+        )
 
         if hangarLogs.isEmpty {
+            recordRefreshDiagnostics(
+                stage: "hangar-log.response",
+                summary: "RSI returned an empty hangar log payload.",
+                detail: [
+                    "statusCode=\(result.statusCode)",
+                    "returnedItems=\(result.items.count)",
+                    "debugSummary=\(result.debugSummary ?? "none")"
+                ].joined(separator: "\n"),
+                level: .error
+            )
             throw LiveHangarRepositoryError.unexpectedMarkup(
                 result.debugSummary
                 ?? "RSI opened the hangar log window, but no log entries were discovered."
             )
+        }
+
+        let addedEntryCount = max(hangarLogs.count - existingLogs.count, 0)
+        let detail: String
+        if existingLogs.isEmpty {
+            detail = hangarLogs.count >= mode.entryLimit
+                ? "Loaded \(hangarLogs.count) hangar log entries from RSI (cap \(mode.entryLimit))."
+                : "Loaded \(hangarLogs.count) hangar log entries from RSI."
+        } else if addedEntryCount > 0 {
+            detail = "Added \(addedEntryCount) new hangar log entr\(addedEntryCount == 1 ? "y" : "ies") from RSI. \(hangarLogs.count) cached total."
+        } else {
+            detail = "Your cached hangar log is already up to date."
         }
 
         progress(
@@ -945,12 +1709,22 @@ final class LiveHangarRepository: HangarRepository {
                 stage: .hangarLog,
                 stepNumber: stepNumber,
                 stepCount: stepCount,
-                detail: hangarLogs.count >= maxHangarLogEntries
-                    ? "Loaded \(hangarLogs.count) hangar log entries from RSI (cap \(maxHangarLogEntries))."
-                    : "Loaded \(hangarLogs.count) hangar log entries from RSI.",
+                detail: detail,
                 completedUnitCount: 1,
-                totalUnitCount: 1
+                totalUnitCount: 1,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
+        )
+        recordRefreshDiagnostics(
+            stage: "hangar-log.response",
+            summary: "Loaded hangar log entries from RSI.",
+            detail: [
+                "fetchedEntries=\(fetchedLogs.count)",
+                "mergedEntries=\(hangarLogs.count)",
+                "addedEntries=\(addedEntryCount)",
+                "statusCode=\(result.statusCode)"
+            ].joined(separator: ", ")
         )
 
         return hangarLogs.sorted { lhs, rhs in
@@ -958,10 +1732,53 @@ final class LiveHangarRepository: HangarRepository {
         }
     }
 
+    private func hangarLogStopMarkers(from existingLogs: [HangarLogEntry]) -> [String] {
+        Array(
+            existingLogs
+                .prefix(50)
+                .map(\.rawText)
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        )
+    }
+
+    private func mergedHangarLogs(
+        fetchedLogs: [HangarLogEntry],
+        existingLogs: [HangarLogEntry],
+        entryLimit: Int
+    ) -> [HangarLogEntry] {
+        var seenEntryIDs = Set<String>()
+        let sortedEntries = (fetchedLogs + existingLogs).sorted { lhs, rhs in
+            if lhs.occurredAt != rhs.occurredAt {
+                return lhs.occurredAt > rhs.occurredAt
+            }
+
+            return lhs.id > rhs.id
+        }
+
+        var mergedEntries: [HangarLogEntry] = []
+        mergedEntries.reserveCapacity(min(sortedEntries.count, entryLimit))
+
+        for entry in sortedEntries {
+            guard seenEntryIDs.insert(entry.id).inserted else {
+                continue
+            }
+
+            mergedEntries.append(entry)
+
+            if mergedEntries.count >= entryLimit {
+                break
+            }
+        }
+
+        return mergedEntries
+    }
+
     private func fetchHostedShipCatalog(
         progress: @escaping RefreshProgressHandler,
         stepNumber: Int,
-        stepCount: Int
+        stepCount: Int,
+        trackerID: String? = nil,
+        trackerTitle: String? = nil
     ) async -> RSIShipCatalog? {
         progress(
             makeProgress(
@@ -970,7 +1787,9 @@ final class LiveHangarRepository: HangarRepository {
                 stepCount: stepCount,
                 detail: "Loading hosted ship MSRP and thumbnail data for upgrade valuation.",
                 completedUnitCount: 0,
-                totalUnitCount: 2
+                totalUnitCount: 2,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         )
 
@@ -990,7 +1809,9 @@ final class LiveHangarRepository: HangarRepository {
                     ? "Hosted ship valuation data was unavailable. Continuing with hangar media only."
                     : "Loaded \(shipCatalog?.ships.count ?? 0) hosted ships for MSRP and image enrichment.",
                 completedUnitCount: 1,
-                totalUnitCount: 2
+                totalUnitCount: 2,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         )
 
@@ -999,9 +1820,12 @@ final class LiveHangarRepository: HangarRepository {
 
     private func fetchAccountContext(
         for session: UserSession,
+        browser activeBrowser: RSIAccountPageBrowser? = nil,
         progress: @escaping RefreshProgressHandler,
         stepNumber: Int,
-        stepCount: Int
+        stepCount: Int,
+        trackerID: String? = nil,
+        trackerTitle: String? = nil
     ) async throws -> AccountRefreshContext {
         progress(
             makeProgress(
@@ -1010,13 +1834,17 @@ final class LiveHangarRepository: HangarRepository {
                 stepCount: stepCount,
                 detail: "Loading account balances and profile details.",
                 completedUnitCount: 0,
-                totalUnitCount: 3
+                totalUnitCount: 3,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         )
 
+        let activeBrowser = activeBrowser ?? browser
         let accountOverview = try await optionalAccountFetch {
-            try await browser.fetchAccountOverview(
+            try await activeBrowser.fetchAccountOverview(
                 using: session.cookies,
+                accountHandle: session.handle,
                 profileName: session.displayName
             )
         }
@@ -1031,12 +1859,14 @@ final class LiveHangarRepository: HangarRepository {
                     ? "Account balances were unavailable. Continuing with saved account metadata."
                     : "Loaded \(accountOverview?.storeCreditUSD?.usdString ?? "an unavailable") store credit balance and \(accountOverview?.totalSpendUSD?.usdString ?? "an unavailable total spend").",
                 completedUnitCount: 1,
-                totalUnitCount: 3
+                totalUnitCount: 3,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         )
 
         let refreshedReferralStats = try await optionalAccountFetch {
-            try await browser.fetchReferralStats(using: session.cookies)
+            try await activeBrowser.fetchReferralStats(using: session.cookies)
         }
         let didRefreshReferralStats = refreshedReferralStats != nil
         let referralStats = refreshedReferralStats ?? .unavailable
@@ -1052,7 +1882,9 @@ final class LiveHangarRepository: HangarRepository {
                 stepCount: stepCount,
                 detail: "Loaded \(currentReferralDetail) and \(legacyReferralDetail).",
                 completedUnitCount: 2,
-                totalUnitCount: 3
+                totalUnitCount: 3,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         )
 
@@ -1063,7 +1895,9 @@ final class LiveHangarRepository: HangarRepository {
                 stepCount: stepCount,
                 detail: "Account overview sync complete.",
                 completedUnitCount: 3,
-                totalUnitCount: 3
+                totalUnitCount: 3,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
             )
         )
 
@@ -1091,13 +1925,101 @@ final class LiveHangarRepository: HangarRepository {
         }
     }
 
+    private func recordRefreshDiagnostics(
+        stage: String,
+        summary: String,
+        detail: String? = nil,
+        level: RefreshDiagnosticsStore.Entry.Level = .info
+    ) {
+        refreshDiagnostics.record(
+            stage: stage,
+            summary: summary,
+            detail: detail,
+            level: level
+        )
+    }
+
+    private func connectionDetail(
+        path: String,
+        page: Int? = nil,
+        pageSize: Int? = nil,
+        workerCount: Int? = nil,
+        cookies: [SessionCookie],
+        extra: [String] = []
+    ) -> String {
+        var details: [String] = [
+            "path=\(path)",
+            "browserStore=WKWebView.nonPersistent",
+            "cookieCount=\(cookies.count)",
+            "cookieNames=\(cookieNamePreview(cookies))",
+            "authCookies=\(authCookieSummary(cookies))",
+            "cookieDomains=\(cookieDomainSummary(cookies))"
+        ]
+
+        if let page {
+            details.append("page=\(page)")
+        }
+
+        if let pageSize {
+            details.append("pageSize=\(pageSize)")
+        }
+
+        if let workerCount {
+            details.append("workerCount=\(workerCount)")
+        }
+
+        details.append(contentsOf: extra)
+        return details.joined(separator: ", ")
+    }
+
+    private func cookieNamePreview(_ cookies: [SessionCookie]) -> String {
+        let names = Array(Set(cookies.map(\.name))).sorted()
+        guard !names.isEmpty else {
+            return "none"
+        }
+
+        let preview = names.prefix(12).joined(separator: ",")
+        return names.count > 12 ? "\(preview),..." : preview
+    }
+
+    private func cookieDomainSummary(_ cookies: [SessionCookie]) -> String {
+        let domains = Array(Set(cookies.map(\.domain))).sorted()
+        guard !domains.isEmpty else {
+            return "none"
+        }
+
+        let preview = domains.prefix(6).joined(separator: ",")
+        return domains.count > 6 ? "\(preview),..." : preview
+    }
+
+    private func authCookieSummary(_ cookies: [SessionCookie]) -> String {
+        let authCookieNames = Set([
+            "rsi-token",
+            "_rsi_device",
+            "rsi-account-auth"
+        ])
+        let matches = Array(
+            Set(
+                cookies.compactMap { cookie in
+                    let normalizedName = cookie.name.lowercased()
+                    return authCookieNames.contains(normalizedName) ? cookie.name : nil
+                }
+            )
+        )
+        .sorted()
+
+        return matches.isEmpty ? "none" : matches.joined(separator: ",")
+    }
+
     private func makeProgress(
         stage: RefreshStage,
         stepNumber: Int,
         stepCount: Int,
         detail: String,
         completedUnitCount: Int,
-        totalUnitCount: Int?
+        totalUnitCount: Int?,
+        trackerID: String? = nil,
+        trackerTitle: String? = nil
     ) -> RefreshProgress {
         RefreshProgress(
             stage: stage,
@@ -1105,7 +2027,9 @@ final class LiveHangarRepository: HangarRepository {
             stepCount: stepCount,
             detail: detail,
             completedUnitCount: completedUnitCount,
-            totalUnitCount: totalUnitCount
+            totalUnitCount: totalUnitCount,
+            trackerID: trackerID,
+            trackerTitle: trackerTitle
         )
     }
 
@@ -1211,7 +2135,10 @@ final class LiveHangarRepository: HangarRepository {
     private func normalize(package remote: RemotePledge, shipCatalog: RSIShipCatalog?) -> HangarPackage {
         let containsSummary = remote.containsText.trimmingCharacters(in: .whitespacesAndNewlines)
         let packageValueUSD = parseMoney(remote.valueText)
-        let packageThumbnailURL = remote.thumbnailImageURL.flatMap(URL.init(string:))
+        let packageThumbnailURL = mirroredCatalogImageURL(
+            remote.thumbnailImageURL.flatMap(URL.init(string:)),
+            shipCatalog: shipCatalog
+        )
         let insuranceOptions = inferInsuranceOptions(
             from: remote.alsoContains,
             containsSummary: containsSummary,
@@ -1237,6 +2164,10 @@ final class LiveHangarRepository: HangarRepository {
             canGift: remote.canGift,
             canReclaim: remote.canReclaim,
             canUpgrade: remote.canUpgrade,
+            isUpgradedStatusFlag: remote.isUpgradedStatusFlag,
+            upgradeMetadata: remote.upgradeMetadata?.domainModel,
+            sourcePage: remote.sourcePage,
+            sourcePageIndex: remote.sourcePageIndex,
             packageThumbnailURL: packageThumbnailURL,
             contents: contents
         )
@@ -1312,7 +2243,7 @@ final class LiveHangarRepository: HangarRepository {
         usePackageThumbnailFallback: Bool
     ) -> URL? {
         if let directURL = item.imageURL.flatMap(URL.init(string:)) {
-            return directURL
+            return mirroredCatalogImageURL(directURL, shipCatalog: shipCatalog)
         }
 
         if let specialEditionURL = specialEditionImageURL(
@@ -1324,7 +2255,7 @@ final class LiveHangarRepository: HangarRepository {
 
         switch category {
         case .upgrade:
-            return targetShip?.imageURL ?? (usePackageThumbnailFallback ? packageThumbnailURL : nil)
+            return nil
         case .ship, .vehicle:
             return shipCatalog?.matchShip(named: item.title)?.imageURL ?? (usePackageThumbnailFallback ? packageThumbnailURL : nil)
         case .gamePackage, .flair, .perk:
@@ -1363,8 +2294,10 @@ final class LiveHangarRepository: HangarRepository {
         return PackageItem.UpgradePricing(
             sourceShipName: path.sourceShipName,
             sourceShipMSRPUSD: sourceShip?.msrpUSD,
+            sourceShipImageURL: sourceShip?.imageURL,
             targetShipName: path.targetShipName,
             targetShipMSRPUSD: targetShip?.msrpUSD,
+            targetShipImageURL: targetShip?.imageURL,
             actualValueUSD: actualValueUSD,
             meltValueUSD: meltValueUSD
         )
@@ -1415,7 +2348,7 @@ final class LiveHangarRepository: HangarRepository {
         return nonUpgradeCategories.isEmpty ? packageValueUSD : nil
     }
 
-    private func normalize(buyback remote: RemoteBuybackPledge) -> BuybackPledge {
+    private func normalize(buyback remote: RemoteBuybackPledge, shipCatalog: RSIShipCatalog?) -> BuybackPledge {
         let title = remote.title.nilIfEmpty ?? "Untitled Buy Back"
         let notes = remote.containsText.nilIfEmpty ?? ""
 
@@ -1425,8 +2358,19 @@ final class LiveHangarRepository: HangarRepository {
             recoveredValueUSD: parseMoney(remote.valueText),
             addedToBuybackAt: parseRSIDate(remote.dateText) ?? .now,
             notes: notes,
-            imageURL: remote.imageURL.flatMap(URL.init(string:))
+            imageURL: mirroredCatalogImageURL(
+                remote.imageURL.flatMap(URL.init(string:)),
+                shipCatalog: shipCatalog
+            )
         )
+    }
+
+    private func mirroredCatalogImageURL(_ originalURL: URL?, shipCatalog: RSIShipCatalog?) -> URL? {
+        guard let originalURL else {
+            return nil
+        }
+
+        return shipCatalog?.mirroredAssetURL(for: originalURL) ?? originalURL
     }
 
     private func normalizePackageTitle(_ title: String) -> String {
@@ -1630,6 +2574,14 @@ enum LiveHangarRepositoryError: Error, LocalizedError, Equatable {
 }
 
 enum FleetProjector {
+    private static let notForSaleShipNames: Set<String> = [
+        "f7a hornet mk ii",
+        "dragonfly star kitten edition",
+        "mustang omega",
+        "mustang omega : amd edition",
+        "600i executive edition"
+    ]
+
     static func project(packages: [HangarPackage], shipCatalog: RSIShipCatalog?) -> [FleetShip] {
         packages.flatMap { package in
             let fleetEntries = package.contents.compactMap { item -> (PackageItem, RSIShipCatalog.Ship?)? in
@@ -1662,6 +2614,8 @@ enum FleetProjector {
                     role: role(for: item, matchedShip: matchedShip),
                     roleCategories: roleCategories(for: item, matchedShip: matchedShip),
                     msrpUSD: hostedMSRP(for: item, matchedShip: matchedShip),
+                    msrpLabel: hostedMSRPLabel(for: item, matchedShip: matchedShip),
+                    catalogWarning: catalogWarning(for: item, matchedShip: matchedShip),
                     insurance: package.insurance,
                     sourcePackageID: package.id,
                     sourcePackageName: package.title,
@@ -1750,11 +2704,51 @@ enum FleetProjector {
     }
 
     private static func hostedMSRP(for item: PackageItem, matchedShip: RSIShipCatalog.Ship?) -> Decimal? {
-        if item.title.localizedCaseInsensitiveContains("Dragonfly Star Kitten Edition") {
+        if isKnownNotForSaleShip(item: item, matchedShip: matchedShip) {
             return nil
         }
 
         return matchedShip?.msrpUSD
+    }
+
+    private static func hostedMSRPLabel(for item: PackageItem, matchedShip: RSIShipCatalog.Ship?) -> String? {
+        if let hostedLabel = matchedShip?.msrpLabel?.nilIfEmpty {
+            return hostedLabel
+        }
+
+        if isKnownNotForSaleShip(item: item, matchedShip: matchedShip) {
+            return "Not For Sale"
+        }
+
+        return nil
+    }
+
+    private static func isKnownNotForSaleShip(item: PackageItem, matchedShip: RSIShipCatalog.Ship?) -> Bool {
+        let candidateNames = [
+            item.title,
+            matchedShip?.name,
+            UpgradeTitleParser.stripManufacturerPrefix(from: item.title),
+            matchedShip.map { UpgradeTitleParser.stripManufacturerPrefix(from: $0.name) }
+        ]
+
+        return candidateNames
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase }
+            .contains(where: { notForSaleShipNames.contains($0) })
+    }
+
+    private static func catalogWarning(for item: PackageItem, matchedShip: RSIShipCatalog.Ship?) -> String? {
+        let warningMessage = "Ship info incomplete. Please send the dev a screenshot so it can be patched."
+
+        guard let matchedShip else {
+            return warningMessage
+        }
+
+        let hasManufacturer = matchedShip.manufacturer?.nilIfEmpty != nil
+        let hasRole = matchedShip.roleSummary?.nilIfEmpty != nil
+        let hasPricingState = hostedMSRP(for: item, matchedShip: matchedShip) != nil
+            || hostedMSRPLabel(for: item, matchedShip: matchedShip) != nil
+
+        return hasManufacturer && hasRole && hasPricingState ? nil : warningMessage
     }
 
     private static func hasShipLikeInsurance(_ insurance: String) -> Bool {
@@ -1826,6 +2820,51 @@ private actor ConcurrentPageProgress {
     }
 }
 
+private struct RemoteReclaimExecution: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let completedPledgeIDs: [Int]
+    let failedPledgeID: Int?
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
+private struct RemoteGiftExecution: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let completedPledgeIDs: [Int]
+    let failedPledgeID: Int?
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
+private struct RemoteUpgradeTargetLookup: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let candidates: [RemoteUpgradeTargetCandidate]
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
+private struct RemoteUpgradeTargetCandidate: Decodable {
+    let pledgeID: Int
+    let title: String
+
+    var domainModel: UpgradeTargetCandidate {
+        UpgradeTargetCandidate(
+            pledgeID: pledgeID,
+            title: title
+        )
+    }
+}
+
+private struct RemoteApplyUpgradeExecution: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
 @MainActor
 final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     private let webView: WKWebView
@@ -1865,15 +2904,204 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     fileprivate func fetchHangarLogPage(
         using cookies: [SessionCookie],
-        page: Int
+        page: Int,
+        maxEntries: Int,
+        knownRawTexts: [String] = []
     ) async throws -> RemoteHangarLogPage {
         let url = try storefrontURL(path: "/en/account/pledges")
         try await prepareWebView(with: cookies)
         try await ensureLoaded(url: url)
         return try await evaluate(
             script: Self.hangarLogExtractionScript,
-            arguments: ["page": page],
+            arguments: [
+                "page": page,
+                "maxEntries": maxEntries,
+                "knownRawTexts": knownRawTexts
+            ],
             as: RemoteHangarLogPage.self
+        )
+    }
+
+    fileprivate func reclaimPledges(
+        using cookies: [SessionCookie],
+        pledgeIDs: [Int],
+        password: String
+    ) async throws -> MeltPackagesResult {
+        let url = try storefrontURL(path: "/en/account/pledges")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let result = try await evaluate(
+            script: Self.reclaimPledgesScript,
+            arguments: [
+                "pledgeIDs": pledgeIDs,
+                "currentPassword": password
+            ],
+            as: RemoteReclaimExecution.self
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        let updatedCookies = await currentRSICookies()
+        let hasCompletedEveryRequestedPledge = result.completedPledgeIDs.count == pledgeIDs.count
+        let shouldTreatAsSuccess = result.status == "ok"
+            && result.failedPledgeID == nil
+            && hasCompletedEveryRequestedPledge
+
+        let failureMessage: String?
+        if shouldTreatAsSuccess {
+            failureMessage = nil
+        } else {
+            failureMessage = [result.failureMessage, result.debugSummary]
+                .compactMap { value in
+                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                }
+                .joined(separator: "\n\n")
+                .nilIfEmpty
+        }
+
+        return MeltPackagesResult(
+            requestedPledgeIDs: pledgeIDs,
+            completedPledgeIDs: result.completedPledgeIDs,
+            failedPledgeID: result.failedPledgeID,
+            failureMessage: failureMessage,
+            updatedCookies: updatedCookies
+        )
+    }
+
+    fileprivate func giftPledges(
+        using cookies: [SessionCookie],
+        pledgeIDs: [Int],
+        password: String,
+        recipientEmail: String,
+        recipientName: String
+    ) async throws -> GiftPackagesResult {
+        let url = try storefrontURL(path: "/en/account/pledges")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let result = try await evaluate(
+            script: Self.giftPledgesScript,
+            arguments: [
+                "pledgeIDs": pledgeIDs,
+                "currentPassword": password,
+                "recipientEmail": recipientEmail,
+                "recipientName": recipientName
+            ],
+            as: RemoteGiftExecution.self
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        let updatedCookies = await currentRSICookies()
+        let hasCompletedEveryRequestedPledge = result.completedPledgeIDs.count == pledgeIDs.count
+        let shouldTreatAsSuccess = result.status == "ok"
+            && result.failedPledgeID == nil
+            && hasCompletedEveryRequestedPledge
+
+        let failureMessage: String?
+        if shouldTreatAsSuccess {
+            failureMessage = nil
+        } else {
+            failureMessage = [result.failureMessage, result.debugSummary]
+                .compactMap { value in
+                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                }
+                .joined(separator: "\n\n")
+                .nilIfEmpty
+        }
+
+        return GiftPackagesResult(
+            requestedPledgeIDs: pledgeIDs,
+            completedPledgeIDs: result.completedPledgeIDs,
+            failedPledgeID: result.failedPledgeID,
+            failureMessage: failureMessage,
+            updatedCookies: updatedCookies
+        )
+    }
+
+    fileprivate func fetchUpgradeTargets(
+        using cookies: [SessionCookie],
+        upgradeItemPledgeID: Int
+    ) async throws -> [UpgradeTargetCandidate] {
+        let url = try storefrontURL(path: "/en/account/pledges")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let result = try await evaluate(
+            script: Self.chooseUpgradeTargetsScript,
+            arguments: [
+                "upgradeItemPledgeID": upgradeItemPledgeID
+            ],
+            as: RemoteUpgradeTargetLookup.self
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        if result.status != "ok" {
+            let failureMessage = [result.failureMessage, result.debugSummary]
+                .compactMap { value in
+                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                }
+                .joined(separator: "\n\n")
+                .nilIfEmpty ?? "RSI did not return the eligible pledges for this upgrade item."
+            throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
+        }
+
+        return result.candidates.map(\.domainModel)
+    }
+
+    fileprivate func applyUpgrade(
+        using cookies: [SessionCookie],
+        upgradeItemPledgeID: Int,
+        targetPledgeID: Int,
+        password: String
+    ) async throws -> ApplyUpgradeResult {
+        let url = try storefrontURL(path: "/en/account/pledges")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let result = try await evaluate(
+            script: Self.applyUpgradeScript,
+            arguments: [
+                "upgradeItemPledgeID": upgradeItemPledgeID,
+                "targetPledgeID": targetPledgeID,
+                "currentPassword": password
+            ],
+            as: RemoteApplyUpgradeExecution.self
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        let updatedCookies = await currentRSICookies()
+        let shouldTreatAsSuccess = result.status == "ok"
+
+        let failureMessage: String?
+        if shouldTreatAsSuccess {
+            failureMessage = nil
+        } else {
+            failureMessage = [result.failureMessage, result.debugSummary]
+                .compactMap { value in
+                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                }
+                .joined(separator: "\n\n")
+                .nilIfEmpty
+        }
+
+        return ApplyUpgradeResult(
+            upgradeItemPledgeID: upgradeItemPledgeID,
+            targetPledgeID: targetPledgeID,
+            wasSuccessful: shouldTreatAsSuccess,
+            failureMessage: failureMessage,
+            updatedCookies: updatedCookies
         )
     }
 
@@ -1963,7 +3191,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
                     id: ship.id,
                     name: ship.name,
                     msrpUSD: ship.msrpUSD,
-                    imageURL: ship.imageURL.flatMap(URL.init(string:))
+                    imageURL: ship.imageURL.flatMap(URL.init(string:)),
+                    sourceImageURL: nil
                 )
             }
         )
@@ -1971,6 +3200,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     fileprivate func fetchAccountOverview(
         using cookies: [SessionCookie],
+        accountHandle: String,
         profileName: String
     ) async throws -> AccountOverview {
         let url = try storefrontURL(path: "/en/")
@@ -2003,7 +3233,9 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             throw LiveHangarRepositoryError.sessionExpired
         }
 
-        let primaryOrganizationOverview = try? await fetchPrimaryOrganization(profileName: profileName)
+        let primaryOrganizationOverview = try? await fetchPrimaryOrganization(
+            profileCandidates: [accountHandle, profileName]
+        )
 
         return AccountOverview(
             storeCreditUSD: storeCreditUSD,
@@ -2042,27 +3274,52 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         )
     }
 
-    private func fetchPrimaryOrganization(profileName: String) async throws -> PrimaryOrganizationOverview {
-        let trimmedProfileName = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedProfileName.isEmpty else {
+    private func fetchPrimaryOrganization(profileCandidates: [String]) async throws -> PrimaryOrganizationOverview {
+        let resolvedCandidates = profileCandidates
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .reduce(into: [String]()) { uniqueCandidates, candidate in
+                if !uniqueCandidates.contains(where: { $0.caseInsensitiveCompare(candidate) == .orderedSame }) {
+                    uniqueCandidates.append(candidate)
+                }
+            }
+
+        guard !resolvedCandidates.isEmpty else {
             return PrimaryOrganizationOverview(
                 organization: nil,
                 didRefreshPrimaryOrganization: false
             )
         }
 
-        let dossierURL = try citizenDossierURL(profileName: trimmedProfileName)
-        try await load(url: dossierURL)
+        var didReachCitizenDossier = false
 
-        let payload = try await evaluate(script: Self.primaryOrganizationExtractionScript, as: RemotePrimaryOrganization.self)
+        for candidate in resolvedCandidates {
+            let dossierURL = try citizenDossierURL(profileName: candidate)
+            try await load(url: dossierURL)
 
-        if payload.accessDenied {
-            throw LiveHangarRepositoryError.sessionExpired
+            let payload = try await evaluate(script: Self.primaryOrganizationExtractionScript, as: RemotePrimaryOrganization.self)
+
+            if payload.accessDenied {
+                throw LiveHangarRepositoryError.sessionExpired
+            }
+
+            guard !payload.pageUnavailable else {
+                continue
+            }
+
+            didReachCitizenDossier = true
+
+            if let organization = payload.organization {
+                return PrimaryOrganizationOverview(
+                    organization: organization,
+                    didRefreshPrimaryOrganization: true
+                )
+            }
         }
 
         return PrimaryOrganizationOverview(
-            organization: payload.organization,
-            didRefreshPrimaryOrganization: !payload.pageUnavailable
+            organization: nil,
+            didRefreshPrimaryOrganization: didReachCitizenDossier
         )
     }
 
@@ -2359,6 +3616,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     private static let pledgesExtractionScript = """
     await new Promise(resolve => setTimeout(resolve, 150));
 
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+
     const firstText = (node, selectors) => {
       for (const selector of selectors) {
         const found = node.querySelector(selector);
@@ -2423,6 +3682,45 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         }
       }
       return "";
+    };
+
+    const normalizeUpgradeMatchItems = (items) =>
+      Array.isArray(items)
+        ? items
+            .map((item) => {
+              const parsedID = Number.parseInt(String(item?.id ?? ''), 10);
+              const name = String(item?.name || '').trim();
+              if (!name) {
+                return null;
+              }
+
+              return {
+                id: Number.isFinite(parsedID) ? parsedID : null,
+                name
+              };
+            })
+            .filter(Boolean)
+        : [];
+
+    const parseUpgradeMetadata = (row) => {
+      const rawValue = firstValue(row, ['.js-upgrade-data']);
+      if (!rawValue) {
+        return null;
+      }
+
+      try {
+        const parsed = JSON.parse(rawValue);
+        const parsedID = Number.parseInt(String(parsed?.id ?? ''), 10);
+        return {
+          id: Number.isFinite(parsedID) ? parsedID : null,
+          name: String(parsed?.name || '').trim() || null,
+          upgradeType: String(parsed?.upgrade_type || '').trim() || null,
+          matchItems: normalizeUpgradeMatchItems(parsed?.match_items),
+          targetItems: normalizeUpgradeMatchItems(parsed?.target_items)
+        };
+      } catch {
+        return null;
+      }
     };
 
     const currentPage = (() => {
@@ -2519,6 +3817,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
           .filter(Boolean);
         const packageThumbnailNode =
           row.querySelector('.image-col, .image, .thumb, .thumbnail, picture, img') || row;
+        const rawStatusValue = firstValue(row, ['.js-pledge-status']);
         const items = Array.from(row.querySelectorAll('.with-images .item')).map((item) => ({
           title: firstText(item, ['.title']),
           kind: firstText(item, ['.kind']),
@@ -2532,7 +3831,29 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             return Number.isFinite(value) ? value : null;
           })(),
           title: firstValue(row, ['.js-pledge-name']) || firstText(row, ['h1', 'h2', '.title']),
-          statusText: firstText(row, ['.availability', '.status']),
+          statusText: normalizeText(rawStatusValue) || firstText(row, ['.availability', '.status']),
+          isUpgradedStatusFlag: (() => {
+            try {
+              const statusNodes = Array.from(
+                row.querySelectorAll('.availability, .status, .availability *, .status *')
+              );
+              const combinedStatusText = statusNodes
+                .map((node) => normalizeText(node.textContent))
+                .filter(Boolean)
+                .join(' ');
+              const rowVisibleText = normalizeText(row.innerText || row.textContent || '');
+              const searchableStatusText = [
+                normalizeText(rawStatusValue),
+                combinedStatusText,
+                rowVisibleText
+              ]
+                .filter(Boolean)
+                .join(' ');
+              return /(^|\\s)upgraded(\\s|$)/i.test(searchableStatusText);
+            } catch {
+              return false;
+            }
+          })(),
           dateText: firstText(row, ['.date-col', '.date']),
           valueText: firstValue(row, ['.js-pledge-value']) || firstText(row, ['.value', '.price']),
           containsText: firstText(row, ['.items-col', '.contains']),
@@ -2541,6 +3862,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
           canGift: row.querySelector('.shadow-button.js-gift, .js-gift') !== null,
           canReclaim: row.querySelector('.shadow-button.js-reclaim, .js-reclaim') !== null,
           canUpgrade: row.querySelector('.shadow-button.js-apply-upgrade, .js-apply-upgrade') !== null,
+          upgradeMetadata: parseUpgradeMetadata(row),
           items
         };
       })
@@ -3067,11 +4389,15 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       document.title.toLowerCase().includes('access denied') ||
       document.body.innerText.includes('Access denied');
 
-    const mainOrganizationRoot =
-      document.querySelector('.main-org .info') ||
-      document.querySelector('.box-content.org.main .info');
+    const dossierRoot =
+      document.querySelector('.citizen-record') ||
+      document.querySelector('.profile-content') ||
+      document.querySelector('.left-col') ||
+      document.querySelector('.right-col') ||
+      document.querySelector('.main-org') ||
+      document.querySelector('.box-content.org.main');
 
-    if (!mainOrganizationRoot) {
+    if (!dossierRoot) {
       return {
         accessDenied,
         pageUnavailable: true,
@@ -3080,26 +4406,66 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       };
     }
 
+    const extractionRoots = [
+      document.querySelector('.main-org .info'),
+      document.querySelector('.box-content.org.main .info'),
+      document.querySelector('.right-col')
+    ].filter(Boolean);
+
     let organization = {
       name: '',
       rank: ''
     };
 
-    Array.from(mainOrganizationRoot.querySelectorAll('.entry')).forEach((entry) => {
-      const label = normalizeText(entry.querySelector('.label')?.textContent).toLowerCase();
-      const value = normalizeText(entry.querySelector('.value')?.textContent);
+    extractionRoots.forEach((root) => {
+      Array.from(root.querySelectorAll('.entry')).forEach((entry, index) => {
+        const label = normalizeText(entry.querySelector('.label')?.textContent).toLowerCase();
+        const linkedValue = normalizeText(entry.querySelector('a[href*="/orgs/"]')?.textContent);
+        const strongValue = normalizeText(entry.querySelector('strong')?.textContent);
+        const plainValue = normalizeText(entry.querySelector('.value')?.textContent);
+        const value = linkedValue || plainValue || strongValue;
 
-      if (!value) {
-        return;
+        if (!value) {
+          return;
+        }
+
+        if ((label.includes('main organization') || label.includes('organization')) && !organization.name) {
+          organization.name = value;
+          return;
+        }
+
+        if ((label.includes('organization rank') || label === 'rank') && !organization.rank) {
+          organization.rank = value;
+          return;
+        }
+
+        if (!label && !organization.name && linkedValue) {
+          organization.name = linkedValue;
+          return;
+        }
+
+        if (!label && !organization.name && index === 0) {
+          organization.name = value;
+          return;
+        }
+      });
+
+      if (!organization.name) {
+        const fallbackLink = root.querySelector('a[href*="/orgs/"]');
+        const fallbackName = normalizeText(fallbackLink?.textContent);
+        if (fallbackName) {
+          organization.name = fallbackName;
+        }
       }
 
-      if (!label && !organization.name) {
-        organization.name = value;
-        return;
-      }
+      if (!organization.rank) {
+        const strongValues = Array.from(root.querySelectorAll('.entry strong'))
+          .map((item) => normalizeText(item.textContent))
+          .filter(Boolean);
 
-      if (label.includes('organization rank') && !organization.rank) {
-        organization.rank = value;
+        if (strongValues.length >= 3) {
+          organization.rank = strongValues[2];
+        }
       }
     });
 
@@ -3786,7 +5152,14 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     private static let hangarLogExtractionScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-    const maxEntries = 500;
+    const resolvedMaxEntries = Number.isFinite(Number(maxEntries)) && Number(maxEntries) > 0
+      ? Math.min(Math.floor(Number(maxEntries)), 500)
+      : 10;
+    const knownFullTexts = new Set(
+      (Array.isArray(knownRawTexts) ? knownRawTexts : [])
+        .map((value) => normalizeText(value))
+        .filter(Boolean)
+    );
     const cookieValue = (name) => {
       const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
       const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
@@ -3868,12 +5241,14 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         }
         seen.add(key);
         results.push(entry);
-        if (results.length >= maxEntries) {
+        if (results.length >= resolvedMaxEntries) {
           break;
         }
       }
       return results;
     };
+    const isKnownEntry = (entry) => knownFullTexts.has(normalizeText(entry.fullText));
+    const onlyUnknownEntries = (entries) => entries.filter((entry) => !isKnownEntry(entry));
     const findScrollableContainers = () =>
       Array.from(document.querySelectorAll('*')).filter((node) => {
         if (!(node instanceof HTMLElement)) {
@@ -3965,13 +5340,13 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       };
     }
 
-    let items = collectEntries();
+    let items = dedupeEntries(onlyUnknownEntries(collectEntries()));
     let stablePasses = 0;
     let pagedFetchStatus = 'not-started';
     let pagedFetchPageCount = null;
     let pagedFetchStoppedAt = 1;
 
-    for (let index = 0; index < 80 && items.length < maxEntries; index += 1) {
+    for (let index = 0; index < 80 && items.length < resolvedMaxEntries; index += 1) {
       const beforeCount = items.length;
 
       for (const container of findScrollableContainers()) {
@@ -3982,7 +5357,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       clickElement(findLoadMoreButton());
       await wait(250);
 
-      items = collectEntries().slice(0, maxEntries);
+      items = dedupeEntries(onlyUnknownEntries(collectEntries())).slice(0, resolvedMaxEntries);
 
       if (items.length > beforeCount) {
         stablePasses = 0;
@@ -3995,7 +5370,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       }
     }
 
-    items = collectEntries().slice(0, maxEntries);
+    items = dedupeEntries(onlyUnknownEntries(collectEntries())).slice(0, resolvedMaxEntries);
 
     try {
       const pageOneResponse = await fetch('/api/account/pledgeLog', {
@@ -4013,68 +5388,81 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
       if (pageOneResponse.ok && pageOnePayload?.data) {
         const apiItems = parseRenderedEntries(pageOnePayload.data.rendered);
-        if (apiItems.length > 0) {
-          items = dedupeEntries(apiItems.concat(items));
+        const pageOneHitKnown = apiItems.some(isKnownEntry);
+        const pageOneNewItems = onlyUnknownEntries(apiItems);
+        if (pageOneNewItems.length > 0) {
+          items = dedupeEntries(pageOneNewItems.concat(items));
         }
 
         const reportedPageCount = Number.parseInt(String(pageOnePayload.data.pagecount || ''), 10);
         const pageCount = Number.isFinite(reportedPageCount) && reportedPageCount > 0 ? reportedPageCount : null;
         pagedFetchPageCount = pageCount;
-        pagedFetchStatus = 'page-1-ok';
+        pagedFetchStatus = pageOneHitKnown ? 'page-1-hit-known' : 'page-1-ok';
 
-        for (let page = 2; page <= (pageCount || 100) && items.length < maxEntries; page += 1) {
-          const response = await fetch('/api/account/pledgeLog', {
-            method: 'POST',
-            credentials: 'include',
-            headers: requestHeaders,
-            body: JSON.stringify({ page })
-          });
+        if (!pageOneHitKnown) {
+          for (let page = 2; page <= (pageCount || 100) && items.length < resolvedMaxEntries; page += 1) {
+            const response = await fetch('/api/account/pledgeLog', {
+              method: 'POST',
+              credentials: 'include',
+              headers: requestHeaders,
+              body: JSON.stringify({ page })
+            });
 
-          const rawBody = await response.text();
-          let payload = null;
-          try {
-            payload = JSON.parse(rawBody);
-          } catch {}
+            const rawBody = await response.text();
+            let payload = null;
+            try {
+              payload = JSON.parse(rawBody);
+            } catch {}
 
-          if (!response.ok || !payload?.data) {
-            pagedFetchStatus = `page-${page}-http-${response.status}`;
+            if (!response.ok || !payload?.data) {
+              pagedFetchStatus = `page-${page}-http-${response.status}`;
+              pagedFetchStoppedAt = page;
+              break;
+            }
+
+            const currentPage = Number.parseInt(String(payload.data.page || page), 10);
+            const currentPageCount = Number.parseInt(String(payload.data.pagecount || pageCount || ''), 10);
+            if (Number.isFinite(currentPageCount) && currentPageCount > 0) {
+              pagedFetchPageCount = currentPageCount;
+            }
+
+            if (Number.isFinite(currentPage) && Number.isFinite(currentPageCount) && currentPage > currentPageCount) {
+              pagedFetchStatus = `page-${page}-past-end`;
+              pagedFetchStoppedAt = page;
+              break;
+            }
+
+            const pageItems = parseRenderedEntries(payload.data.rendered);
+            if (pageItems.length === 0) {
+              pagedFetchStatus = `page-${page}-empty`;
+              pagedFetchStoppedAt = page;
+              break;
+            }
+
+            const pageHitKnown = pageItems.some(isKnownEntry);
+            const newPageItems = onlyUnknownEntries(pageItems);
+            const beforeCount = items.length;
+            if (newPageItems.length > 0) {
+              items = dedupeEntries(items.concat(newPageItems));
+            }
             pagedFetchStoppedAt = page;
-            break;
+
+            if (pageHitKnown) {
+              pagedFetchStatus = `page-${page}-hit-known`;
+              break;
+            }
+
+            if (items.length === beforeCount) {
+              pagedFetchStatus = `page-${page}-duplicate`;
+              break;
+            }
+
+            pagedFetchStatus = `page-${page}-ok`;
           }
-
-          const currentPage = Number.parseInt(String(payload.data.page || page), 10);
-          const currentPageCount = Number.parseInt(String(payload.data.pagecount || pageCount || ''), 10);
-          if (Number.isFinite(currentPageCount) && currentPageCount > 0) {
-            pagedFetchPageCount = currentPageCount;
-          }
-
-          if (Number.isFinite(currentPage) && Number.isFinite(currentPageCount) && currentPage > currentPageCount) {
-            pagedFetchStatus = `page-${page}-past-end`;
-            pagedFetchStoppedAt = page;
-            break;
-          }
-
-          const pageItems = parseRenderedEntries(payload.data.rendered);
-          if (pageItems.length === 0) {
-            pagedFetchStatus = `page-${page}-empty`;
-            pagedFetchStoppedAt = page;
-            break;
-          }
-
-          const beforeCount = items.length;
-          items = dedupeEntries(items.concat(pageItems));
-          pagedFetchStoppedAt = page;
-
-          if (items.length === beforeCount) {
-            pagedFetchStatus = `page-${page}-duplicate`;
-            break;
-          }
-
-          pagedFetchStatus = `page-${page}-ok`;
         }
 
-        if (items.length >= maxEntries) {
-          pagedFetchStatus = `cap-${maxEntries}`;
+        if (items.length >= resolvedMaxEntries) {
+          pagedFetchStatus = `cap-${resolvedMaxEntries}`;
         }
       } else {
         pagedFetchStatus = `page-1-http-${pageOneResponse.status}`;
@@ -4083,16 +5471,17 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       pagedFetchStatus = `fetch-error:${normalizeText(error?.message || String(error))}`;
     }
 
-    items = dedupeEntries(items).slice(0, maxEntries);
+    items = dedupeEntries(items).slice(0, resolvedMaxEntries);
 
-    const failureMessage = items.length === 0
+    const failureMessage = items.length === 0 && knownFullTexts.size === 0
       ? 'RSI opened the Hangar log flow, but no .pledge-log-entry rows were rendered.'
       : null;
 
     const debugSummary = [
       `button=${normalizeText(hangarLogButton.textContent || hangarLogButton.value || '')}`,
       `entries=${items.length}`,
-      `max=${maxEntries}`,
+      `max=${resolvedMaxEntries}`,
+      `knownMarkers=${knownFullTexts.size}`,
       `pagedStatus=${pagedFetchStatus}`,
       `pagedCount=${pagedFetchPageCount ?? 'unknown'}`,
       `pagedStop=${pagedFetchStoppedAt}`,
@@ -4107,6 +5496,447 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       items,
       failureMessage,
       debugSummary
+    };
+    """
+
+    private static let reclaimPledgesScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+
+    const pledgeIDsToReclaim = Array.isArray(pledgeIDs)
+      ? pledgeIDs
+          .map((value) => Number(value))
+          .filter((value) => Number.isFinite(value) && value > 0)
+      : [];
+    const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
+
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        completedPledgeIDs: [],
+        failedPledgeID: null,
+        failureMessage: 'The RSI account page reported access denied before the melt request started.',
+        debugSummary: null
+      };
+    }
+
+    const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
+    const rsiDevice = cookieValue('_rsi_device');
+    const requestHeaders = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Accept': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+
+    if (csrfToken) {
+      requestHeaders['x-csrf-token'] = csrfToken;
+    }
+    if (rsiToken) {
+      requestHeaders['x-rsi-token'] = rsiToken;
+    }
+    if (rsiDevice) {
+      requestHeaders['x-rsi-device'] = rsiDevice;
+    }
+
+    const completedPledgeIDs = [];
+
+    for (const pledgeID of pledgeIDsToReclaim) {
+      const response = await fetch('/api/account/reclaimPledge', {
+        method: 'POST',
+        credentials: 'include',
+        headers: requestHeaders,
+        body: JSON.stringify({
+          pledge_id: String(pledgeID),
+          current_password: currentPasswordValue
+        })
+      });
+
+      const responseText = await response.text();
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        payload = null;
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          accessDenied: true,
+          status: 'access-denied',
+          completedPledgeIDs,
+          failedPledgeID: pledgeID,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI rejected the melt request for pledge ${pledgeID}.`),
+          debugSummary: `httpStatus=${response.status}`
+        };
+      }
+
+      const successValue = Number(payload?.success ?? 0);
+      if (!response.ok || successValue !== 1) {
+        return {
+          accessDenied: false,
+          status: completedPledgeIDs.length > 0 ? 'partial-failure' : 'failed',
+          completedPledgeIDs,
+          failedPledgeID: pledgeID,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI returned HTTP ${response.status} while reclaiming pledge ${pledgeID}.`),
+          debugSummary: `httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}`
+        };
+      }
+
+      completedPledgeIDs.push(pledgeID);
+    }
+
+    return {
+      accessDenied: false,
+      status: 'ok',
+      completedPledgeIDs,
+      failedPledgeID: null,
+      failureMessage: null,
+      debugSummary: `requested=${pledgeIDsToReclaim.length}, completed=${completedPledgeIDs.length}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+    };
+    """
+
+    private static let giftPledgesScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+
+    const pledgeIDsToGift = Array.isArray(pledgeIDs)
+      ? pledgeIDs
+          .map((value) => Number(value))
+          .filter((value) => Number.isFinite(value) && value > 0)
+      : [];
+    const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
+    const recipientEmailValue = normalizeText(recipientEmail);
+    const recipientNameValue = normalizeText(recipientName);
+
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        completedPledgeIDs: [],
+        failedPledgeID: null,
+        failureMessage: 'The RSI account page reported access denied before the gift request started.',
+        debugSummary: null
+      };
+    }
+
+    const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
+    const rsiDevice = cookieValue('_rsi_device');
+    const requestHeaders = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Accept': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+
+    if (csrfToken) {
+      requestHeaders['x-csrf-token'] = csrfToken;
+    }
+    if (rsiToken) {
+      requestHeaders['x-rsi-token'] = rsiToken;
+    }
+    if (rsiDevice) {
+      requestHeaders['x-rsi-device'] = rsiDevice;
+    }
+
+    const completedPledgeIDs = [];
+
+    for (const pledgeID of pledgeIDsToGift) {
+      const response = await fetch('/api/account/giftPledge', {
+        method: 'POST',
+        credentials: 'include',
+        headers: requestHeaders,
+        body: JSON.stringify({
+          pledge_id: String(pledgeID),
+          current_password: currentPasswordValue,
+          email: recipientEmailValue,
+          name: recipientNameValue
+        })
+      });
+
+      const responseText = await response.text();
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        payload = null;
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          accessDenied: true,
+          status: 'access-denied',
+          completedPledgeIDs,
+          failedPledgeID: pledgeID,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI rejected the gift request for pledge ${pledgeID}.`),
+          debugSummary: `httpStatus=${response.status}`
+        };
+      }
+
+      const successValue = Number(payload?.success ?? 0);
+      if (!response.ok || successValue !== 1) {
+        return {
+          accessDenied: false,
+          status: completedPledgeIDs.length > 0 ? 'partial-failure' : 'failed',
+          completedPledgeIDs,
+          failedPledgeID: pledgeID,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI returned HTTP ${response.status} while gifting pledge ${pledgeID}.`),
+          debugSummary: `httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}`
+        };
+      }
+
+      completedPledgeIDs.push(pledgeID);
+    }
+
+    return {
+      accessDenied: false,
+      status: 'ok',
+      completedPledgeIDs,
+      failedPledgeID: null,
+      failureMessage: null,
+      debugSummary: `requested=${pledgeIDsToGift.length}, completed=${completedPledgeIDs.length}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+    };
+    """
+
+    private static let chooseUpgradeTargetsScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+
+    const parsedUpgradeItemPledgeID = Number(upgradeItemPledgeID);
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        candidates: [],
+        failureMessage: 'The RSI account page reported access denied before the upgrade target lookup started.',
+        debugSummary: null
+      };
+    }
+
+    if (!Number.isFinite(parsedUpgradeItemPledgeID) || parsedUpgradeItemPledgeID <= 0) {
+      return {
+        accessDenied: false,
+        status: 'invalid-upgrade-item',
+        candidates: [],
+        failureMessage: 'Hangar Express could not determine the selected owned upgrade item id.',
+        debugSummary: `upgradeItemPledgeID=${String(upgradeItemPledgeID)}`
+      };
+    }
+
+    const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
+    const rsiDevice = cookieValue('_rsi_device');
+    const requestHeaders = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Accept': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+
+    if (csrfToken) {
+      requestHeaders['x-csrf-token'] = csrfToken;
+    }
+    if (rsiToken) {
+      requestHeaders['x-rsi-token'] = rsiToken;
+    }
+    if (rsiDevice) {
+      requestHeaders['x-rsi-device'] = rsiDevice;
+    }
+
+    const response = await fetch('/api/account/chooseUpgradeTarget', {
+      method: 'POST',
+      credentials: 'include',
+      headers: requestHeaders,
+      body: JSON.stringify({
+        upgrade_id: String(parsedUpgradeItemPledgeID)
+      })
+    });
+
+    const responseText = await response.text();
+    let payload = null;
+    try {
+      payload = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      payload = null;
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        candidates: [],
+        failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI rejected the upgrade target lookup for pledge ${parsedUpgradeItemPledgeID}.`),
+        debugSummary: `httpStatus=${response.status}`
+      };
+    }
+
+    const successValue = Number(payload?.success ?? 0);
+    if (!response.ok || successValue !== 1) {
+      return {
+        accessDenied: false,
+        status: 'failed',
+        candidates: [],
+        failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI returned HTTP ${response.status} while loading upgrade targets for pledge ${parsedUpgradeItemPledgeID}.`),
+        debugSummary: `httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}`
+      };
+    }
+
+    const renderedHTML = payload?.data?.rendered || '';
+    const documentFragment = new DOMParser().parseFromString(renderedHTML, 'text/html');
+    const candidates = Array.from(documentFragment.querySelectorAll('div.row'))
+      .map((row) => {
+        const inputValue = row.querySelector('input')?.getAttribute('value') || '';
+        const parsedPledgeID = Number.parseInt(inputValue, 10);
+        const title = normalizeText(row.querySelector('span')?.textContent || row.textContent || '');
+        if (!Number.isFinite(parsedPledgeID) || parsedPledgeID <= 0 || !title) {
+          return null;
+        }
+
+        return {
+          pledgeID: parsedPledgeID,
+          title
+        };
+      })
+      .filter(Boolean);
+
+    return {
+      accessDenied: false,
+      status: 'ok',
+      candidates,
+      failureMessage: null,
+      debugSummary: `upgradeItemPledgeID=${parsedUpgradeItemPledgeID}, candidateCount=${candidates.length}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+    };
+    """
+
+    private static let applyUpgradeScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+
+    const parsedUpgradeItemPledgeID = Number(upgradeItemPledgeID);
+    const parsedTargetPledgeID = Number(targetPledgeID);
+    const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
+
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        failureMessage: 'The RSI account page reported access denied before the upgrade request started.',
+        debugSummary: null
+      };
+    }
+
+    if (!Number.isFinite(parsedUpgradeItemPledgeID) || parsedUpgradeItemPledgeID <= 0) {
+      return {
+        accessDenied: false,
+        status: 'invalid-upgrade-item',
+        failureMessage: 'Hangar Express could not determine the selected owned upgrade item id.',
+        debugSummary: `upgradeItemPledgeID=${String(upgradeItemPledgeID)}`
+      };
+    }
+
+    if (!Number.isFinite(parsedTargetPledgeID) || parsedTargetPledgeID <= 0) {
+      return {
+        accessDenied: false,
+        status: 'invalid-target',
+        failureMessage: 'Hangar Express could not determine the selected pledge that should receive the upgrade.',
+        debugSummary: `targetPledgeID=${String(targetPledgeID)}`
+      };
+    }
+
+    const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
+    const rsiDevice = cookieValue('_rsi_device');
+    const requestHeaders = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Accept': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+
+    if (csrfToken) {
+      requestHeaders['x-csrf-token'] = csrfToken;
+    }
+    if (rsiToken) {
+      requestHeaders['x-rsi-token'] = rsiToken;
+    }
+    if (rsiDevice) {
+      requestHeaders['x-rsi-device'] = rsiDevice;
+    }
+
+    const response = await fetch('/api/account/applyUpgrade', {
+      method: 'POST',
+      credentials: 'include',
+      headers: requestHeaders,
+      body: JSON.stringify({
+        upgrade_id: String(parsedUpgradeItemPledgeID),
+        pledge_id: String(parsedTargetPledgeID),
+        current_password: currentPasswordValue
+      })
+    });
+
+    const responseText = await response.text();
+    let payload = null;
+    try {
+      payload = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      payload = null;
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI rejected the upgrade request for upgrade ${parsedUpgradeItemPledgeID}.`),
+        debugSummary: `httpStatus=${response.status}`
+      };
+    }
+
+    const successValue = Number(payload?.success ?? 0);
+    if (!response.ok || successValue !== 1) {
+      return {
+        accessDenied: false,
+        status: 'failed',
+        failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI returned HTTP ${response.status} while applying upgrade ${parsedUpgradeItemPledgeID} to pledge ${parsedTargetPledgeID}.`),
+        debugSummary: `httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+      };
+    }
+
+    return {
+      accessDenied: false,
+      status: 'ok',
+      failureMessage: null,
+      debugSummary: `upgradeItemPledgeID=${parsedUpgradeItemPledgeID}, targetPledgeID=${parsedTargetPledgeID}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
     };
     """
 }
@@ -4167,6 +5997,7 @@ private nonisolated struct RemotePledge: Decodable {
     let id: Int?
     let title: String
     let statusText: String
+    let isUpgradedStatusFlag: Bool?
     let dateText: String
     let valueText: String
     let containsText: String
@@ -4175,21 +6006,71 @@ private nonisolated struct RemotePledge: Decodable {
     let canGift: Bool
     let canReclaim: Bool
     let canUpgrade: Bool
+    let upgradeMetadata: RemotePledgeUpgradeMetadata?
     let items: [RemotePledgeItem]
+    var sourcePage: Int?
+    var sourcePageIndex: Int?
 
     var pageSignature: String {
         [
             id.map(String.init) ?? "nil",
             title,
             statusText,
+            isUpgradedStatusFlag == true ? "upgraded-status" : "base-status",
             dateText,
             valueText,
             containsText,
             alsoContains.joined(separator: ","),
             canGift ? "gift" : "locked",
             canReclaim ? "reclaim" : "keep",
-            canUpgrade ? "upgrade" : "fixed"
+            canUpgrade ? "upgrade" : "fixed",
+            upgradeMetadata == nil ? "no-owned-upgrade" : "owned-upgrade"
         ].joined(separator: "•")
+    }
+
+    func withSourcePage(_ page: Int, index: Int) -> RemotePledge {
+        var copy = self
+        copy.sourcePage = page
+        copy.sourcePageIndex = index
+        return copy
+    }
+}
+
+private nonisolated struct RemotePledgeUpgradeMetadata: Decodable {
+    let id: Int?
+    let name: String?
+    let upgradeType: String?
+    let matchItems: [RemotePledgeUpgradeMatchItem]
+    let targetItems: [RemotePledgeUpgradeMatchItem]
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case upgradeType = "upgradeType"
+        case matchItems = "matchItems"
+        case targetItems = "targetItems"
+    }
+
+    var domainModel: HangarPackage.UpgradeMetadata {
+        HangarPackage.UpgradeMetadata(
+            id: id,
+            name: name?.nilIfEmpty,
+            upgradeType: upgradeType?.nilIfEmpty,
+            matchItems: matchItems.map(\.domainModel),
+            targetItems: targetItems.map(\.domainModel)
+        )
+    }
+}
+
+private nonisolated struct RemotePledgeUpgradeMatchItem: Decodable {
+    let id: Int?
+    let name: String?
+
+    var domainModel: HangarPackage.UpgradeMetadata.MatchItem {
+        HangarPackage.UpgradeMetadata.MatchItem(
+            id: id,
+            name: name?.nilIfEmpty ?? "Unknown"
+        )
     }
 }
 
@@ -4505,7 +6386,7 @@ private nonisolated enum HangarLogParser {
 }
 
 private extension String {
-    var nilIfEmpty: String? {
+    nonisolated var nilIfEmpty: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }

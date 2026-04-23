@@ -194,32 +194,38 @@ struct RSIShipCatalog: Sendable {
         let name: String
         let manufacturer: String?
         let msrpUSD: Decimal?
+        let msrpLabel: String?
         let type: String?
         let focus: String?
         let minCrew: Int?
         let maxCrew: Int?
         let imageURL: URL?
+        let sourceImageURL: URL?
 
         init(
             id: Int,
             name: String,
             manufacturer: String? = nil,
             msrpUSD: Decimal?,
+            msrpLabel: String? = nil,
             type: String? = nil,
             focus: String? = nil,
             minCrew: Int? = nil,
             maxCrew: Int? = nil,
-            imageURL: URL?
+            imageURL: URL?,
+            sourceImageURL: URL? = nil
         ) {
             self.id = id
             self.name = name
             self.manufacturer = manufacturer
             self.msrpUSD = msrpUSD
+            self.msrpLabel = msrpLabel
             self.type = type
             self.focus = focus
             self.minCrew = minCrew
             self.maxCrew = maxCrew
             self.imageURL = imageURL
+            self.sourceImageURL = sourceImageURL
         }
 
         var roleSummary: String? {
@@ -234,11 +240,13 @@ struct RSIShipCatalog: Sendable {
     let ships: [Ship]
 
     private let shipsByKey: [String: Ship]
+    private let mirroredImageURLsBySource: [String: URL]
 
     init(ships: [Ship]) {
         self.ships = ships
 
         var keyedShips: [String: Ship] = [:]
+        var mirroredImages: [String: URL] = [:]
         for ship in ships {
             let directKey = UpgradeTitleParser.normalizedShipKey(ship.name)
             keyedShips[directKey] = keyedShips[directKey] ?? ship
@@ -247,9 +255,16 @@ struct RSIShipCatalog: Sendable {
                 UpgradeTitleParser.stripManufacturerPrefix(from: ship.name)
             )
             keyedShips[strippedKey] = keyedShips[strippedKey] ?? ship
+
+            if let sourceImageURL = ship.sourceImageURL,
+               let mirroredImageURL = ship.imageURL,
+               sourceImageURL != mirroredImageURL {
+                mirroredImages[sourceImageURL.absoluteString] = mirroredImageURL
+            }
         }
 
         shipsByKey = keyedShips
+        mirroredImageURLsBySource = mirroredImages
     }
 
     func matchShip(named rawName: String) -> Ship? {
@@ -263,29 +278,47 @@ struct RSIShipCatalog: Sendable {
         )
         return shipsByKey[strippedKey]
     }
+
+    func mirroredAssetURL(for originalURL: URL?) -> URL? {
+        guard let originalURL else {
+            return nil
+        }
+
+        return mirroredImageURLsBySource[originalURL.absoluteString]
+    }
 }
 
 struct HostedShipCatalogClient: Sendable {
-    let url: URL
+    let urls: [URL]
     let urlSession: URLSession
 
     init(
-        url: URL = URL(string: "https://fallback.example.invalid/ships.json")!,
+        urls: [URL] = HostedShipFeedEndpoints.catalogURLs,
         urlSession: URLSession = .shared
     ) {
-        self.url = url
+        self.urls = urls
         self.urlSession = urlSession
     }
 
     func fetchCatalog() async throws -> RSIShipCatalog {
-        let (data, response) = try await urlSession.data(from: url)
+        var lastError: Error?
 
-        if let httpResponse = response as? HTTPURLResponse,
-           !(200 ..< 300).contains(httpResponse.statusCode) {
-            throw HostedShipCatalogError.httpStatus(httpResponse.statusCode)
+        for url in urls {
+            do {
+                let (data, response) = try await urlSession.data(for: Self.makeRequest(for: url))
+
+                if let httpResponse = response as? HTTPURLResponse,
+                   !(200 ..< 300).contains(httpResponse.statusCode) {
+                    throw HostedShipCatalogError.httpStatus(httpResponse.statusCode)
+                }
+
+                return try Self.decodeCatalog(from: data)
+            } catch {
+                lastError = error
+            }
         }
 
-        return try Self.decodeCatalog(from: data)
+        throw lastError ?? HostedShipCatalogError.httpStatus(-1)
     }
 
     static func decodeCatalog(from data: Data) throws -> RSIShipCatalog {
@@ -301,14 +334,20 @@ struct HostedShipCatalogClient: Sendable {
                     name: ship.name?.nilIfEmpty ?? ship.title?.nilIfEmpty ?? "Unknown Ship",
                     manufacturer: ship.manufacturer?.nilIfEmpty,
                     msrpUSD: ship.msrpUSD,
+                    msrpLabel: ship.msrpLabel?.nilIfEmpty,
                     type: ship.type?.nilIfEmpty,
                     focus: ship.focus?.nilIfEmpty,
                     minCrew: ship.minCrew,
                     maxCrew: ship.maxCrew,
-                    imageURL: ship.thumbnailURL
+                    imageURL: ship.thumbnailURL,
+                    sourceImageURL: ship.sourceThumbnailURL
                 )
             }
         )
+    }
+
+    private static func makeRequest(for url: URL) -> URLRequest {
+        URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
     }
 }
 
@@ -323,6 +362,249 @@ enum HostedShipCatalogError: Error, LocalizedError {
     }
 }
 
+struct RSIShipDetailCatalog: Sendable {
+    struct SpecItem: Hashable, Sendable, Codable {
+        let label: String
+        let value: String
+    }
+
+    struct TechnicalSection: Hashable, Sendable, Codable {
+        let title: String
+        let items: [SpecItem]
+    }
+
+    struct ShipDetail: Hashable, Sendable {
+        let name: String
+        let manufacturer: String?
+        let career: String?
+        let role: String?
+        let size: String?
+        let inGameStatus: String?
+        let pledgeAvailability: String?
+        let minCrew: Int?
+        let maxCrew: Int?
+        let description: String?
+        let technicalSpecs: [SpecItem]
+        let technicalSections: [TechnicalSection]
+        let pageURL: URL?
+        let unavailableReason: String?
+
+        var roleSummary: String? {
+            FleetRoleFormatter.summary(type: career, focus: role)
+        }
+
+        var crewSummary: String? {
+            switch (minCrew, maxCrew) {
+            case let (minCrew?, maxCrew?) where minCrew != maxCrew:
+                return "\(minCrew)-\(maxCrew)"
+            case (_, let maxCrew?):
+                return "\(maxCrew)"
+            case (let minCrew?, _):
+                return "\(minCrew)"
+            default:
+                return nil
+            }
+        }
+
+        var isUnavailable: Bool {
+            unavailableReason?.nilIfEmpty != nil
+        }
+    }
+
+    let ships: [ShipDetail]
+
+    private let shipsByKey: [String: ShipDetail]
+
+    init(ships: [ShipDetail]) {
+        self.ships = ships
+
+        var keyedShips: [String: ShipDetail] = [:]
+        for ship in ships {
+            let directKey = UpgradeTitleParser.normalizedShipKey(ship.name)
+            keyedShips[directKey] = keyedShips[directKey] ?? ship
+
+            let strippedKey = UpgradeTitleParser.normalizedShipKey(
+                UpgradeTitleParser.stripManufacturerPrefix(from: ship.name)
+            )
+            keyedShips[strippedKey] = keyedShips[strippedKey] ?? ship
+        }
+
+        shipsByKey = keyedShips
+    }
+
+    func matchShip(named rawName: String) -> ShipDetail? {
+        let directKey = UpgradeTitleParser.normalizedShipKey(rawName)
+        if let directMatch = shipsByKey[directKey] {
+            return directMatch
+        }
+
+        let strippedKey = UpgradeTitleParser.normalizedShipKey(
+            UpgradeTitleParser.stripManufacturerPrefix(from: rawName)
+        )
+        return shipsByKey[strippedKey]
+    }
+}
+
+struct HostedShipDetailCatalogClient: Sendable {
+    let urls: [URL]
+    let urlSession: URLSession
+
+    init(
+        urls: [URL] = HostedShipFeedEndpoints.detailCatalogURLs,
+        urlSession: URLSession = .shared
+    ) {
+        self.urls = urls
+        self.urlSession = urlSession
+    }
+
+    func fetchCatalog() async throws -> RSIShipDetailCatalog {
+        var lastError: Error?
+
+        for url in urls {
+            do {
+                let (data, response) = try await urlSession.data(for: Self.makeRequest(for: url))
+
+                if let httpResponse = response as? HTTPURLResponse,
+                   !(200 ..< 300).contains(httpResponse.statusCode) {
+                    throw HostedShipCatalogError.httpStatus(httpResponse.statusCode)
+                }
+
+                return try Self.decodeCatalog(from: data)
+            } catch {
+                lastError = error
+            }
+        }
+
+        throw lastError ?? HostedShipCatalogError.httpStatus(-1)
+    }
+
+    static func decodeCatalog(from data: Data) throws -> RSIShipDetailCatalog {
+        let payload = try JSONDecoder().decode(RemoteHostedShipDetailCatalogPayload.self, from: data)
+        return RSIShipDetailCatalog(
+            ships: payload.ships.map { ship in
+                RSIShipDetailCatalog.ShipDetail(
+                    name: ship.name,
+                    manufacturer: ship.manufacturer?.nilIfEmpty,
+                    career: ship.career?.nilIfEmpty,
+                    role: ship.role?.nilIfEmpty,
+                    size: ship.size?.nilIfEmpty,
+                    inGameStatus: ship.inGameStatus?.nilIfEmpty,
+                    pledgeAvailability: ship.pledgeAvailability?.nilIfEmpty,
+                    minCrew: ship.minCrew,
+                    maxCrew: ship.maxCrew,
+                    description: ship.description?.nilIfEmpty,
+                    technicalSpecs: ship.technicalSpecs.map {
+                        RSIShipDetailCatalog.SpecItem(
+                            label: $0.label,
+                            value: $0.value?.nilIfEmpty ?? ""
+                        )
+                    },
+                    technicalSections: ship.technicalSections.map { section in
+                        RSIShipDetailCatalog.TechnicalSection(
+                            title: section.title,
+                            items: section.items.map {
+                                RSIShipDetailCatalog.SpecItem(
+                                    label: $0.label,
+                                    value: $0.value?.nilIfEmpty ?? ""
+                                )
+                            }
+                        )
+                    },
+                    pageURL: ship.pageURL,
+                    unavailableReason: ship.unavailableReason?.nilIfEmpty
+                )
+            }
+        )
+    }
+
+    private static func makeRequest(for url: URL) -> URLRequest {
+        URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+    }
+}
+
+actor HostedShipDetailCatalogStore {
+    static let shared = HostedShipDetailCatalogStore()
+
+    private var cachedCatalog: RSIShipDetailCatalog?
+
+    func catalog(using client: HostedShipDetailCatalogClient) async throws -> RSIShipDetailCatalog {
+        if let cachedCatalog {
+            return cachedCatalog
+        }
+
+        let catalog = try await client.fetchCatalog()
+        cachedCatalog = catalog
+        return catalog
+    }
+
+    func clear() {
+        cachedCatalog = nil
+    }
+}
+
+public enum HostedShipFeedEndpoints {
+    public static let primaryBaseURL = URL(string: "https://starcitizen-info.remote.example.invalid")!
+    public static let fallbackBaseURL = URL(string: "https://fallback.example.invalid")!
+
+    public static let catalogURLs: [URL] = [
+        primaryBaseURL.appendingPathComponent("ships.json"),
+        fallbackBaseURL.appendingPathComponent("ships.json")
+    ]
+
+    public static let detailCatalogURLs: [URL] = [
+        primaryBaseURL.appendingPathComponent("ship-details.json"),
+        fallbackBaseURL.appendingPathComponent("ship-details.json")
+    ]
+}
+
+private struct RemoteHostedShipDetailCatalogPayload: Decodable {
+    let ships: [RemoteHostedShipDetail]
+}
+
+private struct RemoteHostedShipDetail: Decodable {
+    struct SpecItem: Decodable {
+        let label: String
+        let value: String?
+    }
+
+    struct TechnicalSection: Decodable {
+        let title: String
+        let items: [SpecItem]
+    }
+
+    let name: String
+    let manufacturer: String?
+    let career: String?
+    let role: String?
+    let size: String?
+    let inGameStatus: String?
+    let pledgeAvailability: String?
+    let minCrew: Int?
+    let maxCrew: Int?
+    let description: String?
+    let technicalSpecs: [SpecItem]
+    let technicalSections: [TechnicalSection]
+    let pageURL: URL?
+    let unavailableReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case manufacturer
+        case career
+        case role
+        case size
+        case inGameStatus
+        case pledgeAvailability
+        case minCrew
+        case maxCrew
+        case description
+        case technicalSpecs
+        case technicalSections
+        case pageURL = "pageUrl"
+        case unavailableReason
+    }
+}
+
 private struct RemoteHostedShipCatalogPayload: Decodable {
     let ships: [RemoteHostedShip]
 }
@@ -333,11 +615,13 @@ private struct RemoteHostedShip: Decodable {
     let name: String?
     let manufacturer: String?
     let msrpUSD: Decimal?
+    let msrpLabel: String?
     let type: String?
     let focus: String?
     let minCrew: Int?
     let maxCrew: Int?
     let thumbnailURL: URL?
+    let sourceThumbnailURL: URL?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -345,11 +629,13 @@ private struct RemoteHostedShip: Decodable {
         case name
         case manufacturer
         case msrpUSD = "msrpUsd"
+        case msrpLabel
         case type
         case focus
         case minCrew
         case maxCrew
         case thumbnailURL = "thumbnailUrl"
+        case sourceThumbnailURL = "sourceThumbnailUrl"
     }
 
     var numericID: Int? {

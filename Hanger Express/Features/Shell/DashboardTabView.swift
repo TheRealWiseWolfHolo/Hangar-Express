@@ -1,8 +1,10 @@
 import SwiftUI
+import UIKit
 
 struct DashboardTabView: View {
     let appModel: AppModel
     let snapshot: HangarSnapshot
+    @State private var didCopyRefreshDebugReport = false
 
     var body: some View {
         TabView(selection: selection) {
@@ -31,38 +33,76 @@ struct DashboardTabView: View {
                 .tag(AppModel.Tab.account)
         }
         .safeAreaInset(edge: .top) {
-            if let progress = appModel.refreshProgress {
-                RefreshProgressCard(progress: progress, compact: true)
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+            if appModel.transientBanner != nil
+                || !appModel.concurrentRefreshEntries.isEmpty
+                || appModel.refreshProgress != nil
+            {
+                VStack(spacing: 8) {
+                    if let banner = appModel.transientBanner {
+                        TransientBannerView(banner: banner)
+                            .padding(.horizontal)
+                            .padding(.top, 8)
+                    }
+
+                    if !appModel.concurrentRefreshEntries.isEmpty {
+                        ConcurrentRefreshProgressStrip(
+                            entries: appModel.concurrentRefreshEntries,
+                            compact: true
+                        )
+                        .padding(.horizontal)
+                    } else if let progress = appModel.refreshProgress {
+                        Group {
+                            if appModel.refreshIndicatorStyle == .compactTopLeading {
+                                HStack {
+                                    MinimalRefreshProgressView(progress: progress)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.top, 4)
+                            } else {
+                                RefreshProgressCard(progress: progress, compact: true)
+                                    .padding(.horizontal)
+                                    .padding(.top, 8)
+                            }
+                        }
+                    }
+                }
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         .animation(.snappy, value: appModel.refreshProgress)
-        .alert(item: dashboardAlert) { alert in
-            switch alert {
-            case let .reauthentication(prompt):
-                return Alert(
-                    title: Text(prompt.title),
-                    message: Text(prompt.message),
-                    primaryButton: .default(Text("Sign In Again")) {
-                        Task {
-                            await appModel.beginReauthentication()
-                        }
-                    },
-                    secondaryButton: .cancel(Text("Later")) {
-                        appModel.dismissReauthenticationPrompt()
-                    }
-                )
-            case let .refreshFailure(message):
-                return Alert(
-                    title: Text("Refresh Failed"),
-                    message: Text(message),
-                    dismissButton: .cancel(Text("OK")) {
+        .animation(.snappy, value: appModel.concurrentRefreshEntries)
+        .animation(.snappy, value: appModel.transientBanner)
+        .animation(.snappy, value: appModel.refreshIndicatorStyle == .compactTopLeading)
+        .overlay {
+            if let message = appModel.lastRefreshErrorMessage {
+                RefreshFailureOverlay(
+                    message: message,
+                    onDismiss: {
                         appModel.dismissRefreshError()
-                    }
+                    },
+                    onCopyLogs: copyRefreshDebugReport
                 )
             }
+        }
+        .alert(item: reauthenticationPromptBinding) { prompt in
+            Alert(
+                title: Text(prompt.title),
+                message: Text(prompt.message),
+                primaryButton: .default(Text("Sign In Again")) {
+                    Task {
+                        await appModel.beginReauthentication()
+                    }
+                },
+                secondaryButton: .cancel(Text("Later")) {
+                    appModel.dismissReauthenticationPrompt()
+                }
+            )
+        }
+        .alert("Refresh Debug Report Copied", isPresented: $didCopyRefreshDebugReport) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("The refresh diagnostics log was copied to the clipboard so the tester can send it to you.")
         }
         .sheet(item: versionRefreshPromptBinding) { prompt in
             VersionRefreshPromptSheet(
@@ -89,29 +129,15 @@ struct DashboardTabView: View {
         )
     }
 
-    private var dashboardAlert: Binding<DashboardAlert?> {
+    private var reauthenticationPromptBinding: Binding<AppModel.ReauthenticationPrompt?> {
         Binding(
-            get: {
-                if let prompt = appModel.reauthenticationPrompt {
-                    return .reauthentication(prompt)
-                }
-
-                if let message = appModel.lastRefreshErrorMessage {
-                    return .refreshFailure(message)
-                }
-
-                return nil
-            },
-            set: { alert in
-                guard alert == nil else {
+            get: { appModel.reauthenticationPrompt },
+            set: { newValue in
+                guard newValue == nil else {
                     return
                 }
 
-                if appModel.reauthenticationPrompt != nil {
-                    appModel.dismissReauthenticationPrompt()
-                } else {
-                    appModel.dismissRefreshError()
-                }
+                appModel.dismissReauthenticationPrompt()
             }
         )
     }
@@ -126,19 +152,22 @@ struct DashboardTabView: View {
             }
         )
     }
-}
 
-private enum DashboardAlert: Identifiable {
-    case reauthentication(AppModel.ReauthenticationPrompt)
-    case refreshFailure(String)
+    private var refreshDebugReport: String {
+        RefreshDebugReportBuilder.build(
+            entries: appModel.refreshDiagnostics.entries,
+            scope: appModel.lastRefreshErrorScope,
+            errorMessage: appModel.lastRefreshErrorMessage
+        )
+    }
 
-    var id: String {
-        switch self {
-        case let .reauthentication(prompt):
-            return "reauth:\(prompt.id.uuidString)"
-        case let .refreshFailure(message):
-            return "refresh:\(message)"
+    private func copyRefreshDebugReport() {
+        guard !refreshDebugReport.isEmpty else {
+            return
         }
+
+        UIPasteboard.general.string = refreshDebugReport
+        didCopyRefreshDebugReport = true
     }
 }
 
@@ -167,6 +196,127 @@ private struct VersionRefreshPromptSheet: View {
             }
             .padding(20)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+}
+
+private struct RefreshFailureOverlay: View {
+    let message: String
+    let onDismiss: () -> Void
+    let onCopyLogs: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.45)
+                .ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Refresh Failed")
+                    .font(.title3.bold())
+
+                Text(message)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                VStack(spacing: 10) {
+                    Button("OK", action: onDismiss)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+
+                    Button("Copy Logs", action: onCopyLogs)
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .padding(22)
+            .frame(maxWidth: 360, alignment: .leading)
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .shadow(color: .black.opacity(0.18), radius: 24, y: 12)
+            .padding(.horizontal, 24)
+        }
+        .transition(.opacity.combined(with: .scale))
+    }
+}
+
+enum RefreshDebugReportBuilder {
+    static func build(
+        entries: [RefreshDiagnosticsStore.Entry],
+        scope: AppModel.RefreshScope?,
+        errorMessage: String?
+    ) -> String {
+        let trimmedErrorMessage = errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !(entries.isEmpty && (trimmedErrorMessage?.isEmpty != false)) else {
+            return ""
+        }
+
+        var sections: [String] = [
+            "Hangar Express Refresh Debug Report",
+            "Generated: \(Date().formatted(date: .complete, time: .standard))",
+            "App: \(appVersionIdentifier())",
+            "Device: \(UIDevice.current.model)",
+            "iOS: \(UIDevice.current.systemVersion)",
+            "Refresh Scope: \(scopeLabel(scope))"
+        ]
+
+        if let trimmedErrorMessage, !trimmedErrorMessage.isEmpty {
+            sections.append("")
+            sections.append("Visible Error")
+            sections.append(trimmedErrorMessage)
+        }
+
+        if !entries.isEmpty {
+            sections.append("")
+            sections.append("Diagnostics")
+            sections.append(
+                entries.map { entry in
+                    let baseLine = "[\(entry.timestampLabel)] \(entry.level.rawValue) \(entry.stage)\n\(entry.summary)"
+                    guard let detail = entry.detail, !detail.isEmpty else {
+                        return baseLine
+                    }
+
+                    return "\(baseLine)\n\(detail)"
+                }
+                .joined(separator: "\n\n")
+            )
+        }
+
+        return sections.joined(separator: "\n")
+    }
+
+    private static func appVersionIdentifier() -> String {
+        let shortVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let buildVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch (shortVersion, buildVersion) {
+        case let (.some(shortVersion), .some(buildVersion))
+            where !shortVersion.isEmpty && !buildVersion.isEmpty:
+            return "\(shortVersion) (\(buildVersion))"
+        case let (.some(shortVersion), _) where !shortVersion.isEmpty:
+            return shortVersion
+        case let (_, .some(buildVersion)) where !buildVersion.isEmpty:
+            return buildVersion
+        default:
+            return "Unavailable"
+        }
+    }
+
+    private static func scopeLabel(_ scope: AppModel.RefreshScope?) -> String {
+        switch scope {
+        case .full:
+            return "Full"
+        case .hangar:
+            return "Hangar"
+        case .buyback:
+            return "Buy Back"
+        case .hangarLog:
+            return "Hangar Log"
+        case .account:
+            return "Account"
+        case nil:
+            return "Unknown"
         }
     }
 }

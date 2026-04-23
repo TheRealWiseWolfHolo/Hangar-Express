@@ -49,11 +49,20 @@ struct BuybackView: View {
                 }
 
                 Section {
-                    ForEach(filteredItemGroups) { itemGroup in
-                        BuybackGroupRow(
-                            itemGroup: itemGroup,
-                            reloadToken: appModel.buybackImageReloadToken
+                    if filteredItemGroups.isEmpty {
+                        ContentUnavailableView(
+                            emptyStateTitle,
+                            systemImage: emptyStateSystemImage,
+                            description: Text(emptyStateDescription)
                         )
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        ForEach(filteredItemGroups) { itemGroup in
+                            BuybackGroupRow(
+                                itemGroup: itemGroup,
+                                reloadToken: appModel.buybackImageReloadToken
+                            )
+                        }
                     }
                 }
             }
@@ -120,6 +129,30 @@ struct BuybackView: View {
         } else {
             searchFilters.insert(searchFilter)
         }
+    }
+
+    private var emptyStateTitle: String {
+        if snapshot.buyback.isEmpty {
+            return "Buy Back Is Empty"
+        }
+
+        return "No Matching Buy-Back Items"
+    }
+
+    private var emptyStateSystemImage: String {
+        if snapshot.buyback.isEmpty {
+            return "tray"
+        }
+
+        return "magnifyingglass"
+    }
+
+    private var emptyStateDescription: String {
+        if snapshot.buyback.isEmpty {
+            return "This RSI account does not currently have any pledges in buy back."
+        }
+
+        return "Try a different search term or clear one of the active filters."
     }
 }
 
