@@ -109,13 +109,17 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Label("Read-only pledge sync", systemImage: "checkmark.circle")
-                    Label("Buy-back visibility", systemImage: "checkmark.circle")
-                    Label("Ship grouping and local notes", systemImage: "checkmark.circle")
-                    Label("Melt, gift, and upgrade actions", systemImage: "checkmark.circle")
-                    Label("Item-linked hangar log shortcuts from pledge details", systemImage: "hourglass")
+                    Label("Browser-backed sign-in and multi-account session restore", systemImage: "checkmark.circle")
+                    Label("Live hangar, fleet, buy-back, and account sync", systemImage: "checkmark.circle")
+                    Label("Hosted ship specs and fleet-to-pledge drill-down", systemImage: "checkmark.circle")
+                    Label("Persistent ship image cache and upgrade composite thumbnails", systemImage: "checkmark.circle")
+                    Label("Melt, gift, and apply-upgrade actions", systemImage: "checkmark.circle")
+                    Label("Item-linked hangar log shortcuts from detail screens", systemImage: "hourglass")
+                    Label("Final pre-release QA, copy polish, and edge-case cleanup", systemImage: "hourglass")
                 } header: {
                     Text("Roadmap")
+                } footer: {
+                    Text("Checked items are already in the app. Hourglass items are the remaining pre-release polish work.")
                 }
 
                 Section {
