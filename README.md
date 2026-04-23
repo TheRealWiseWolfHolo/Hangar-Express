@@ -1,12 +1,16 @@
 # Hangar Express
 
-SwiftUI iOS prototype for retrieving and organizing a Star Citizen hangar.
+SwiftUI iOS app for retrieving, organizing, and acting on a Star Citizen hangar.
 
-## Current Focus
+## Current Capabilities
 
-- Build a safe, read-only first experience for hangar organization.
-- Normalize RSI hangar data into app-owned models for packages, fleet ships, and buy-back entries.
-- Keep destructive actions like melt, gift, and upgrade out of v1.
+- Browser-backed RSI sign-in with saved sessions, local snapshot restore, and developer preview support for Xcode previews.
+- Live sync for hangar pledges, fleet ships, buy-back entries, hangar logs, and account details into app-owned models.
+- Hosted ship catalog and ship-detail enrichment from `https://starcitizen-info.remote.example.invalid/`, with GitHub Pages as fallback.
+- Fleet detail screens enriched with hosted ship specs such as crew, size, components, weapons, and utility entries.
+- Fleet card long-press to jump from a ship to the pledges that contain it, reusing the hangar pledge detail flow.
+- Melt, gift, and apply-upgrade flows, protected by local device-owner authentication before the RSI action is sent.
+- Persistent local image caching for remote ship art and generated upgrade composite thumbnails, with Settings cache clear support.
 
 ## Repo Shape
 
@@ -16,7 +20,9 @@ Hangar Express/
   Core/
     Domain/
     Protocols/
+    Security/
   Features/
+    Account/
     Buyback/
     Fleet/
     Hangar/
@@ -24,20 +30,24 @@ Hangar Express/
     Shell/
     Settings/
   Services/
+    Auth/
+    Live/
+    Persistence/
     Preview/
   Shared/
 docs/
   ARCHITECTURE.md
 ```
 
-## Live Integration Strategy
+## Runtime Notes
 
-The app shell currently uses preview data so we can settle the product structure first. The intended live path is:
+The shipped app boots with `AppEnvironment.live`. The preview environment still exists for Xcode previews and demo flows, but the main runtime path is live:
 
 1. Sign in through a browser-backed session flow.
-2. Capture an authenticated session without storing the RSI account password.
-3. Sync hangar pages, buy-back pages, and selected metadata into normalized local models.
-4. Organize locally with filters, grouping, notes, and future alerting.
+2. Capture and reuse authenticated RSI cookies for refreshes and other read operations.
+3. Sync hangar pages, fleet projections, buy-back pages, logs, account metadata, and hosted ship detail data into normalized local models.
+4. Use the hosted ship feeds from `starcitizen-info.remote.example.invalid` by default, with GitHub Pages as backup, to enrich fleet and ship-detail UI.
+5. For sensitive pledge actions like melt, gift, and apply upgrade, require both local device-owner authentication and the current RSI password because RSI still gates those actions with password-confirmed requests.
 
 More detail is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
