@@ -3,13 +3,26 @@ import SwiftUI
 struct HangarLogView: View {
     private let entryBatchSize = HangarLogFetchMode.initial.entryLimit
 
-    private enum TimeFilter: String, CaseIterable, Identifiable {
-        case all = "All Time"
-        case last30Days = "30 Days"
-        case last90Days = "90 Days"
-        case lastYear = "1 Year"
+    private enum TimeFilter: CaseIterable, Identifiable {
+        case all
+        case last30Days
+        case last90Days
+        case lastYear
 
         var id: Self { self }
+
+        var title: String {
+            switch self {
+            case .all:
+                return AppLocalizer.string("All Time")
+            case .last30Days:
+                return AppLocalizer.string("30 Days")
+            case .last90Days:
+                return AppLocalizer.string("90 Days")
+            case .lastYear:
+                return AppLocalizer.string("1 Year")
+            }
+        }
     }
 
     private enum ActionFilter: Hashable, Identifiable {
@@ -28,7 +41,7 @@ struct HangarLogView: View {
         var title: String {
             switch self {
             case .all:
-                return "All Actions"
+                return AppLocalizer.string("All Actions")
             case let .action(action):
                 return action.title
             }
@@ -89,12 +102,12 @@ struct HangarLogView: View {
                         Menu {
                             Picker("Time", selection: $timeFilter) {
                                 ForEach(TimeFilter.allCases) { filter in
-                                    Text(filter.rawValue).tag(filter)
+                                    Text(filter.title).tag(filter)
                                 }
                             }
                         } label: {
                             filterChip(
-                                title: timeFilter.rawValue,
+                                title: timeFilter.title,
                                 systemImage: "calendar"
                             )
                         }
@@ -177,10 +190,12 @@ struct HangarLogView: View {
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(appModel.isRefreshing(.hangarLog) ? "Refreshing..." : "Refresh") {
+                    Button {
                         Task {
                             await appModel.refresh(scope: .hangarLog)
                         }
+                    } label: {
+                        Text(appModel.isRefreshing(.hangarLog) ? LocalizedStringKey("Refreshing...") : LocalizedStringKey("Refresh"))
                     }
                     .disabled(appModel.isRefreshing)
                 }
@@ -218,10 +233,10 @@ struct HangarLogView: View {
 
     private var emptyStateDescription: String {
         if !hangarLogs.isEmpty {
-            return "Try adjusting the search text or filters."
+            return AppLocalizer.string("Try adjusting the search text or filters.")
         }
 
-        return "Open the log again after a refresh, or pull a fresh copy from RSI with the Refresh button."
+        return AppLocalizer.string("Open the log again after a refresh, or pull a fresh copy from RSI with the Refresh button.")
     }
 
     @ViewBuilder

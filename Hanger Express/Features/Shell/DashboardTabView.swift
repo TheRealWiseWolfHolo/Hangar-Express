@@ -4,7 +4,12 @@ import UIKit
 struct DashboardTabView: View {
     let appModel: AppModel
     let snapshot: HangarSnapshot
+    @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @State private var didCopyRefreshDebugReport = false
+
+    private var appLanguage: AppLanguage {
+        AppLanguage.resolved(from: appLanguageRawValue)
+    }
 
     var body: some View {
         TabView(selection: selection) {
@@ -32,6 +37,7 @@ struct DashboardTabView: View {
                 }
                 .tag(AppModel.Tab.account)
         }
+        .environment(\.locale, appLanguage.locale)
         .safeAreaInset(edge: .top) {
             if appModel.transientBanner != nil
                 || !appModel.concurrentRefreshEntries.isEmpty

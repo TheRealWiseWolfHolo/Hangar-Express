@@ -42,11 +42,15 @@ final class AppModel {
         let currentVersion: String
 
         var title: String {
-            "App Updated"
+            AppLocalizer.string("App Updated")
         }
 
         var message: String {
-            "Hangar Express was updated from \(previousVersion) to \(currentVersion). Run a full refresh so your cached hangar, fleet, buy-back, and log data stay in sync with this build."
+            AppLocalizer.format(
+                "Hangar Express was updated from %@ to %@. Run a full refresh so your cached hangar, fleet, buy-back, and log data stay in sync with this build.",
+                previousVersion,
+                currentVersion
+            )
         }
     }
 
@@ -65,11 +69,11 @@ final class AppModel {
             var title: String {
                 switch self {
                 case .hangar:
-                    return "Hangar"
+                    return AppLocalizer.string("Hangar")
                 case .buyback:
-                    return "Buy Back"
+                    return AppLocalizer.string("Buy Back")
                 case .account:
-                    return "Account"
+                    return AppLocalizer.string("Account")
                 }
             }
         }
@@ -108,15 +112,15 @@ final class AppModel {
         var errorSubject: String {
             switch self {
             case .full:
-                return "the full account snapshot"
+                return AppLocalizer.string("the full account snapshot")
             case .hangar:
-                return "the hangar and fleet data"
+                return AppLocalizer.string("the hangar and fleet data")
             case .buyback:
-                return "the buy-back data"
+                return AppLocalizer.string("the buy-back data")
             case .hangarLog:
-                return "the hangar log"
+                return AppLocalizer.string("the hangar log")
             case .account:
-                return "the account overview"
+                return AppLocalizer.string("the account overview")
             }
         }
     }
@@ -166,6 +170,8 @@ final class AppModel {
     private let userDefaults: UserDefaults
     private var hasBootstrapped = false
     private var pendingAuthenticationDraft: AuthenticationDraft?
+    private var silentHangarActionReconciliationTask: Task<Void, Never>?
+    private var silentHangarActionReconciliationGeneration = 0
 
     private static let lastLaunchedVersionDefaultsKey = "app.lastLaunchedVersion"
     private static let meltRequestTimeoutSeconds = 20
@@ -232,8 +238,8 @@ final class AppModel {
 
         hasBootstrapped = true
         startupActivity = StartupActivity(
-            title: "Starting Hangar Express",
-            detail: "Restoring your saved RSI session and local cache."
+            title: AppLocalizer.string("Starting Hangar Express"),
+            detail: AppLocalizer.string("Restoring your saved RSI session and local cache.")
         )
         authDiagnostics.record(
             stage: "app.bootstrap",
@@ -370,7 +376,7 @@ final class AppModel {
             )
             await transitionToAuthentication(
                 using: savedSession,
-                notice: "This saved RSI account needs a fresh sign-in before live refresh can continue."
+                notice: AppLocalizer.string("This saved RSI account needs a fresh sign-in before live refresh can continue.")
             )
             return
         }
@@ -387,6 +393,8 @@ final class AppModel {
         scope: RefreshScope = .full,
         affectedPledgeIDs: [Int]? = nil
     ) async {
+        cancelSilentHangarActionReconciliation()
+
         guard let session else {
             loadState = .idle
             return
@@ -398,6 +406,10 @@ final class AppModel {
 
         let existingSnapshot = snapshot
         let resolvedScope = existingSnapshot == nil ? RefreshScope.full : scope
+
+        if resolvedScope == .full || resolvedScope == .hangar {
+            await HostedShipDetailCatalogStore.shared.clear()
+        }
 
         if existingSnapshot == nil {
             loadState = .loading
@@ -456,7 +468,11 @@ final class AppModel {
                 return
             }
 
-            let message = "Unable to refresh \(resolvedScope.errorSubject). \(error.localizedDescription)"
+            let message = AppLocalizer.format(
+                "Unable to refresh %@. %@",
+                resolvedScope.errorSubject,
+                error.localizedDescription
+            )
             if let existingSnapshot {
                 loadState = .loaded(existingSnapshot)
                 presentRefreshError(message, scope: resolvedScope, error: error)
@@ -491,8 +507,8 @@ final class AppModel {
         }
 
         startupActivity = StartupActivity(
-            title: "Waking Up",
-            detail: "Checking your saved RSI session and cached hangar data."
+            title: AppLocalizer.string("Waking Up"),
+            detail: AppLocalizer.string("Checking your saved RSI session and cached hangar data.")
         )
         defer { startupActivity = nil }
         await reconcileLaunchState()
@@ -504,7 +520,7 @@ final class AppModel {
             return
         }
 
-        let notice = reauthenticationPrompt?.message ?? "Your saved RSI session is no longer valid. Sign in again to continue refreshing live data."
+        let notice = reauthenticationPrompt?.message ?? AppLocalizer.string("Your saved RSI session is no longer valid. Sign in again to continue refreshing live data.")
         await transitionToAuthentication(using: session, notice: notice)
     }
 
@@ -586,21 +602,19 @@ final class AppModel {
                 session: self.session ?? session
             )
             let reconciliationSession = self.session ?? session
-            Task { @MainActor in
-                await reconcileSuccessfulHangarAction(
-                    using: reconciliationSession,
-                    previousSnapshotForHangarRefresh: preMeltSnapshot,
-                    affectedPledgeIDs: affectedPledgeIDs,
-                    logInitialDetail: "Waiting for RSI to post the new melt entry to your hangar log.",
-                    logRetryDetail: "RSI has not posted the new melt log entry yet. Checking again.",
-                    refreshFailurePrefix: "The melt completed, but the background hangar refresh could not finish."
-                )
-            }
+            scheduleSilentHangarActionReconciliation(
+                using: reconciliationSession,
+                previousSnapshotForHangarRefresh: preMeltSnapshot,
+                affectedPledgeIDs: affectedPledgeIDs,
+                logInitialDetail: AppLocalizer.string("Waiting for RSI to post the new melt entry to your hangar log."),
+                logRetryDetail: AppLocalizer.string("RSI has not posted the new melt log entry yet. Checking again."),
+                refreshFailurePrefix: AppLocalizer.string("The melt completed, but the background hangar refresh could not finish.")
+            )
             showCompletedActionBanner(
-                title: "Melt Complete",
+                title: AppLocalizer.string("Melt Complete"),
                 message: quantity == 1
-                    ? "The selected pledge was successfully reclaimed."
-                    : "\(quantity) pledges were successfully reclaimed."
+                    ? AppLocalizer.string("The selected pledge was successfully reclaimed.")
+                    : AppLocalizer.format("%lld pledges were successfully reclaimed.", quantity)
             )
             return
         }
@@ -611,7 +625,7 @@ final class AppModel {
             throw HangarAccountActionError.partialMelt(
                 completedCount: result.completedCount,
                 requestedCount: result.requestedPledgeIDs.count,
-                message: result.failureMessage ?? "RSI stopped the melt request before all selected copies were reclaimed."
+                message: result.failureMessage ?? AppLocalizer.string("RSI stopped the melt request before all selected copies were reclaimed.")
             )
         }
     }
@@ -687,21 +701,19 @@ final class AppModel {
                 session: self.session ?? session
             )
             let reconciliationSession = self.session ?? session
-            Task { @MainActor in
-                await reconcileSuccessfulHangarAction(
-                    using: reconciliationSession,
-                    previousSnapshotForHangarRefresh: preGiftSnapshot,
-                    affectedPledgeIDs: affectedPledgeIDs,
-                    logInitialDetail: "Waiting for RSI to post the new gift entry to your hangar log.",
-                    logRetryDetail: "RSI has not posted the new gift log entry yet. Checking again.",
-                    refreshFailurePrefix: "The gift completed, but the background hangar refresh could not finish."
-                )
-            }
+            scheduleSilentHangarActionReconciliation(
+                using: reconciliationSession,
+                previousSnapshotForHangarRefresh: preGiftSnapshot,
+                affectedPledgeIDs: affectedPledgeIDs,
+                logInitialDetail: AppLocalizer.string("Waiting for RSI to post the new gift entry to your hangar log."),
+                logRetryDetail: AppLocalizer.string("RSI has not posted the new gift log entry yet. Checking again."),
+                refreshFailurePrefix: AppLocalizer.string("The gift completed, but the background hangar refresh could not finish.")
+            )
             showCompletedActionBanner(
-                title: "Gift Complete",
+                title: AppLocalizer.string("Gift Complete"),
                 message: quantity == 1
-                    ? "The selected pledge was successfully gifted."
-                    : "\(quantity) pledges were successfully gifted."
+                    ? AppLocalizer.string("The selected pledge was successfully gifted.")
+                    : AppLocalizer.format("%lld pledges were successfully gifted.", quantity)
             )
             return
         }
@@ -712,7 +724,7 @@ final class AppModel {
             throw HangarAccountActionError.partialGift(
                 completedCount: result.completedCount,
                 requestedCount: result.requestedPledgeIDs.count,
-                message: result.failureMessage ?? "RSI stopped the gift request before all selected copies were sent."
+                message: result.failureMessage ?? AppLocalizer.string("RSI stopped the gift request before all selected copies were sent.")
             )
         }
     }
@@ -733,7 +745,10 @@ final class AppModel {
                 )
             } onTimeout: {
                 HangarAccountActionError.upgradeTargetLookupFailed(
-                    message: "RSI did not return the eligible upgrade targets within \(timeoutSeconds) seconds."
+                    message: AppLocalizer.format(
+                        "RSI did not return the eligible upgrade targets within %lld seconds.",
+                        timeoutSeconds
+                    )
                 )
             }
 
@@ -797,26 +812,75 @@ final class AppModel {
 
         guard result.wasSuccessful else {
             throw HangarAccountActionError.upgradeRejected(
-                message: result.failureMessage ?? "RSI stopped the upgrade request before Hangar Express could confirm it."
+                message: result.failureMessage ?? AppLocalizer.string("RSI stopped the upgrade request before Hangar Express could confirm it.")
             )
         }
+
+        let consumedUpgradePledgeID = result.upgradeItemPledgeID > 0
+            ? result.upgradeItemPledgeID
+            : upgradeItemPledgeID
+        let upgradedTargetPledgeID = result.targetPledgeID > 0
+            ? result.targetPledgeID
+            : target.pledgeID
+        applyOptimisticRemovalUpdate(
+            affectedPledgeIDs: [consumedUpgradePledgeID],
+            session: self.session ?? session
+        )
 
         let reconciliationSession = self.session ?? session
-        Task { @MainActor in
-            await reconcileSuccessfulHangarAction(
-                using: reconciliationSession,
-                previousSnapshotForHangarRefresh: preUpgradeSnapshot,
-                affectedPledgeIDs: [upgradeItemPledgeID, target.pledgeID],
-                logInitialDetail: "Waiting for RSI to post the new upgrade entry to your hangar log.",
-                logRetryDetail: "RSI has not posted the new upgrade log entry yet. Checking again.",
-                refreshFailurePrefix: "The upgrade completed, but the background hangar refresh could not finish."
-            )
-        }
+        scheduleSilentHangarActionReconciliation(
+            using: reconciliationSession,
+            previousSnapshotForHangarRefresh: preUpgradeSnapshot,
+            affectedPledgeIDs: [consumedUpgradePledgeID, upgradedTargetPledgeID],
+            logInitialDetail: AppLocalizer.string("Waiting for RSI to post the new upgrade entry to your hangar log."),
+            logRetryDetail: AppLocalizer.string("RSI has not posted the new upgrade log entry yet. Checking again."),
+            refreshFailurePrefix: AppLocalizer.string("The upgrade completed, but the background hangar refresh could not finish.")
+        )
 
         showCompletedActionBanner(
-            title: "Upgrade Complete",
-            message: "The selected upgrade was successfully applied."
+            title: AppLocalizer.string("Upgrade Complete"),
+            message: AppLocalizer.string("The selected upgrade was successfully applied.")
         )
+    }
+
+    private func cancelSilentHangarActionReconciliation() {
+        silentHangarActionReconciliationTask?.cancel()
+        silentHangarActionReconciliationTask = nil
+        silentHangarActionReconciliationGeneration += 1
+    }
+
+    private func scheduleSilentHangarActionReconciliation(
+        using session: UserSession,
+        previousSnapshotForHangarRefresh: HangarSnapshot?,
+        affectedPledgeIDs: [Int],
+        logInitialDetail: String,
+        logRetryDetail: String,
+        refreshFailurePrefix: String
+    ) {
+        cancelSilentHangarActionReconciliation()
+
+        let generation = silentHangarActionReconciliationGeneration
+        silentHangarActionReconciliationTask = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+
+            await reconcileSuccessfulHangarAction(
+                using: session,
+                previousSnapshotForHangarRefresh: previousSnapshotForHangarRefresh,
+                affectedPledgeIDs: affectedPledgeIDs,
+                logInitialDetail: logInitialDetail,
+                logRetryDetail: logRetryDetail,
+                refreshFailurePrefix: refreshFailurePrefix,
+                generation: generation
+            )
+
+            guard self.silentHangarActionReconciliationGeneration == generation else {
+                return
+            }
+
+            self.silentHangarActionReconciliationTask = nil
+        }
     }
 
     private func applyOptimisticRemovalUpdate(
@@ -848,9 +912,10 @@ final class AppModel {
         affectedPledgeIDs: [Int],
         logInitialDetail: String,
         logRetryDetail: String,
-        refreshFailurePrefix: String
+        refreshFailurePrefix: String,
+        generation: Int
     ) async {
-        guard !isRefreshing else {
+        guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
             return
         }
 
@@ -859,7 +924,11 @@ final class AppModel {
         let baselineHangarLogs = repositorySnapshot?.hangarLogs ?? displayedSnapshot?.hangarLogs ?? []
 
         guard let repositorySnapshot else {
-            await refresh(scope: .full)
+            refreshDiagnostics.record(
+                stage: "refresh.hangar.background-skipped",
+                summary: "Skipped a background post-action reconciliation because no baseline snapshot was available.",
+                level: .warning
+            )
             return
         }
 
@@ -868,14 +937,6 @@ final class AppModel {
             session: session,
             context: "Starting the post-action hangar log refresh before rebuilding the affected hangar pages."
         )
-        refreshIndicatorStyle = .compactTopLeading
-        concurrentRefreshEntries = []
-        defer {
-            refreshProgress = nil
-            concurrentRefreshEntries = []
-            activeRefreshScope = nil
-            refreshIndicatorStyle = .standardCard
-        }
 
         let logSnapshotBase = displayedSnapshot ?? repositorySnapshot
         let shouldContinueToHangarRefresh = await refreshHangarLogAfterSuccessfulAction(
@@ -883,16 +944,17 @@ final class AppModel {
             existingSnapshot: logSnapshotBase,
             baselineLogs: baselineHangarLogs,
             initialDetail: logInitialDetail,
-            retryDetail: logRetryDetail
+            retryDetail: logRetryDetail,
+            generation: generation,
+            updatesVisibleProgress: false
         )
 
-        guard shouldContinueToHangarRefresh else {
+        guard shouldContinueToHangarRefresh,
+              shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
             return
         }
 
         let latestDisplayedSnapshot = snapshot
-        activeRefreshScope = .hangar
-        refreshProgress = initialProgress(for: session, scope: .hangar)
 
         do {
             let refreshedSnapshot = try await refreshedSnapshot(
@@ -900,18 +962,22 @@ final class AppModel {
                 existingSnapshot: repositorySnapshot,
                 scope: .hangar,
                 affectedPledgeIDs: affectedPledgeIDs
-            ) { [weak self] progress in
-                self?.refreshProgress = progress
-            }
+            ) { _ in }
 
+            guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
+                return
+            }
             await snapshotStore.save(refreshedSnapshot, for: session)
+            guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
+                return
+            }
             lastRefreshAt = refreshedSnapshot.lastSyncedAt
             loadState = .loaded(refreshedSnapshot)
             lastRefreshErrorMessage = nil
             lastRefreshErrorScope = nil
             refreshDiagnostics.record(
-                stage: "refresh.hangar.complete",
-                summary: "The post-action hangar refresh finished successfully."
+                stage: "refresh.hangar.background-complete",
+                summary: "The background post-action hangar refresh finished successfully."
             )
             await invalidateImageCache(
                 for: .hangar,
@@ -922,24 +988,20 @@ final class AppModel {
             if await handleReauthenticationIfNeeded(
                 for: error,
                 session: session,
-                existingSnapshot: displayedSnapshot
+                existingSnapshot: latestDisplayedSnapshot
             ) {
-                refreshProgress = nil
-                activeRefreshScope = nil
                 return
             }
 
-            let message = "\(refreshFailurePrefix) \(error.localizedDescription)"
-            if let latestDisplayedSnapshot {
-                loadState = .loaded(latestDisplayedSnapshot)
-                presentRefreshError(message, scope: .hangar, error: error)
-            } else {
-                recordRefreshFailure(message, scope: .hangar, error: error)
-                loadState = .failed(message)
-            }
+            refreshDiagnostics.record(
+                stage: "refresh.hangar.background-failed",
+                summary: refreshFailurePrefix,
+                detail: "errorType=\(String(reflecting: type(of: error))), localizedDescription=\(error.localizedDescription)",
+                level: .warning
+            )
         }
 
-        guard self.session?.accountKey == session.accountKey else {
+        guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
             return
         }
     }
@@ -949,25 +1011,33 @@ final class AppModel {
         existingSnapshot: HangarSnapshot,
         baselineLogs: [HangarLogEntry],
         initialDetail: String,
-        retryDetail: String
+        retryDetail: String,
+        generation: Int,
+        updatesVisibleProgress: Bool
     ) async -> Bool {
         var logSnapshot = existingSnapshot
 
         for attempt in 1 ... 3 {
-            activeRefreshScope = .hangarLog
-            refreshProgress = RefreshProgress(
-                stage: .hangarLog,
-                stepNumber: 1,
-                stepCount: 2,
-                detail: attempt == 1
-                    ? initialDetail
-                    : retryDetail,
-                completedUnitCount: 0,
-                totalUnitCount: 1
-            )
+            guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
+                return false
+            }
+
+            if updatesVisibleProgress {
+                activeRefreshScope = .hangarLog
+                refreshProgress = RefreshProgress(
+                    stage: .hangarLog,
+                    stepNumber: 1,
+                    stepCount: 2,
+                    detail: attempt == 1
+                        ? initialDetail
+                        : retryDetail,
+                    completedUnitCount: 0,
+                    totalUnitCount: 1
+                )
+            }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
 
-            guard self.session?.accountKey == session.accountKey else {
+            guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
                 return false
             }
 
@@ -977,10 +1047,20 @@ final class AppModel {
                     existingSnapshot: logSnapshot,
                     scope: .hangarLog
                 ) { [weak self] progress in
+                    guard updatesVisibleProgress else {
+                        return
+                    }
+
                     self?.refreshProgress = progress
                 }
 
+                guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
+                    return false
+                }
                 await snapshotStore.save(refreshedSnapshot, for: session)
+                guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
+                    return false
+                }
                 lastRefreshAt = refreshedSnapshot.lastSyncedAt
                 loadState = .loaded(refreshedSnapshot)
                 lastRefreshErrorMessage = nil
@@ -1019,7 +1099,7 @@ final class AppModel {
                 continue
             }
 
-            guard self.session?.accountKey == session.accountKey else {
+            guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
                 return false
             }
 
@@ -1029,6 +1109,15 @@ final class AppModel {
         }
 
         return true
+    }
+
+    private func shouldContinueSilentHangarActionReconciliation(
+        using session: UserSession,
+        generation: Int
+    ) -> Bool {
+        !Task.isCancelled
+            && silentHangarActionReconciliationGeneration == generation
+            && self.session?.accountKey == session.accountKey
     }
 
     private func hangarLogContainsNewEntries(comparedTo baselineLogs: [HangarLogEntry]) -> Bool {
@@ -1077,13 +1166,13 @@ final class AppModel {
         lastRefreshErrorScope = nil
 
         let notice = liveError == .sessionExpired
-            ? "Your saved RSI session expired. Sign in again to continue refreshing live data."
-            : "This saved RSI account no longer has a usable session. Sign in again to continue refreshing live data."
+            ? AppLocalizer.string("Your saved RSI session expired. Sign in again to continue refreshing live data.")
+            : AppLocalizer.string("This saved RSI account no longer has a usable session. Sign in again to continue refreshing live data.")
 
         if let existingSnapshot {
             loadState = .loaded(existingSnapshot)
             reauthenticationPrompt = ReauthenticationPrompt(
-                title: "Sign In Again",
+                title: AppLocalizer.string("Sign In Again"),
                 message: notice
             )
         } else {
@@ -1155,7 +1244,7 @@ final class AppModel {
             )
             await transitionToAuthentication(
                 using: session,
-                notice: "Your saved RSI session is no longer available. Sign in again to continue."
+                notice: AppLocalizer.string("Your saved RSI session is no longer available. Sign in again to continue.")
             )
             return
         }
@@ -1294,14 +1383,14 @@ final class AppModel {
             stage: .hangarLog,
             stepNumber: 1,
             stepCount: 2,
-            detail: "Loading older hangar log entries from RSI.",
+            detail: AppLocalizer.string("Loading older hangar log entries from RSI."),
             completedUnitCount: 0,
             totalUnitCount: 1
         )
         beginRefreshDiagnostics(
             for: .hangarLog,
             session: session,
-            context: "Loading older hangar log entries from RSI."
+            context: AppLocalizer.string("Loading older hangar log entries from RSI.")
         )
 
         defer {
@@ -1340,7 +1429,7 @@ final class AppModel {
 
             loadState = .loaded(existingSnapshot)
             presentRefreshError(
-                "Unable to refresh the hangar log. \(error.localizedDescription)",
+                AppLocalizer.format("Unable to refresh the hangar log. %@", error.localizedDescription),
                 scope: .hangarLog,
                 error: error
             )
@@ -1365,7 +1454,7 @@ final class AppModel {
                     stage: .finalizing,
                     stepNumber: max(progress.stepNumber, progress.stepCount),
                     stepCount: progress.stepCount,
-                    detail: "Saving the refreshed hangar, buy-back, and account snapshot.",
+                    detail: AppLocalizer.string("Saving the refreshed hangar, buy-back, and account snapshot."),
                     completedUnitCount: 0,
                     totalUnitCount: nil
                 )
@@ -1410,7 +1499,7 @@ final class AppModel {
                 stage: .preview,
                 stepNumber: 1,
                 stepCount: 1,
-                detail: "Loading the local sample hangar snapshot.",
+                detail: AppLocalizer.string("Loading the local sample hangar snapshot."),
                 completedUnitCount: 0,
                 totalUnitCount: 1
             )
@@ -1440,15 +1529,15 @@ final class AppModel {
     private func initialRefreshDetail(for scope: RefreshScope) -> String {
         switch scope {
         case .full:
-            return "Preparing your saved RSI cookies for a full refresh."
+            return AppLocalizer.string("Preparing your saved RSI cookies for a full refresh.")
         case .hangar:
-            return "Preparing your saved RSI cookies for a hangar refresh."
+            return AppLocalizer.string("Preparing your saved RSI cookies for a hangar refresh.")
         case .buyback:
-            return "Preparing your saved RSI cookies for a buy-back refresh."
+            return AppLocalizer.string("Preparing your saved RSI cookies for a buy-back refresh.")
         case .hangarLog:
-            return "Preparing your saved RSI cookies for a hangar log refresh."
+            return AppLocalizer.string("Preparing your saved RSI cookies for a hangar log refresh.")
         case .account:
-            return "Preparing your saved RSI cookies for an account refresh."
+            return AppLocalizer.string("Preparing your saved RSI cookies for an account refresh.")
         }
     }
 
@@ -1523,15 +1612,15 @@ final class AppModel {
     private func refreshScopeDisplayName(_ scope: RefreshScope) -> String {
         switch scope {
         case .full:
-            return "Full account"
+            return AppLocalizer.string("Full account")
         case .hangar:
-            return "Hangar"
+            return AppLocalizer.string("Hangar")
         case .buyback:
-            return "Buy Back"
+            return AppLocalizer.string("Buy Back")
         case .hangarLog:
-            return "Hangar Log"
+            return AppLocalizer.string("Hangar Log")
         case .account:
-            return "Account"
+            return AppLocalizer.string("Account")
         }
     }
 
@@ -1557,9 +1646,15 @@ final class AppModel {
 
     private func meltAuthorizationReason(for packageGroup: GroupedHangarPackage, quantity: Int) -> String {
         let packageTitle = packageGroup.representative.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let quantityLabel = quantity == 1 ? "this item" : "\(quantity) copies"
+        let quantityLabel = quantity == 1
+            ? AppLocalizer.string("this item")
+            : AppLocalizer.format("%lld copies", quantity)
         let titleSegment = packageTitle.isEmpty ? "" : " (\(packageTitle))"
-        return "Confirm melting \(quantityLabel)\(titleSegment). This action cannot be undone."
+        return AppLocalizer.format(
+            "Confirm melting %@%@. This action cannot be undone.",
+            quantityLabel,
+            titleSegment
+        )
     }
 
     private func selectedUpgradeItemPledgeID(for packageGroup: GroupedHangarPackage) throws -> Int {
@@ -1604,10 +1699,14 @@ final class AppModel {
         target: UpgradeTargetCandidate
     ) -> String {
         let upgradeTitle = packageGroup.representative.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedUpgradeTitle = upgradeTitle.isEmpty ? "this stored upgrade" : upgradeTitle
+        let resolvedUpgradeTitle = upgradeTitle.isEmpty ? AppLocalizer.string("this stored upgrade") : upgradeTitle
         let targetTitle = target.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedTargetTitle = targetTitle.isEmpty ? "the selected pledge" : targetTitle
-        return "Confirm applying \(resolvedUpgradeTitle) to \(resolvedTargetTitle). Hangar Express will reuse your saved RSI password after this verification."
+        let resolvedTargetTitle = targetTitle.isEmpty ? AppLocalizer.string("the selected pledge") : targetTitle
+        return AppLocalizer.format(
+            "Confirm applying %@ to %@. Hangar Express will reuse your saved RSI password after this verification.",
+            resolvedUpgradeTitle,
+            resolvedTargetTitle
+        )
     }
 
     private func giftAuthorizationReason(
@@ -1616,9 +1715,16 @@ final class AppModel {
         recipientEmail: String
     ) -> String {
         let packageTitle = packageGroup.representative.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let quantityLabel = quantity == 1 ? "this item" : "\(quantity) copies"
+        let quantityLabel = quantity == 1
+            ? AppLocalizer.string("this item")
+            : AppLocalizer.format("%lld copies", quantity)
         let titleSegment = packageTitle.isEmpty ? "" : " (\(packageTitle))"
-        return "Confirm gifting \(quantityLabel)\(titleSegment) to \(recipientEmail). RSI will send the gift email after this verification."
+        return AppLocalizer.format(
+            "Confirm gifting %@%@ to %@. RSI will send the gift email after this verification.",
+            quantityLabel,
+            titleSegment,
+            recipientEmail
+        )
     }
 
     private func resolvedGiftRecipientName(from rawValue: String, session: UserSession) -> String {
@@ -1632,7 +1738,7 @@ final class AppModel {
             return fallbackDisplayName
         }
 
-        return "Hangar Express User"
+        return AppLocalizer.string("Hangar Express User")
     }
 
     private static func isValidGiftRecipientEmail(_ value: String) -> Bool {
@@ -1817,6 +1923,10 @@ final class AppModel {
         for ship in snapshot.fleet {
             if let imageURL = ship.imageURL {
                 urls.insert(imageURL)
+            }
+
+            if let manufacturerLogoURL = ship.manufacturerLogoURL {
+                urls.insert(manufacturerLogoURL)
             }
         }
 

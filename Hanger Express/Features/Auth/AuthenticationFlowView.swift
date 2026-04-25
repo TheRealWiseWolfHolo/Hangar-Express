@@ -4,15 +4,11 @@ import UIKit
 struct AuthenticationFlowView: View {
     let appModel: AppModel
 
+    @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage("auth.debug.showFullErrors") private var showsFullErrorDetails = false
-    @AppStorage("auth.debug.forceBrowserLogin") private var forcesBrowserLogin = false
     @State private var isShowingClearKeychainAlert = false
-    @State private var isShowingAuthDebugReportPreview = false
     @State private var didCopyAuthDebugReport = false
     @State private var viewModel: AuthenticationViewModel
-
-    private let unofficialAppNotice = "This is an unofficial Star Citizen fan app and is not affiliated with the Cloud Imperium group of companies."
-    private let ownershipNotice = "Star Citizen, Squadron 42, Roberts Space Industries, and related names, ships, artwork, and other game content shown or referenced by this app belong to the Cloud Imperium group of companies and their respective owners."
 
     init(appModel: AppModel) {
         self.appModel = appModel
@@ -24,7 +20,7 @@ struct AuthenticationFlowView: View {
             NavigationStack {
                 Form {
                     Section {
-                        Text(unofficialAppNotice)
+                        Text("This is an unofficial Star Citizen fan app and is not affiliated with the Cloud Imperium group of companies.")
                             .font(.subheadline.weight(.semibold))
                     } header: {
                         Text("RSI Login")
@@ -48,11 +44,12 @@ struct AuthenticationFlowView: View {
                                     .foregroundStyle(.secondary)
                                     .textSelection(.enabled)
                             }
-                        }
-                    }
 
-                    if !appModel.authDiagnostics.latestEntries.isEmpty {
-                        authDiagnosticsSection
+                            Button("Copy Auth Debug Report") {
+                                copyAuthDebugReport()
+                            }
+                            .disabled(authDebugReport.isEmpty)
+                        }
                     }
 
                     switch viewModel.step {
@@ -77,7 +74,6 @@ struct AuthenticationFlowView: View {
 
                     Section {
                         Toggle("Show Full Auth Errors", isOn: $showsFullErrorDetails)
-                        Toggle("Force Browser Login", isOn: $forcesBrowserLogin)
 
                         Button("Remove Saved Keychain Content", role: .destructive) {
                             isShowingClearKeychainAlert = true
@@ -90,12 +86,18 @@ struct AuthenticationFlowView: View {
                     }
 
                     Section {
-                        Text(ownershipNotice)
+                        Text("Star Citizen, Squadron 42, Roberts Space Industries, and related names, ships, artwork, and other game content shown or referenced by this app belong to the Cloud Imperium group of companies and their respective owners.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
                 }
+                .id(appLanguageRawValue)
                 .navigationTitle("Hangar Express")
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        AppLanguageMenuButton()
+                    }
+                }
             }
 
             if appModel.recaptchaBroker.isPreparing {
@@ -142,9 +144,6 @@ struct AuthenticationFlowView: View {
         } message: {
             Text("The full auth debug report was copied to the clipboard so a tester can paste it into a message.")
         }
-        .sheet(isPresented: $isShowingAuthDebugReportPreview) {
-            AuthenticationDebugReportPreviewView(report: authDebugReport)
-        }
     }
 
     private var signInSection: some View {
@@ -162,37 +161,13 @@ struct AuthenticationFlowView: View {
 
             Button("Continue") {
                 Task {
-                    await viewModel.submitCredentials(forceBrowserLogin: forcesBrowserLogin)
+                    await viewModel.submitCredentials()
                 }
             }
             .buttonStyle(.borderedProminent)
             .disabled(viewModel.isSubmitting)
         } header: {
             Text("Credentials")
-        }
-    }
-
-    private var authDiagnosticsSection: some View {
-        Section {
-            AuthenticationDiagnosticsLogView(
-                entries: appModel.authDiagnostics.entries,
-                showsExpandedDetails: showsFullErrorDetails,
-                maxVisibleEntries: showsFullErrorDetails ? 12 : 6
-            )
-
-            Button("Copy Auth Debug Report") {
-                copyAuthDebugReport()
-            }
-            .disabled(authDebugReport.isEmpty)
-
-            Button("Preview Auth Debug Report") {
-                isShowingAuthDebugReportPreview = true
-            }
-            .disabled(authDebugReport.isEmpty)
-        } header: {
-            Text("Auth Debug Log")
-        } footer: {
-            Text("This local log shows the recent sign-in stages and errors in the order they happened. Use the copy button to export a single text report that testers can paste into a message.")
         }
     }
 
@@ -287,7 +262,6 @@ struct AuthenticationFlowView: View {
             errorDebugDetails: viewModel.errorDebugDetails,
             loginIdentifier: viewModel.loginIdentifier,
             rememberMe: viewModel.rememberMe,
-            forceBrowserLogin: forcesBrowserLogin,
             showsFullErrors: showsFullErrorDetails,
             browserChallengeIsPresented: viewModel.browserChallenge != nil,
             helperIsPreparing: appModel.recaptchaBroker.isPreparing,
@@ -298,48 +272,6 @@ struct AuthenticationFlowView: View {
     private func copyAuthDebugReport() {
         UIPasteboard.general.string = authDebugReport
         didCopyAuthDebugReport = true
-    }
-}
-
-private struct AuthenticationDiagnosticsLogView: View {
-    let entries: [AuthenticationDiagnosticsStore.Entry]
-    let showsExpandedDetails: Bool
-    let maxVisibleEntries: Int
-
-    var body: some View {
-        let visibleEntries = Array(entries.suffix(maxVisibleEntries))
-
-        VStack(alignment: .leading, spacing: 10) {
-            ForEach(visibleEntries) { entry in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("[\(entry.timestampLabel)] \(entry.level.rawValue) \(entry.stage)")
-                        .font(.system(.caption, design: .monospaced).weight(.semibold))
-                        .foregroundStyle(color(for: entry.level))
-
-                    Text(entry.summary)
-                        .font(.footnote)
-
-                    if showsExpandedDetails, let detail = entry.detail {
-                        Text(verbatim: detail)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-        .textSelection(.enabled)
-    }
-
-    private func color(for level: AuthenticationDiagnosticsStore.Entry.Level) -> Color {
-        switch level {
-        case .info:
-            return .blue
-        case .warning:
-            return .orange
-        case .error:
-            return .red
-        }
     }
 }
 
@@ -394,33 +326,6 @@ private struct SavedQuickLoginButton: View {
     }
 }
 
-private struct AuthenticationDebugReportPreviewView: View {
-    @Environment(\.dismiss) private var dismiss
-
-    let report: String
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                Text(verbatim: report)
-                    .font(.system(.footnote, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding()
-                    .textSelection(.enabled)
-            }
-            .navigationTitle("Auth Debug Report")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        dismiss()
-                    }
-                }
-            }
-        }
-    }
-}
-
 private enum AuthenticationDebugReportBuilder {
     static func build(
         diagnostics: [AuthenticationDiagnosticsStore.Entry],
@@ -430,7 +335,6 @@ private enum AuthenticationDebugReportBuilder {
         errorDebugDetails: String?,
         loginIdentifier: String,
         rememberMe: Bool,
-        forceBrowserLogin: Bool,
         showsFullErrors: Bool,
         browserChallengeIsPresented: Bool,
         helperIsPreparing: Bool,
@@ -446,7 +350,6 @@ private enum AuthenticationDebugReportBuilder {
         lines.append("Login Step: \(stepLabel(for: step))")
         lines.append("Login Identifier: \(maskedIdentifier(loginIdentifier))")
         lines.append("Remember Me: \(rememberMe)")
-        lines.append("Force Browser Login: \(forceBrowserLogin)")
         lines.append("Show Full Auth Errors: \(showsFullErrors)")
         lines.append("Browser Challenge Visible: \(browserChallengeIsPresented)")
         lines.append("Recaptcha Helper Preparing: \(helperIsPreparing)")

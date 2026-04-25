@@ -12,6 +12,7 @@ struct CachedRemoteImage<Content: View>: View {
     let targetSize: CGSize?
     let reloadToken: UUID?
     let maxRetryCount: Int
+    let trimsTransparentPadding: Bool
     let content: (CachedRemoteImagePhase) -> Content
 
     @Environment(\.displayScale) private var displayScale
@@ -22,12 +23,14 @@ struct CachedRemoteImage<Content: View>: View {
         targetSize: CGSize? = nil,
         reloadToken: UUID? = nil,
         maxRetryCount: Int = 5,
+        trimsTransparentPadding: Bool = false,
         @ViewBuilder content: @escaping (CachedRemoteImagePhase) -> Content
     ) {
         self.url = url
         self.targetSize = targetSize
         self.reloadToken = reloadToken
         self.maxRetryCount = maxRetryCount
+        self.trimsTransparentPadding = trimsTransparentPadding
         self.content = content
     }
 
@@ -42,7 +45,8 @@ struct CachedRemoteImage<Content: View>: View {
         [
             url?.absoluteString ?? "nil",
             reloadToken?.uuidString ?? "none",
-            cacheSizeKey
+            cacheSizeKey,
+            trimsTransparentPadding ? "trim" : "raw"
         ].joined(separator: "|")
     }
 
@@ -68,12 +72,15 @@ struct CachedRemoteImage<Content: View>: View {
         phase = .empty
 
         do {
-            let image = try await URLCachedImageStore.shared.image(
+            let loadedImage = try await URLCachedImageStore.shared.image(
                 for: url,
                 targetPointSize: targetSize,
                 displayScale: displayScale,
                 maxRetries: maxRetryCount
             )
+            let image = trimsTransparentPadding
+                ? (loadedImage.trimmingTransparentPadding() ?? loadedImage)
+                : loadedImage
 
             guard !Task.isCancelled else {
                 return
@@ -87,6 +94,77 @@ struct CachedRemoteImage<Content: View>: View {
 
             phase = .failure
         }
+    }
+}
+
+extension UIImage {
+    nonisolated func trimmingTransparentPadding(alphaThreshold: UInt8 = 1) -> UIImage? {
+        guard let cgImage else {
+            return nil
+        }
+
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0 else {
+            return nil
+        }
+
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        var buffer = [UInt8](repeating: 0, count: height * bytesPerRow)
+
+        guard let context = CGContext(
+            data: &buffer,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        var minX = width
+        var minY = height
+        var maxX = -1
+        var maxY = -1
+
+        for y in 0 ..< height {
+            let rowOffset = y * bytesPerRow
+            for x in 0 ..< width {
+                let alphaIndex = rowOffset + (x * bytesPerPixel) + 3
+                if buffer[alphaIndex] > alphaThreshold {
+                    minX = min(minX, x)
+                    minY = min(minY, y)
+                    maxX = max(maxX, x)
+                    maxY = max(maxY, y)
+                }
+            }
+        }
+
+        guard maxX >= minX, maxY >= minY else {
+            return nil
+        }
+
+        let cropRect = CGRect(
+            x: minX,
+            y: minY,
+            width: maxX - minX + 1,
+            height: maxY - minY + 1
+        )
+
+        guard cropRect.width > 0,
+              cropRect.height > 0,
+              cropRect.width < CGFloat(width) || cropRect.height < CGFloat(height),
+              let croppedCGImage = cgImage.cropping(to: cropRect) else {
+            return nil
+        }
+
+        return UIImage(cgImage: croppedCGImage, scale: scale, orientation: imageOrientation)
     }
 }
 

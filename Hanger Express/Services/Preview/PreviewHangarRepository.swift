@@ -10,7 +10,7 @@ struct PreviewHangarRepository: HangarRepository {
                 stage: .preview,
                 stepNumber: 1,
                 stepCount: 1,
-                detail: "Loading the local sample hangar snapshot.",
+                detail: AppLocalizer.string("Loading the local sample hangar snapshot."),
                 completedUnitCount: 0,
                 totalUnitCount: 1
             )
@@ -23,7 +23,7 @@ struct PreviewHangarRepository: HangarRepository {
                 stage: .preview,
                 stepNumber: 1,
                 stepCount: 1,
-                detail: "Preview hangar ready.",
+                detail: AppLocalizer.string("Preview hangar ready."),
                 completedUnitCount: 1,
                 totalUnitCount: 1
             )
@@ -42,7 +42,7 @@ struct PreviewHangarRepository: HangarRepository {
                 stage: .preview,
                 stepNumber: 1,
                 stepCount: 1,
-                detail: "Refreshing the preview hangar and fleet sections.",
+                detail: AppLocalizer.string("Refreshing the preview hangar and fleet sections."),
                 completedUnitCount: 0,
                 totalUnitCount: 1
             )
@@ -53,7 +53,7 @@ struct PreviewHangarRepository: HangarRepository {
                 stage: .preview,
                 stepNumber: 1,
                 stepCount: 1,
-                detail: "Preview hangar and fleet ready.",
+                detail: AppLocalizer.string("Preview hangar and fleet ready."),
                 completedUnitCount: 1,
                 totalUnitCount: 1
             )
@@ -88,7 +88,7 @@ struct PreviewHangarRepository: HangarRepository {
                 stage: .preview,
                 stepNumber: 1,
                 stepCount: 1,
-                detail: "Refreshing the preview buy-back section.",
+                detail: AppLocalizer.string("Refreshing the preview buy-back section."),
                 completedUnitCount: 0,
                 totalUnitCount: 1
             )
@@ -99,7 +99,7 @@ struct PreviewHangarRepository: HangarRepository {
                 stage: .preview,
                 stepNumber: 1,
                 stepCount: 1,
-                detail: "Preview buy-back ready.",
+                detail: AppLocalizer.string("Preview buy-back ready."),
                 completedUnitCount: 1,
                 totalUnitCount: 1
             )
@@ -121,7 +121,7 @@ struct PreviewHangarRepository: HangarRepository {
                 stage: .preview,
                 stepNumber: 1,
                 stepCount: 1,
-                detail: "Refreshing the preview hangar log.",
+                detail: AppLocalizer.string("Refreshing the preview hangar log."),
                 completedUnitCount: 0,
                 totalUnitCount: 1
             )
@@ -132,7 +132,7 @@ struct PreviewHangarRepository: HangarRepository {
                 stage: .preview,
                 stepNumber: 1,
                 stepCount: 1,
-                detail: "Preview hangar log ready.",
+                detail: AppLocalizer.string("Preview hangar log ready."),
                 completedUnitCount: 1,
                 totalUnitCount: 1
             )
@@ -153,7 +153,7 @@ struct PreviewHangarRepository: HangarRepository {
                 stage: .preview,
                 stepNumber: 1,
                 stepCount: 1,
-                detail: "Refreshing the preview account overview.",
+                detail: AppLocalizer.string("Refreshing the preview account overview."),
                 completedUnitCount: 0,
                 totalUnitCount: 1
             )
@@ -166,7 +166,7 @@ struct PreviewHangarRepository: HangarRepository {
                 stage: .preview,
                 stepNumber: 1,
                 stepCount: 1,
-                detail: "Preview account overview ready.",
+                detail: AppLocalizer.string("Preview account overview ready."),
                 completedUnitCount: 1,
                 totalUnitCount: 1
             )

@@ -109,7 +109,7 @@ enum AuthenticationError: Error, LocalizedError, Sendable {
              let .unavailable(message):
             return message
         case .pendingVerificationExpired:
-            return "The pending verification step expired. Start the sign-in flow again."
+            return AppLocalizer.string("The pending verification step expired. Start the sign-in flow again.")
         }
     }
 }

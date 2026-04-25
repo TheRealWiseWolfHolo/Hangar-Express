@@ -131,9 +131,11 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
 
         context.coordinator.attach(webView)
@@ -154,7 +156,7 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
         coordinator.detach()
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         static let loginURL = URL(string: "https://robertsspaceindustries.com/en/")!
 
         private weak var webView: WKWebView?
@@ -242,6 +244,40 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
                 summary: "The in-app RSI browser failed before the page could load.",
                 detail: AuthenticationDebugFormatter.debugDescription(for: error),
                 level: .error
+            )
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            let requestURL = navigationAction.request.url?.absoluteString ?? "n/a"
+            let targetIsMainFrame = navigationAction.targetFrame?.isMainFrame == true
+
+            log(
+                stage: "browser.popup",
+                summary: "The in-app browser intercepted a popup navigation request.",
+                detail: "requestURL=\(requestURL), targetIsMainFrame=\(targetIsMainFrame)"
+            )
+
+            if navigationAction.targetFrame == nil {
+                webView.load(navigationAction.request)
+                log(
+                    stage: "browser.popup",
+                    summary: "The popup request was opened in the existing in-app browser instead of being dropped.",
+                    detail: requestURL
+                )
+            }
+
+            return nil
+        }
+
+        func webViewDidClose(_ webView: WKWebView) {
+            log(
+                stage: "browser.popup",
+                summary: "The in-app browser popup window closed."
             )
         }
 

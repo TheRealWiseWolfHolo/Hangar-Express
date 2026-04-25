@@ -131,7 +131,7 @@ final class AuthenticationViewModel {
 
     func finishBrowserChallengeUsingCachedCookies(trustBrowserSession: Bool) async -> String? {
         guard !isSubmitting else {
-            return "Hangar Express is already finishing the current sign-in attempt."
+            return AppLocalizer.string("Hangar Express is already finishing the current sign-in attempt.")
         }
 
         clearMessages()

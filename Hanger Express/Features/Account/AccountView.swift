@@ -4,6 +4,7 @@ struct AccountView: View {
     let appModel: AppModel
     let snapshot: HangarSnapshot
 
+    @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @State private var isShowingSettings = false
     @State private var isShowingBackgroundPicker = false
     @State private var isShowingAccountTotalValueExplanation = false
@@ -46,19 +47,22 @@ struct AccountView: View {
                         MetricCard(
                             title: "Packages",
                             primaryValue: "\(snapshot.metrics.packageCount)",
-                            secondaryValue: "Ships \(snapshot.metrics.shipCount)"
+                            secondaryValue: AppLocalizer.format("Ships %@", String(snapshot.metrics.shipCount))
                         )
 
                         MetricCard(
                             title: "Current Value",
                             primaryValue: snapshot.metrics.totalCurrentValue.usdString,
-                            secondaryValue: "Melt \(snapshot.metrics.totalOriginalValue.usdString)"
+                            secondaryValue: AppLocalizer.format("Melt %@", snapshot.metrics.totalOriginalValue.usdString)
                         )
 
                         MetricCard(
                             title: "Credit",
-                            primaryValue: snapshot.metrics.storeCreditUSD?.usdString ?? "Unavailable",
-                            secondaryValue: "Total Spend: \(snapshot.metrics.totalSpendUSD?.usdString ?? "Unavailable")"
+                            primaryValue: snapshot.metrics.storeCreditUSD?.usdString ?? AppLocalizer.string("Unavailable"),
+                            secondaryValue: AppLocalizer.format(
+                                "Total Spend: %@",
+                                snapshot.metrics.totalSpendUSD?.usdString ?? AppLocalizer.string("Unavailable")
+                            )
                         )
 
                         MetricCard(
@@ -93,17 +97,21 @@ struct AccountView: View {
                 }
 
                 Section {
-                    Button(appModel.isRefreshing(.account) ? "Refreshing Account..." : "Refresh Account") {
+                    Button {
                         Task {
                             await appModel.refresh(scope: .account)
                         }
+                    } label: {
+                        Text(appModel.isRefreshing(.account) ? LocalizedStringKey("Refreshing Account...") : LocalizedStringKey("Refresh Account"))
                     }
                     .disabled(appModel.isRefreshing)
 
-                    Button(appModel.isRefreshing(.full) ? "Refreshing Everything..." : "Full Refresh") {
+                    Button {
                         Task {
                             await appModel.refresh(scope: .full)
                         }
+                    } label: {
+                        Text(appModel.isRefreshing(.full) ? LocalizedStringKey("Refreshing Everything...") : LocalizedStringKey("Full Refresh"))
                     }
                     .disabled(appModel.isRefreshing)
                 } header: {
@@ -112,6 +120,7 @@ struct AccountView: View {
                     Text("Refresh Account updates balances, referral data, and profile metadata. Full Refresh also reloads hangar, fleet, and buy-back data.")
                 }
             }
+            .id(appLanguageRawValue)
             .navigationTitle("Account")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -153,7 +162,7 @@ struct AccountView: View {
 
     private var refreshLabel: String {
         guard let lastRefreshAt = appModel.lastRefreshAt else {
-            return "Not yet synced"
+            return AppLocalizer.string("Not yet synced")
         }
 
         return lastRefreshAt.formatted(date: .abbreviated, time: .shortened)
@@ -180,7 +189,7 @@ struct AccountView: View {
             }
         }
 
-        return "Citizen"
+        return AppLocalizer.string("Citizen")
     }
 
     private var profileEmail: String? {
@@ -197,22 +206,22 @@ struct AccountView: View {
     }
 
     private var accountTotalValueLabel: String {
-        accountTotalValueUSD?.usdString ?? "Unavailable"
+        accountTotalValueUSD?.usdString ?? AppLocalizer.string("Unavailable")
     }
 
     private var accountTotalValueExplanation: String {
         let currentValueText = snapshot.metrics.totalCurrentValue.usdString
-        let availableCreditText = snapshot.metrics.storeCreditUSD?.usdString ?? "Unavailable"
-        let totalValueText = accountTotalValueUSD?.usdString ?? "Unavailable"
+        let availableCreditText = snapshot.metrics.storeCreditUSD?.usdString ?? AppLocalizer.string("Unavailable")
+        let totalValueText = accountTotalValueUSD?.usdString ?? AppLocalizer.string("Unavailable")
 
-        return """
-        Account Current Value = \(currentValueText)
-        Combined MSRP of all ships + current value of all upgrades + combined value of the rest of the items in your hangar.
-
-        Available Credit = \(availableCreditText)
-
-        Account Total Value = \(currentValueText) + \(availableCreditText) = \(totalValueText)
-        """
+        return AppLocalizer.format(
+            "Account Current Value = %@\nCombined MSRP of all ships + current value of all upgrades + combined value of the rest of the items in your hangar.\n\nAvailable Credit = %@\n\nAccount Total Value = %@ + %@ = %@",
+            currentValueText,
+            availableCreditText,
+            currentValueText,
+            availableCreditText,
+            totalValueText
+        )
     }
 
     private var conciergeLevel: ConciergeLevel? {
@@ -224,7 +233,9 @@ struct AccountView: View {
             return organization.summaryText
         }
 
-        return snapshot.didRefreshPrimaryOrganization ? "No Organization" : "Organization unavailable"
+        return snapshot.didRefreshPrimaryOrganization
+            ? AppLocalizer.string("No Organization")
+            : AppLocalizer.string("Organization unavailable")
     }
 
     private var profileAvatarURL: URL? {
@@ -466,10 +477,10 @@ private struct ConciergeLevel: Hashable {
 
     var requirementSummary: String {
         if upperBoundSpendUSD == nil {
-            return "Requires \(minimumSpendUSD.usdString)+ total spend"
+            return AppLocalizer.format("Requires %@+ total spend", minimumSpendUSD.usdString)
         }
 
-        return "Requires \(minimumSpendUSD.usdString) total spend"
+        return AppLocalizer.format("Requires %@ total spend", minimumSpendUSD.usdString)
     }
 
     func isUnlocked(totalSpendUSD: Decimal?) -> Bool {
@@ -482,7 +493,7 @@ private struct ConciergeLevel: Hashable {
 }
 
 private struct MetricCard: View {
-    let title: String
+    let title: LocalizedStringKey
     let primaryValue: String
     let secondaryValue: String
 
@@ -509,11 +520,11 @@ private struct MetricCard: View {
 }
 
 private struct SensitiveOverviewFieldRow: View {
-    let title: String
+    let title: LocalizedStringKey
     let value: String?
     @Binding var isVisible: Bool
-    let hiddenText: String
-    let emptyText: String
+    let hiddenText: LocalizedStringKey
+    let emptyText: LocalizedStringKey
 
     private var trimmedValue: String? {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -530,9 +541,15 @@ private struct SensitiveOverviewFieldRow: View {
                         Image(systemName: isVisible ? "eye.fill" : "eye.slash.fill")
                             .font(.caption.weight(.semibold))
 
-                        Text(isVisible ? trimmedValue : hiddenText)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                        if isVisible {
+                            Text(trimmedValue)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        } else {
+                            Text(hiddenText)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
                     }
                     .foregroundStyle(.secondary)
                 }
@@ -906,7 +923,7 @@ private struct ProfileBackgroundShipOption: Identifiable, Hashable {
 
     var subtitle: String {
         if quantity > 1 {
-            return "\(manufacturer) • Owned \(quantity)"
+            return AppLocalizer.format("%@ • Owned %lld", manufacturer, quantity)
         }
 
         return manufacturer
@@ -914,7 +931,7 @@ private struct ProfileBackgroundShipOption: Identifiable, Hashable {
 
     var pricingSummary: String {
         if let msrpUSD {
-            return "MSRP \(msrpUSD.usdString)"
+            return AppLocalizer.format("MSRP %@", msrpUSD.usdString)
         }
 
         if let msrpLabel = msrpLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -922,7 +939,7 @@ private struct ProfileBackgroundShipOption: Identifiable, Hashable {
             return msrpLabel
         }
 
-        return "MSRP unavailable"
+        return AppLocalizer.string("MSRP unavailable")
     }
 
     static func selectionKey(for ship: FleetShip) -> String {

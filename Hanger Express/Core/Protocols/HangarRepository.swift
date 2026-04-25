@@ -12,19 +12,19 @@ nonisolated enum RefreshStage: Hashable, Sendable {
     var title: String {
         switch self {
         case .preview:
-            return "Loading preview hangar"
+            return AppLocalizer.string("Loading preview hangar")
         case .preparingSession:
-            return "Restoring RSI session"
+            return AppLocalizer.string("Restoring RSI session")
         case .pledges:
-            return "Refreshing hangar pledges"
+            return AppLocalizer.string("Refreshing hangar pledges")
         case .buyback:
-            return "Refreshing buy-back pledges"
+            return AppLocalizer.string("Refreshing buy-back pledges")
         case .hangarLog:
-            return "Refreshing hangar log"
+            return AppLocalizer.string("Refreshing hangar log")
         case .account:
-            return "Refreshing account overview"
+            return AppLocalizer.string("Refreshing account overview")
         case .finalizing:
-            return "Organizing your inventory"
+            return AppLocalizer.string("Organizing your inventory")
         }
     }
 }
@@ -69,7 +69,7 @@ nonisolated struct RefreshProgress: Hashable, Sendable {
     }
 
     var stepLabel: String {
-        "Step \(stepNumber) of \(stepCount)"
+        AppLocalizer.format("Step %lld of %lld", stepNumber, stepCount)
     }
 }
 

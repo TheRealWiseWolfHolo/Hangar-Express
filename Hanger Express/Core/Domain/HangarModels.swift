@@ -98,6 +98,10 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
         case importedCookies = "Imported cookies"
         case developerPreview = "Demo data"
 
+        var displayTitle: String {
+            AppLocalizer.string(rawValue)
+        }
+
         init(from decoder: Decoder) throws {
             let container = try decoder.singleValueContainer()
             let rawValue = try container.decode(String.self)
@@ -361,15 +365,15 @@ enum TrustedDeviceDuration: String, CaseIterable, Identifiable, Hashable, Sendab
     var displayName: String {
         switch self {
         case .session:
-            return "This session"
+            return AppLocalizer.string("This session")
         case .day:
-            return "1 day"
+            return AppLocalizer.string("1 day")
         case .week:
-            return "1 week"
+            return AppLocalizer.string("1 week")
         case .month:
-            return "1 month"
+            return AppLocalizer.string("1 month")
         case .year:
-            return "1 year"
+            return AppLocalizer.string("1 year")
         }
     }
 }
@@ -605,29 +609,29 @@ enum HangarLogAction: String, Hashable, Sendable, Codable, CaseIterable, Identif
     var title: String {
         switch self {
         case .created:
-            return "Created"
+            return AppLocalizer.string("Created")
         case .reclaimed:
-            return "Melt"
+            return AppLocalizer.string("Melt")
         case .consumed:
-            return "Consumed"
+            return AppLocalizer.string("Consumed")
         case .appliedUpgrade:
-            return "Upgrade Applied"
+            return AppLocalizer.string("Upgrade Applied")
         case .buyback:
-            return "Buy Back"
+            return AppLocalizer.string("Buy Back")
         case .gift:
-            return "Gift"
+            return AppLocalizer.string("Gift")
         case .giftClaimed:
-            return "Gift Claimed"
+            return AppLocalizer.string("Gift Claimed")
         case .giftCancelled:
-            return "Gift Cancelled"
+            return AppLocalizer.string("Gift Cancelled")
         case .nameChange:
-            return "Name Reservation"
+            return AppLocalizer.string("Name Reservation")
         case .nameChangeReclaimed:
-            return "Name Released"
+            return AppLocalizer.string("Name Released")
         case .giveaway:
-            return "Giveaway"
+            return AppLocalizer.string("Giveaway")
         case .unknown:
-            return "Other"
+            return AppLocalizer.string("Other")
         }
     }
 }
@@ -698,15 +702,21 @@ struct ReferralStats: Hashable, Sendable, Codable {
     )
 
     var currentSummary: String {
-        "New \(currentLadderCount.map(String.init) ?? "Unavailable")"
+        AppLocalizer.format(
+            "New %@",
+            currentLadderCount.map(String.init) ?? AppLocalizer.string("Unavailable")
+        )
     }
 
     var legacySummary: String {
         if hasLegacyLadder {
-            return "Legacy \(legacyLadderCount.map(String.init) ?? "Unavailable")"
+            return AppLocalizer.format(
+                "Legacy %@",
+                legacyLadderCount.map(String.init) ?? AppLocalizer.string("Unavailable")
+            )
         }
 
-        return "Legacy N/A"
+        return AppLocalizer.string("Legacy N/A")
     }
 }
 
@@ -842,12 +852,12 @@ struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
         }
 
         if isUpgradeOnlyPledge,
-           trimmedInsurance.localizedCaseInsensitiveCompare("Unknown") == .orderedSame
+           Self.isUnknownInsuranceLabel(trimmedInsurance)
         {
             return nil
         }
 
-        return trimmedInsurance
+        return Self.localizedInsuranceDisplayLabel(from: trimmedInsurance)
     }
 
     var detailInsuranceText: String? {
@@ -855,23 +865,32 @@ struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
 
         if !levels.isEmpty {
             if levels.count == 1,
-               levels[0].localizedCaseInsensitiveCompare("Unknown") == .orderedSame
+               Self.isUnknownInsuranceLabel(levels[0])
             {
                 return displayedInsurance
             }
 
-            return levels.joined(separator: ", ")
+            return levels
+                .map(Self.localizedInsuranceDisplayLabel(from:))
+                .joined(separator: ", ")
         }
 
         return displayedInsurance
     }
 
     var searchableInsuranceText: String {
+        let rawInsurance = insurance.trimmingCharacters(in: .whitespacesAndNewlines)
+
         if let detailInsuranceText {
-            return detailInsuranceText
+            if rawInsurance.isEmpty
+                || detailInsuranceText.localizedCaseInsensitiveCompare(rawInsurance) == .orderedSame {
+                return detailInsuranceText
+            }
+
+            return [detailInsuranceText, rawInsurance].joined(separator: " ")
         }
 
-        return insurance.trimmingCharacters(in: .whitespacesAndNewlines)
+        return rawInsurance
     }
 
     var isMultiShipPackage: Bool {
@@ -1025,11 +1044,44 @@ struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
             return "\(years * 12) months"
         }
 
-        if lowercased == "unknown" {
+        if isUnknownInsuranceLabel(trimmedValue) {
             return "Unknown"
         }
 
         return trimmedValue
+    }
+
+    nonisolated static func isUnknownInsuranceLabel(_ value: String) -> Bool {
+        let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedValue.isEmpty else {
+            return false
+        }
+
+        let lowercasedValue = trimmedValue.localizedLowercase
+        let localizedUnknown = AppLocalizer.string("Unknown")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .localizedLowercase
+
+        return lowercasedValue == "unknown" || lowercasedValue == localizedUnknown
+    }
+
+    nonisolated static func localizedInsuranceDisplayLabel(from rawValue: String) -> String {
+        let normalizedValue = normalizedInsuranceLabel(from: rawValue) ?? rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = normalizedValue.localizedLowercase
+
+        if lowercased.contains("lti") || lowercased.contains("lifetime") {
+            return "LTI"
+        }
+
+        if isUnknownInsuranceLabel(normalizedValue) {
+            return AppLocalizer.string("Unknown")
+        }
+
+        if let months = insuranceValueMatch(in: lowercased, pattern: #"(\d+)\s*months?\b"#) {
+            return "\(months)M"
+        }
+
+        return normalizedValue
     }
 
     private nonisolated static func insuranceRanking(for value: String) -> (priority: Int, months: Int) {
@@ -1214,6 +1266,7 @@ struct FleetShip: Identifiable, Hashable, Sendable, Codable {
     let id: Int
     let displayName: String
     let manufacturer: String
+    let manufacturerLogoURL: URL?
     let role: String
     let roleCategories: [String]
     let msrpUSD: Decimal?
@@ -1231,6 +1284,7 @@ struct FleetShip: Identifiable, Hashable, Sendable, Codable {
         id: Int,
         displayName: String,
         manufacturer: String,
+        manufacturerLogoURL: URL? = nil,
         role: String,
         roleCategories: [String] = [],
         msrpUSD: Decimal? = nil,
@@ -1247,6 +1301,7 @@ struct FleetShip: Identifiable, Hashable, Sendable, Codable {
         self.id = id
         self.displayName = displayName
         self.manufacturer = manufacturer
+        self.manufacturerLogoURL = manufacturerLogoURL
         self.role = role
         self.roleCategories = roleCategories
         self.msrpUSD = msrpUSD
@@ -1265,6 +1320,7 @@ struct FleetShip: Identifiable, Hashable, Sendable, Codable {
         case id
         case displayName
         case manufacturer
+        case manufacturerLogoURL
         case role
         case roleCategories
         case msrpUSD
@@ -1285,6 +1341,7 @@ struct FleetShip: Identifiable, Hashable, Sendable, Codable {
         id = try container.decode(Int.self, forKey: .id)
         displayName = try container.decode(String.self, forKey: .displayName)
         manufacturer = try container.decode(String.self, forKey: .manufacturer)
+        manufacturerLogoURL = try container.decodeIfPresent(URL.self, forKey: .manufacturerLogoURL)
         role = try container.decode(String.self, forKey: .role)
         roleCategories = try container.decodeIfPresent([String].self, forKey: .roleCategories)
             ?? role
@@ -1308,6 +1365,7 @@ struct FleetShip: Identifiable, Hashable, Sendable, Codable {
         try container.encode(id, forKey: .id)
         try container.encode(displayName, forKey: .displayName)
         try container.encode(manufacturer, forKey: .manufacturer)
+        try container.encodeIfPresent(manufacturerLogoURL, forKey: .manufacturerLogoURL)
         try container.encode(role, forKey: .role)
         try container.encode(roleCategories, forKey: .roleCategories)
         try container.encodeIfPresent(msrpUSD, forKey: .msrpUSD)
