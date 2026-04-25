@@ -189,10 +189,86 @@ enum UpgradeTitleParser {
 }
 
 struct RSIShipCatalog: Sendable {
+    struct ManufacturerAsset: Hashable, Sendable {
+        let path: String
+        let primaryURL: URL?
+        let fallbackURL: URL?
+
+        var rasterPreferredURL: URL? {
+            if let primaryURL, primaryURL.isSupportedManufacturerLogoURL {
+                return primaryURL
+            }
+
+            if let fallbackURL, fallbackURL.isSupportedManufacturerLogoURL {
+                return fallbackURL
+            }
+
+            return nil
+        }
+    }
+
+    struct ManufacturerLogos: Hashable, Sendable {
+        let `default`: ManufacturerAsset?
+        let onLightBackground: ManufacturerAsset?
+        let onDarkBackground: ManufacturerAsset?
+        let variants: [String: ManufacturerAsset]
+
+        func preferredDisplayURL(preferLightOnDarkBackground: Bool) -> URL? {
+            let orderedCandidates: [ManufacturerAsset?]
+
+            if preferLightOnDarkBackground {
+                orderedCandidates = [
+                    variants["white"],
+                    onDarkBackground,
+                    `default`,
+                    onLightBackground
+                ]
+            } else {
+                orderedCandidates = [
+                    `default`,
+                    onLightBackground,
+                    onDarkBackground,
+                    variants["white"]
+                ]
+            }
+
+            for candidate in orderedCandidates {
+                if let url = candidate?.rasterPreferredURL {
+                    return url
+                }
+            }
+
+            for variantKey in preferredVariantKeys(preferLightOnDarkBackground: preferLightOnDarkBackground) {
+                if let url = variants[variantKey]?.rasterPreferredURL {
+                    return url
+                }
+            }
+
+            return nil
+        }
+
+        private func preferredVariantKeys(preferLightOnDarkBackground: Bool) -> [String] {
+            if preferLightOnDarkBackground {
+                return ["light", "color", "black", "dark", "primary", "primary-black"]
+            }
+
+            return ["color", "black", "dark", "light", "primary", "primary-black"]
+        }
+    }
+
+    struct Manufacturer: Hashable, Sendable {
+        let slug: String
+        let name: String
+        let aliases: [String]
+        let logos: ManufacturerLogos?
+    }
+
     struct Ship: Hashable, Sendable {
         let id: Int
         let name: String
         let manufacturer: String?
+        let manufacturerSlug: String?
+        let manufacturerLogoURL: URL?
         let msrpUSD: Decimal?
         let msrpLabel: String?
         let type: String?
@@ -206,6 +282,8 @@ struct RSIShipCatalog: Sendable {
             id: Int,
             name: String,
             manufacturer: String? = nil,
+            manufacturerSlug: String? = nil,
+            manufacturerLogoURL: URL? = nil,
             msrpUSD: Decimal?,
             msrpLabel: String? = nil,
             type: String? = nil,
@@ -218,6 +296,8 @@ struct RSIShipCatalog: Sendable {
             self.id = id
             self.name = name
             self.manufacturer = manufacturer
+            self.manufacturerSlug = manufacturerSlug
+            self.manufacturerLogoURL = manufacturerLogoURL
             self.msrpUSD = msrpUSD
             self.msrpLabel = msrpLabel
             self.type = type
@@ -238,12 +318,16 @@ struct RSIShipCatalog: Sendable {
     }
 
     let ships: [Ship]
+    let manufacturers: [Manufacturer]
 
     private let shipsByKey: [String: Ship]
     private let mirroredImageURLsBySource: [String: URL]
+    private let manufacturersBySlug: [String: Manufacturer]
+    private let manufacturersByName: [String: Manufacturer]
 
-    init(ships: [Ship]) {
+    init(ships: [Ship], manufacturers: [Manufacturer] = []) {
         self.ships = ships
+        self.manufacturers = manufacturers
 
         var keyedShips: [String: Ship] = [:]
         var mirroredImages: [String: URL] = [:]
@@ -265,6 +349,12 @@ struct RSIShipCatalog: Sendable {
 
         shipsByKey = keyedShips
         mirroredImageURLsBySource = mirroredImages
+        manufacturersBySlug = Dictionary(
+            uniqueKeysWithValues: manufacturers.map { ($0.slug.localizedLowercase, $0) }
+        )
+        manufacturersByName = Dictionary(
+            uniqueKeysWithValues: manufacturers.map { ($0.name.localizedLowercase, $0) }
+        )
     }
 
     func matchShip(named rawName: String) -> Ship? {
@@ -285,6 +375,20 @@ struct RSIShipCatalog: Sendable {
         }
 
         return mirroredImageURLsBySource[originalURL.absoluteString]
+    }
+
+    func manufacturer(named name: String?, slug: String?) -> Manufacturer? {
+        if let slug = slug?.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase,
+           let manufacturer = manufacturersBySlug[slug] {
+            return manufacturer
+        }
+
+        if let normalizedName = name?.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase,
+           let manufacturer = manufacturersByName[normalizedName] {
+            return manufacturer
+        }
+
+        return nil
     }
 }
 
@@ -329,10 +433,16 @@ struct HostedShipCatalogClient: Sendable {
                     return nil
                 }
 
+                let manufacturer = payload.manufacturer(named: ship.manufacturer, slug: ship.manufacturerSlug)
+
                 return RSIShipCatalog.Ship(
                     id: id,
                     name: ship.name?.nilIfEmpty ?? ship.title?.nilIfEmpty ?? "Unknown Ship",
                     manufacturer: ship.manufacturer?.nilIfEmpty,
+                    manufacturerSlug: ship.manufacturerSlug?.nilIfEmpty,
+                    manufacturerLogoURL: manufacturer?.logos?.preferredDisplayURL(
+                        preferLightOnDarkBackground: true
+                    ),
                     msrpUSD: ship.msrpUSD,
                     msrpLabel: ship.msrpLabel?.nilIfEmpty,
                     type: ship.type?.nilIfEmpty,
@@ -342,7 +452,8 @@ struct HostedShipCatalogClient: Sendable {
                     imageURL: ship.thumbnailURL,
                     sourceImageURL: ship.sourceThumbnailURL
                 )
-            }
+            },
+            manufacturers: payload.manufacturers.map { $0.catalogManufacturer }
         )
     }
 
@@ -373,9 +484,267 @@ struct RSIShipDetailCatalog: Sendable {
         let items: [SpecItem]
     }
 
+    struct SpecificationItem: Hashable, Sendable, Codable {
+        let name: String
+        let internalName: String?
+        let countLabel: String?
+        let count: Int?
+        let size: String?
+        let sizeNumber: Int?
+        let subtitle: String?
+        let level: Int?
+        let pageURL: URL?
+
+        var quantityLabel: String? {
+            if let countLabel = countLabel?.nilIfEmpty {
+                return countLabel
+            }
+
+            return count.map { "\($0)x" }
+        }
+
+        init(
+            name: String,
+            internalName: String?,
+            countLabel: String?,
+            count: Int?,
+            size: String?,
+            sizeNumber: Int?,
+            subtitle: String?,
+            level: Int?,
+            pageURL: URL?
+        ) {
+            self.name = name
+            self.internalName = internalName
+            self.countLabel = countLabel
+            self.count = count
+            self.size = size
+            self.sizeNumber = sizeNumber
+            self.subtitle = subtitle
+            self.level = level
+            self.pageURL = pageURL
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            name = try container.decodeIfPresent(String.self, forKey: .name)?.nilIfEmpty ?? "Component"
+            internalName = try container.decodeIfPresent(String.self, forKey: .internalName)?.nilIfEmpty
+            countLabel = try container.decodeIfPresent(String.self, forKey: .countLabel)?.nilIfEmpty
+            count = try container.decodeIfPresent(Int.self, forKey: .count)
+            size = try container.decodeIfPresent(String.self, forKey: .size)?.nilIfEmpty
+            sizeNumber = try container.decodeIfPresent(Int.self, forKey: .sizeNumber)
+            subtitle = try container.decodeIfPresent(String.self, forKey: .subtitle)?.nilIfEmpty
+            level = try container.decodeIfPresent(Int.self, forKey: .level)
+            pageURL = try container.decodeIfPresent(URL.self, forKey: .pageURL)
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case name
+            case internalName
+            case countLabel
+            case count
+            case size
+            case sizeNumber
+            case subtitle
+            case level
+            case pageURL = "pageUrl"
+        }
+    }
+
+    struct SizeSummary: Hashable, Sendable, Codable {
+        let size: String?
+        let sizeNumber: Int?
+        let count: Int
+        let entryCount: Int
+
+        init(size: String?, sizeNumber: Int?, count: Int, entryCount: Int) {
+            self.size = size
+            self.sizeNumber = sizeNumber
+            self.count = count
+            self.entryCount = entryCount
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            size = try container.decodeIfPresent(String.self, forKey: .size)?.nilIfEmpty
+            sizeNumber = try container.decodeIfPresent(Int.self, forKey: .sizeNumber)
+            count = try container.decodeIfPresent(Int.self, forKey: .count) ?? 0
+            entryCount = try container.decodeIfPresent(Int.self, forKey: .entryCount) ?? 0
+        }
+    }
+
+    struct SectionSizeSummary: Hashable, Sendable, Codable {
+        let tab: String
+        let section: String
+        let size: String?
+        let sizeNumber: Int?
+        let count: Int
+        let entryCount: Int
+
+        init(tab: String, section: String, size: String?, sizeNumber: Int?, count: Int, entryCount: Int) {
+            self.tab = tab
+            self.section = section
+            self.size = size
+            self.sizeNumber = sizeNumber
+            self.count = count
+            self.entryCount = entryCount
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            tab = try container.decodeIfPresent(String.self, forKey: .tab)?.nilIfEmpty ?? "Specifications"
+            section = try container.decodeIfPresent(String.self, forKey: .section)?.nilIfEmpty ?? "Components"
+            size = try container.decodeIfPresent(String.self, forKey: .size)?.nilIfEmpty
+            sizeNumber = try container.decodeIfPresent(Int.self, forKey: .sizeNumber)
+            count = try container.decodeIfPresent(Int.self, forKey: .count) ?? 0
+            entryCount = try container.decodeIfPresent(Int.self, forKey: .entryCount) ?? 0
+        }
+    }
+
+    struct SpecificationSummary: Hashable, Sendable, Codable {
+        let totalEntries: Int
+        let totalCount: Int
+        let bySection: [SectionSizeSummary]
+        let bySize: [SizeSummary]
+
+        static let empty = SpecificationSummary(
+            totalEntries: 0,
+            totalCount: 0,
+            bySection: [],
+            bySize: []
+        )
+
+        init(
+            totalEntries: Int,
+            totalCount: Int,
+            bySection: [SectionSizeSummary],
+            bySize: [SizeSummary]
+        ) {
+            self.totalEntries = totalEntries
+            self.totalCount = totalCount
+            self.bySection = bySection
+            self.bySize = bySize
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            totalEntries = try container.decodeIfPresent(Int.self, forKey: .totalEntries) ?? 0
+            totalCount = try container.decodeIfPresent(Int.self, forKey: .totalCount) ?? 0
+            bySection = try container.decodeIfPresent([SectionSizeSummary].self, forKey: .bySection) ?? []
+            bySize = try container.decodeIfPresent([SizeSummary].self, forKey: .bySize) ?? []
+        }
+    }
+
+    struct SpecificationSection: Hashable, Sendable, Codable {
+        let tab: String
+        let title: String
+        let items: [SpecificationItem]
+        let summaryBySize: [SizeSummary]
+
+        init(tab: String, title: String, items: [SpecificationItem], summaryBySize: [SizeSummary]) {
+            self.tab = tab
+            self.title = title
+            self.items = items
+            self.summaryBySize = summaryBySize
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            tab = try container.decodeIfPresent(String.self, forKey: .tab)?.nilIfEmpty ?? "Specifications"
+            title = try container.decodeIfPresent(String.self, forKey: .title)?.nilIfEmpty ?? "Components"
+            items = try container.decodeIfPresent([SpecificationItem].self, forKey: .items) ?? []
+            summaryBySize = try container.decodeIfPresent([SizeSummary].self, forKey: .summaryBySize) ?? []
+        }
+    }
+
+    struct SpecificationEntry: Hashable, Sendable, Codable {
+        let tab: String
+        let section: String
+        let name: String
+        let internalName: String?
+        let countLabel: String?
+        let count: Int?
+        let size: String?
+        let sizeNumber: Int?
+        let subtitle: String?
+        let level: Int?
+        let pageURL: URL?
+
+        var item: SpecificationItem {
+            SpecificationItem(
+                name: name,
+                internalName: internalName,
+                countLabel: countLabel,
+                count: count,
+                size: size,
+                sizeNumber: sizeNumber,
+                subtitle: subtitle,
+                level: level,
+                pageURL: pageURL
+            )
+        }
+
+        init(
+            tab: String,
+            section: String,
+            name: String,
+            internalName: String?,
+            countLabel: String?,
+            count: Int?,
+            size: String?,
+            sizeNumber: Int?,
+            subtitle: String?,
+            level: Int?,
+            pageURL: URL?
+        ) {
+            self.tab = tab
+            self.section = section
+            self.name = name
+            self.internalName = internalName
+            self.countLabel = countLabel
+            self.count = count
+            self.size = size
+            self.sizeNumber = sizeNumber
+            self.subtitle = subtitle
+            self.level = level
+            self.pageURL = pageURL
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            tab = try container.decodeIfPresent(String.self, forKey: .tab)?.nilIfEmpty ?? "Specifications"
+            section = try container.decodeIfPresent(String.self, forKey: .section)?.nilIfEmpty ?? "Components"
+            name = try container.decodeIfPresent(String.self, forKey: .name)?.nilIfEmpty ?? "Component"
+            internalName = try container.decodeIfPresent(String.self, forKey: .internalName)?.nilIfEmpty
+            countLabel = try container.decodeIfPresent(String.self, forKey: .countLabel)?.nilIfEmpty
+            count = try container.decodeIfPresent(Int.self, forKey: .count)
+            size = try container.decodeIfPresent(String.self, forKey: .size)?.nilIfEmpty
+            sizeNumber = try container.decodeIfPresent(Int.self, forKey: .sizeNumber)
+            subtitle = try container.decodeIfPresent(String.self, forKey: .subtitle)?.nilIfEmpty
+            level = try container.decodeIfPresent(Int.self, forKey: .level)
+            pageURL = try container.decodeIfPresent(URL.self, forKey: .pageURL)
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case tab
+            case section
+            case name
+            case internalName
+            case countLabel
+            case count
+            case size
+            case sizeNumber
+            case subtitle
+            case level
+            case pageURL = "pageUrl"
+        }
+    }
+
     struct ShipDetail: Hashable, Sendable {
         let name: String
         let manufacturer: String?
+        let manufacturerSlug: String?
+        let manufacturerLogoURL: URL?
         let career: String?
         let role: String?
         let size: String?
@@ -386,7 +755,13 @@ struct RSIShipDetailCatalog: Sendable {
         let description: String?
         let technicalSpecs: [SpecItem]
         let technicalSections: [TechnicalSection]
+        let specificationSections: [SpecificationSection]
+        let componentEntries: [SpecificationEntry]
+        let weaponsUtilityEntries: [SpecificationEntry]
+        let componentSummary: SpecificationSummary
+        let weaponsUtilitySummary: SpecificationSummary
         let pageURL: URL?
+        let spviewerPageURL: URL?
         let unavailableReason: String?
 
         var roleSummary: String? {
@@ -409,14 +784,47 @@ struct RSIShipDetailCatalog: Sendable {
         var isUnavailable: Bool {
             unavailableReason?.nilIfEmpty != nil
         }
+
+        var sourceDetailURL: URL? {
+            spviewerPageURL ?? pageURL
+        }
+
+        var hasSpecificationData: Bool {
+            !specificationSections.isEmpty
+                || !componentEntries.isEmpty
+                || !weaponsUtilityEntries.isEmpty
+        }
+
+        var componentSections: [SpecificationSection] {
+            specificationSections.filter { section in
+                section.tab != "Weapons & Utility"
+            }
+        }
+
+        var weaponsUtilitySections: [SpecificationSection] {
+            specificationSections.filter { section in
+                section.tab == "Weapons & Utility"
+            }
+        }
+
+        var technicalSectionsForDisplay: [TechnicalSection] {
+            let specificationTitles = Set(specificationSections.map(\.title))
+            return technicalSections.filter { section in
+                !specificationTitles.contains(section.title)
+            }
+        }
     }
 
     let ships: [ShipDetail]
+    let manufacturers: [RSIShipCatalog.Manufacturer]
 
     private let shipsByKey: [String: ShipDetail]
+    private let manufacturersBySlug: [String: RSIShipCatalog.Manufacturer]
+    private let manufacturersByName: [String: RSIShipCatalog.Manufacturer]
 
-    init(ships: [ShipDetail]) {
+    init(ships: [ShipDetail], manufacturers: [RSIShipCatalog.Manufacturer] = []) {
         self.ships = ships
+        self.manufacturers = manufacturers
 
         var keyedShips: [String: ShipDetail] = [:]
         for ship in ships {
@@ -430,6 +838,12 @@ struct RSIShipDetailCatalog: Sendable {
         }
 
         shipsByKey = keyedShips
+        manufacturersBySlug = Dictionary(
+            uniqueKeysWithValues: manufacturers.map { ($0.slug.localizedLowercase, $0) }
+        )
+        manufacturersByName = Dictionary(
+            uniqueKeysWithValues: manufacturers.map { ($0.name.localizedLowercase, $0) }
+        )
     }
 
     func matchShip(named rawName: String) -> ShipDetail? {
@@ -442,6 +856,20 @@ struct RSIShipDetailCatalog: Sendable {
             UpgradeTitleParser.stripManufacturerPrefix(from: rawName)
         )
         return shipsByKey[strippedKey]
+    }
+
+    func manufacturer(named name: String?, slug: String?) -> RSIShipCatalog.Manufacturer? {
+        if let slug = slug?.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase,
+           let manufacturer = manufacturersBySlug[slug] {
+            return manufacturer
+        }
+
+        if let normalizedName = name?.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase,
+           let manufacturer = manufacturersByName[normalizedName] {
+            return manufacturer
+        }
+
+        return nil
     }
 }
 
@@ -482,9 +910,14 @@ struct HostedShipDetailCatalogClient: Sendable {
         let payload = try JSONDecoder().decode(RemoteHostedShipDetailCatalogPayload.self, from: data)
         return RSIShipDetailCatalog(
             ships: payload.ships.map { ship in
-                RSIShipDetailCatalog.ShipDetail(
+                let manufacturer = payload.manufacturer(named: ship.manufacturer, slug: ship.manufacturerSlug)
+                return RSIShipDetailCatalog.ShipDetail(
                     name: ship.name,
                     manufacturer: ship.manufacturer?.nilIfEmpty,
+                    manufacturerSlug: ship.manufacturerSlug?.nilIfEmpty,
+                    manufacturerLogoURL: manufacturer?.logos?.preferredDisplayURL(
+                        preferLightOnDarkBackground: true
+                    ),
                     career: ship.career?.nilIfEmpty,
                     role: ship.role?.nilIfEmpty,
                     size: ship.size?.nilIfEmpty,
@@ -510,10 +943,17 @@ struct HostedShipDetailCatalogClient: Sendable {
                             }
                         )
                     },
+                    specificationSections: ship.specificationSections,
+                    componentEntries: ship.componentEntries,
+                    weaponsUtilityEntries: ship.weaponsUtilityEntries,
+                    componentSummary: ship.componentSummary,
+                    weaponsUtilitySummary: ship.weaponsUtilitySummary,
                     pageURL: ship.pageURL,
+                    spviewerPageURL: ship.spviewerPageURL,
                     unavailableReason: ship.unavailableReason?.nilIfEmpty
                 )
-            }
+            },
+            manufacturers: payload.manufacturers.map { $0.catalogManufacturer }
         )
     }
 
@@ -558,7 +998,33 @@ public enum HostedShipFeedEndpoints {
 }
 
 private struct RemoteHostedShipDetailCatalogPayload: Decodable {
+    let manufacturers: [RemoteHostedManufacturer]
     let ships: [RemoteHostedShipDetail]
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        manufacturers = try container.decodeIfPresent([RemoteHostedManufacturer].self, forKey: .manufacturers) ?? []
+        ships = try container.decode([RemoteHostedShipDetail].self, forKey: .ships)
+    }
+
+    func manufacturer(named name: String?, slug: String?) -> RSIShipCatalog.Manufacturer? {
+        if let normalizedSlug = slug?.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase,
+           let match = manufacturers.first(where: { $0.slug.localizedLowercase == normalizedSlug }) {
+            return match.catalogManufacturer
+        }
+
+        if let normalizedName = name?.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase,
+           let match = manufacturers.first(where: { $0.name.localizedLowercase == normalizedName }) {
+            return match.catalogManufacturer
+        }
+
+        return nil
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case manufacturers
+        case ships
+    }
 }
 
 private struct RemoteHostedShipDetail: Decodable {
@@ -574,6 +1040,7 @@ private struct RemoteHostedShipDetail: Decodable {
 
     let name: String
     let manufacturer: String?
+    let manufacturerSlug: String?
     let career: String?
     let role: String?
     let size: String?
@@ -584,12 +1051,59 @@ private struct RemoteHostedShipDetail: Decodable {
     let description: String?
     let technicalSpecs: [SpecItem]
     let technicalSections: [TechnicalSection]
+    let specificationSections: [RSIShipDetailCatalog.SpecificationSection]
+    let componentEntries: [RSIShipDetailCatalog.SpecificationEntry]
+    let weaponsUtilityEntries: [RSIShipDetailCatalog.SpecificationEntry]
+    let componentSummary: RSIShipDetailCatalog.SpecificationSummary
+    let weaponsUtilitySummary: RSIShipDetailCatalog.SpecificationSummary
     let pageURL: URL?
+    let spviewerPageURL: URL?
     let unavailableReason: String?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        manufacturer = try container.decodeIfPresent(String.self, forKey: .manufacturer)
+        manufacturerSlug = try container.decodeIfPresent(String.self, forKey: .manufacturerSlug)
+        career = try container.decodeIfPresent(String.self, forKey: .career)
+        role = try container.decodeIfPresent(String.self, forKey: .role)
+        size = try container.decodeIfPresent(String.self, forKey: .size)
+        inGameStatus = try container.decodeIfPresent(String.self, forKey: .inGameStatus)
+        pledgeAvailability = try container.decodeIfPresent(String.self, forKey: .pledgeAvailability)
+        minCrew = try container.decodeIfPresent(Int.self, forKey: .minCrew)
+        maxCrew = try container.decodeIfPresent(Int.self, forKey: .maxCrew)
+        description = try container.decodeIfPresent(String.self, forKey: .description)
+        technicalSpecs = try container.decodeIfPresent([SpecItem].self, forKey: .technicalSpecs) ?? []
+        technicalSections = try container.decodeIfPresent([TechnicalSection].self, forKey: .technicalSections) ?? []
+        specificationSections = try container.decodeIfPresent(
+            [RSIShipDetailCatalog.SpecificationSection].self,
+            forKey: .specificationSections
+        ) ?? []
+        componentEntries = try container.decodeIfPresent(
+            [RSIShipDetailCatalog.SpecificationEntry].self,
+            forKey: .componentEntries
+        ) ?? []
+        weaponsUtilityEntries = try container.decodeIfPresent(
+            [RSIShipDetailCatalog.SpecificationEntry].self,
+            forKey: .weaponsUtilityEntries
+        ) ?? []
+        componentSummary = try container.decodeIfPresent(
+            RSIShipDetailCatalog.SpecificationSummary.self,
+            forKey: .componentSummary
+        ) ?? .empty
+        weaponsUtilitySummary = try container.decodeIfPresent(
+            RSIShipDetailCatalog.SpecificationSummary.self,
+            forKey: .weaponsUtilitySummary
+        ) ?? .empty
+        pageURL = try container.decodeIfPresent(URL.self, forKey: .pageURL)
+        spviewerPageURL = try container.decodeIfPresent(URL.self, forKey: .spviewerPageURL)
+        unavailableReason = try container.decodeIfPresent(String.self, forKey: .unavailableReason)
+    }
 
     enum CodingKeys: String, CodingKey {
         case name
         case manufacturer
+        case manufacturerSlug
         case career
         case role
         case size
@@ -600,13 +1114,45 @@ private struct RemoteHostedShipDetail: Decodable {
         case description
         case technicalSpecs
         case technicalSections
+        case specificationSections
+        case componentEntries
+        case weaponsUtilityEntries
+        case componentSummary
+        case weaponsUtilitySummary
         case pageURL = "pageUrl"
+        case spviewerPageURL = "spviewerPageUrl"
         case unavailableReason
     }
 }
 
 private struct RemoteHostedShipCatalogPayload: Decodable {
+    let manufacturers: [RemoteHostedManufacturer]
     let ships: [RemoteHostedShip]
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        manufacturers = try container.decodeIfPresent([RemoteHostedManufacturer].self, forKey: .manufacturers) ?? []
+        ships = try container.decode([RemoteHostedShip].self, forKey: .ships)
+    }
+
+    func manufacturer(named name: String?, slug: String?) -> RSIShipCatalog.Manufacturer? {
+        if let normalizedSlug = slug?.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase,
+           let match = manufacturers.first(where: { $0.slug.localizedLowercase == normalizedSlug }) {
+            return match.catalogManufacturer
+        }
+
+        if let normalizedName = name?.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase,
+           let match = manufacturers.first(where: { $0.name.localizedLowercase == normalizedName }) {
+            return match.catalogManufacturer
+        }
+
+        return nil
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case manufacturers
+        case ships
+    }
 }
 
 private struct RemoteHostedShip: Decodable {
@@ -614,6 +1160,7 @@ private struct RemoteHostedShip: Decodable {
     let title: String?
     let name: String?
     let manufacturer: String?
+    let manufacturerSlug: String?
     let msrpUSD: Decimal?
     let msrpLabel: String?
     let type: String?
@@ -628,6 +1175,7 @@ private struct RemoteHostedShip: Decodable {
         case title
         case name
         case manufacturer
+        case manufacturerSlug
         case msrpUSD = "msrpUsd"
         case msrpLabel
         case type
@@ -640,6 +1188,78 @@ private struct RemoteHostedShip: Decodable {
 
     var numericID: Int? {
         Int(id)
+    }
+}
+
+private struct RemoteHostedManufacturer: Decodable {
+    struct Logos: Decodable {
+        let `default`: RemoteHostedManufacturerAsset?
+        let onLightBackground: RemoteHostedManufacturerAsset?
+        let onDarkBackground: RemoteHostedManufacturerAsset?
+        let variants: [String: RemoteHostedManufacturerAsset]
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            `default` = try container.decodeIfPresent(RemoteHostedManufacturerAsset.self, forKey: .default)
+            onLightBackground = try container.decodeIfPresent(RemoteHostedManufacturerAsset.self, forKey: .onLightBackground)
+            onDarkBackground = try container.decodeIfPresent(RemoteHostedManufacturerAsset.self, forKey: .onDarkBackground)
+            variants = try container.decodeIfPresent([String: RemoteHostedManufacturerAsset].self, forKey: .variants) ?? [:]
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case `default`
+            case onLightBackground
+            case onDarkBackground
+            case variants
+        }
+    }
+
+    let slug: String
+    let name: String
+    let aliases: [String]
+    let logos: Logos?
+
+    var catalogManufacturer: RSIShipCatalog.Manufacturer {
+        RSIShipCatalog.Manufacturer(
+            slug: slug,
+            name: name,
+            aliases: aliases,
+            logos: logos.map { logos in
+                RSIShipCatalog.ManufacturerLogos(
+                    default: logos.default?.catalogAsset,
+                    onLightBackground: logos.onLightBackground?.catalogAsset,
+                    onDarkBackground: logos.onDarkBackground?.catalogAsset,
+                    variants: logos.variants.mapValues { $0.catalogAsset }
+                )
+            }
+        )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case slug
+        case name
+        case aliases
+        case logos
+    }
+}
+
+private struct RemoteHostedManufacturerAsset: Decodable {
+    let path: String
+    let primaryURL: URL?
+    let fallbackURL: URL?
+
+    var catalogAsset: RSIShipCatalog.ManufacturerAsset {
+        RSIShipCatalog.ManufacturerAsset(
+            path: path,
+            primaryURL: primaryURL,
+            fallbackURL: fallbackURL
+        )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case primaryURL = "primaryUrl"
+        case fallbackURL = "fallbackUrl"
     }
 }
 
@@ -787,5 +1407,23 @@ private extension String {
     var nilIfEmpty: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+private extension URL {
+    var isSupportedManufacturerLogoURL: Bool {
+        let supportedExtensions: Set<String> = [
+            "png",
+            "jpg",
+            "jpeg",
+            "svg",
+            "webp",
+            "gif",
+            "heic",
+            "heif",
+            "avif"
+        ]
+
+        return supportedExtensions.contains(pathExtension.localizedLowercase)
     }
 }

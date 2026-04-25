@@ -131,7 +131,10 @@ final class LiveHangarRepository: HangarRepository {
                 stage: .finalizing,
                 stepNumber: 3,
                 stepCount: 3,
-                detail: "Organized \(remotePledges.count) pledges into the hangar and fleet views.",
+                detail: AppLocalizer.format(
+                    "Organized %lld pledges into the hangar and fleet views.",
+                    remotePledges.count
+                ),
                 completedUnitCount: 2,
                 totalUnitCount: 2
             )
@@ -546,7 +549,7 @@ final class LiveHangarRepository: HangarRepository {
             stage: .preparingSession,
             stepNumber: stepNumber,
             stepCount: stepCount,
-            detail: "Restoring \(session.cookies.count) saved RSI cookies.",
+            detail: AppLocalizer.format("Restoring %lld saved RSI cookies.", session.cookies.count),
             completedUnitCount: 1,
             totalUnitCount: 1
         )
@@ -808,7 +811,10 @@ final class LiveHangarRepository: HangarRepository {
                 stage: .pledges,
                 stepNumber: stepNumber,
                 stepCount: stepCount,
-                detail: "Refreshing the affected hangar tail beginning with page \(startPage).",
+                detail: AppLocalizer.format(
+                    "Refreshing the affected hangar tail beginning with page %lld.",
+                    startPage
+                ),
                 completedUnitCount: 0,
                 totalUnitCount: nil,
                 trackerID: trackerID,
@@ -1600,7 +1606,7 @@ final class LiveHangarRepository: HangarRepository {
                 stage: .hangarLog,
                 stepNumber: stepNumber,
                 stepCount: stepCount,
-                detail: "Opening RSI's hangar log window and loading the current entries.",
+                detail: AppLocalizer.string("Opening RSI's hangar log window and loading the current entries."),
                 completedUnitCount: 0,
                 totalUnitCount: 1,
                 trackerID: trackerID,
@@ -1696,12 +1702,18 @@ final class LiveHangarRepository: HangarRepository {
         let detail: String
         if existingLogs.isEmpty {
             detail = hangarLogs.count >= mode.entryLimit
-                ? "Loaded \(hangarLogs.count) hangar log entries from RSI (cap \(mode.entryLimit))."
-                : "Loaded \(hangarLogs.count) hangar log entries from RSI."
+                ? AppLocalizer.format(
+                    "Loaded %lld hangar log entries from RSI (cap %lld).",
+                    hangarLogs.count,
+                    mode.entryLimit
+                )
+                : AppLocalizer.format("Loaded %lld hangar log entries from RSI.", hangarLogs.count)
         } else if addedEntryCount > 0 {
-            detail = "Added \(addedEntryCount) new hangar log entr\(addedEntryCount == 1 ? "y" : "ies") from RSI. \(hangarLogs.count) cached total."
+            detail = addedEntryCount == 1
+                ? AppLocalizer.format("Added %lld new hangar log entry from RSI. %lld cached total.", addedEntryCount, hangarLogs.count)
+                : AppLocalizer.format("Added %lld new hangar log entries from RSI. %lld cached total.", addedEntryCount, hangarLogs.count)
         } else {
-            detail = "Your cached hangar log is already up to date."
+            detail = AppLocalizer.string("Your cached hangar log is already up to date.")
         }
 
         progress(
@@ -1785,7 +1797,7 @@ final class LiveHangarRepository: HangarRepository {
                 stage: .finalizing,
                 stepNumber: stepNumber,
                 stepCount: stepCount,
-                detail: "Loading hosted ship MSRP and thumbnail data for upgrade valuation.",
+                detail: AppLocalizer.string("Loading hosted ship MSRP and thumbnail data for upgrade valuation."),
                 completedUnitCount: 0,
                 totalUnitCount: 2,
                 trackerID: trackerID,
@@ -1806,8 +1818,11 @@ final class LiveHangarRepository: HangarRepository {
                 stepNumber: stepNumber,
                 stepCount: stepCount,
                 detail: shipCatalog == nil
-                    ? "Hosted ship valuation data was unavailable. Continuing with hangar media only."
-                    : "Loaded \(shipCatalog?.ships.count ?? 0) hosted ships for MSRP and image enrichment.",
+                    ? AppLocalizer.string("Hosted ship valuation data was unavailable. Continuing with hangar media only.")
+                    : AppLocalizer.format(
+                        "Loaded %lld hosted ships for MSRP and image enrichment.",
+                        shipCatalog?.ships.count ?? 0
+                    ),
                 completedUnitCount: 1,
                 totalUnitCount: 2,
                 trackerID: trackerID,
@@ -1832,7 +1847,7 @@ final class LiveHangarRepository: HangarRepository {
                 stage: .account,
                 stepNumber: stepNumber,
                 stepCount: stepCount,
-                detail: "Loading account balances and profile details.",
+                detail: AppLocalizer.string("Loading account balances and profile details."),
                 completedUnitCount: 0,
                 totalUnitCount: 3,
                 trackerID: trackerID,
@@ -1856,8 +1871,12 @@ final class LiveHangarRepository: HangarRepository {
                 stepNumber: stepNumber,
                 stepCount: stepCount,
                 detail: accountOverview == nil
-                    ? "Account balances were unavailable. Continuing with saved account metadata."
-                    : "Loaded \(accountOverview?.storeCreditUSD?.usdString ?? "an unavailable") store credit balance and \(accountOverview?.totalSpendUSD?.usdString ?? "an unavailable total spend").",
+                    ? AppLocalizer.string("Account balances were unavailable. Continuing with saved account metadata.")
+                    : AppLocalizer.format(
+                        "Loaded %@ store credit balance and %@.",
+                        accountOverview?.storeCreditUSD?.usdString ?? AppLocalizer.string("an unavailable"),
+                        accountOverview?.totalSpendUSD?.usdString ?? AppLocalizer.string("an unavailable total spend")
+                    ),
                 completedUnitCount: 1,
                 totalUnitCount: 3,
                 trackerID: trackerID,
@@ -1870,17 +1889,19 @@ final class LiveHangarRepository: HangarRepository {
         }
         let didRefreshReferralStats = refreshedReferralStats != nil
         let referralStats = refreshedReferralStats ?? .unavailable
-        let currentReferralDetail = referralStats.currentLadderCount.map { "\($0) current referrals" } ?? "unavailable current referrals"
+        let currentReferralDetail = referralStats.currentLadderCount.map {
+            AppLocalizer.format("%lld current referrals", $0)
+        } ?? AppLocalizer.string("unavailable current referrals")
         let legacyReferralDetail = referralStats.hasLegacyLadder
-            ? referralStats.legacyLadderCount.map { "\($0) legacy referrals" } ?? "unavailable legacy referrals"
-            : "no legacy referral ladder"
+            ? referralStats.legacyLadderCount.map { AppLocalizer.format("%lld legacy referrals", $0) } ?? AppLocalizer.string("unavailable legacy referrals")
+            : AppLocalizer.string("no legacy referral ladder")
 
         progress(
             makeProgress(
                 stage: .account,
                 stepNumber: stepNumber,
                 stepCount: stepCount,
-                detail: "Loaded \(currentReferralDetail) and \(legacyReferralDetail).",
+                detail: AppLocalizer.format("Loaded %@ and %@.", currentReferralDetail, legacyReferralDetail),
                 completedUnitCount: 2,
                 totalUnitCount: 3,
                 trackerID: trackerID,
@@ -1893,7 +1914,7 @@ final class LiveHangarRepository: HangarRepository {
                 stage: .account,
                 stepNumber: stepNumber,
                 stepCount: stepCount,
-                detail: "Account overview sync complete.",
+                detail: AppLocalizer.string("Account overview sync complete."),
                 completedUnitCount: 3,
                 totalUnitCount: 3,
                 trackerID: trackerID,
@@ -2103,22 +2124,25 @@ final class LiveHangarRepository: HangarRepository {
     ) -> String {
         let pageLabel: String
         if let totalPages, totalPages > 0 {
-            pageLabel = "page \(page) of \(totalPages)"
+            pageLabel = AppLocalizer.format("page %lld of %lld", page, totalPages)
         } else {
-            pageLabel = "page \(page)"
+            pageLabel = AppLocalizer.format("page %lld", page)
         }
 
-        let countLabel = loadedCount == 1 ? "1 \(itemLabel.dropLast())" : "\(loadedCount) \(itemLabel)"
+        let singularItemLabel = String(itemLabel.dropLast())
+        let countLabel = loadedCount == 1
+            ? AppLocalizer.format("1 %@", singularItemLabel)
+            : AppLocalizer.format("%lld %@", loadedCount, itemLabel)
 
         if isLoading {
             if loadedCount > 0 {
-                return "Loading \(pageLabel). \(countLabel) already synced."
+                return AppLocalizer.format("Loading %@. %@ already synced.", pageLabel, countLabel)
             }
 
-            return "Loading \(pageLabel)."
+            return AppLocalizer.format("Loading %@.", pageLabel)
         }
 
-        return "Finished \(pageLabel). \(countLabel) synced so far."
+        return AppLocalizer.format("Finished %@. %@ synced so far.", pageLabel, countLabel)
     }
 
     private func parallelPageDetail(
@@ -2128,8 +2152,17 @@ final class LiveHangarRepository: HangarRepository {
         loadedCount: Int,
         workerCount: Int
     ) -> String {
-        let countLabel = loadedCount == 1 ? "1 \(itemLabel.dropLast())" : "\(loadedCount) \(itemLabel)"
-        return "Loaded \(completedPages) of \(totalPages) pages across \(workerCount) workers. \(countLabel) synced so far."
+        let singularItemLabel = String(itemLabel.dropLast())
+        let countLabel = loadedCount == 1
+            ? AppLocalizer.format("1 %@", singularItemLabel)
+            : AppLocalizer.format("%lld %@", loadedCount, itemLabel)
+        return AppLocalizer.format(
+            "Loaded %lld of %lld pages across %lld workers. %@ synced so far.",
+            completedPages,
+            totalPages,
+            workerCount,
+            countLabel
+        )
     }
 
     private func normalize(package remote: RemotePledge, shipCatalog: RSIShipCatalog?) -> HangarPackage {
@@ -2180,13 +2213,16 @@ final class LiveHangarRepository: HangarRepository {
         shipCatalog: RSIShipCatalog?,
         packageThumbnailURL: URL?
     ) -> [PackageItem] {
+        let renderableRemoteItems = remote.items.filter {
+            HangarPledgeSummaryParser.shouldRenderContentTitle($0.title)
+        }
         let upgradeMeltValueUSD = inferredUpgradeMeltValue(
-            package: remote,
+            items: renderableRemoteItems,
             packageValueUSD: packageValueUSD
         )
-        let shouldUsePackageThumbnailFallback = remote.items.count <= 1
+        let shouldUsePackageThumbnailFallback = renderableRemoteItems.count <= 1
 
-        let liveItems = remote.items.enumerated().map { offset, item in
+        let liveItems = renderableRemoteItems.enumerated().map { offset, item in
             let itemCategory = category(for: item.kind, title: item.title, detail: item.detail)
             let upgradePath = itemCategory == .upgrade ? UpgradeTitleParser.parse(item.title) : nil
             let sourceShip = upgradePath.flatMap { shipCatalog?.matchShip(named: $0.sourceShipName) }
@@ -2214,8 +2250,29 @@ final class LiveHangarRepository: HangarRepository {
             )
         }
 
+        let supplementalTitles = HangarPledgeSummaryParser.supplementalTitles(
+            from: containsSummary,
+            alsoContains: remote.alsoContains,
+            excluding: [remote.title, normalizePackageTitle(remote.title)] + liveItems.map(\.title)
+        )
+        let supplementalItems = supplementalTitles.enumerated().map { offset, title in
+            let detail = supplementalDetail(for: title)
+            return PackageItem(
+                id: "\(remote.id ?? stableNumericID(from: remote.title))-\(liveItems.count + offset)",
+                title: title,
+                detail: detail,
+                category: category(for: "", title: title, detail: detail),
+                imageURL: liveItems.isEmpty && offset == 0 ? packageThumbnailURL : nil,
+                upgradePricing: nil
+            )
+        }
+
         if !liveItems.isEmpty {
-            return liveItems
+            return liveItems + supplementalItems
+        }
+
+        if !supplementalItems.isEmpty {
+            return supplementalItems
         }
 
         guard !containsSummary.isEmpty else {
@@ -2232,6 +2289,20 @@ final class LiveHangarRepository: HangarRepository {
                 upgradePricing: nil
             )
         ]
+    }
+
+    private func supplementalDetail(for title: String) -> String {
+        let lowercasedTitle = title.localizedLowercase
+
+        if lowercasedTitle.contains("hangar") {
+            return "Hangar entitlement"
+        }
+
+        if lowercasedTitle.contains("insurance") || lowercasedTitle.contains("lti") {
+            return "Insurance"
+        }
+
+        return "RSI pledge entitlement"
     }
 
     private func itemImageURL(
@@ -2328,12 +2399,12 @@ final class LiveHangarRepository: HangarRepository {
         return fallbackValueUSD
     }
 
-    private func inferredUpgradeMeltValue(package remote: RemotePledge, packageValueUSD: Decimal) -> Decimal? {
+    private func inferredUpgradeMeltValue(items: [RemotePledgeItem], packageValueUSD: Decimal) -> Decimal? {
         guard packageValueUSD > 0 else {
             return nil
         }
 
-        let upgradeItems = remote.items.filter {
+        let upgradeItems = items.filter {
             category(for: $0.kind, title: $0.title, detail: $0.detail) == .upgrade
         }
 
@@ -2341,7 +2412,7 @@ final class LiveHangarRepository: HangarRepository {
             return nil
         }
 
-        let nonUpgradeCategories = remote.items
+        let nonUpgradeCategories = items
             .map { category(for: $0.kind, title: $0.title, detail: $0.detail) }
             .filter { $0 != .upgrade && $0 != .perk && $0 != .flair }
 
@@ -2585,6 +2656,10 @@ enum FleetProjector {
     static func project(packages: [HangarPackage], shipCatalog: RSIShipCatalog?) -> [FleetShip] {
         packages.flatMap { package in
             let fleetEntries = package.contents.compactMap { item -> (PackageItem, RSIShipCatalog.Ship?)? in
+                guard HangarPledgeSummaryParser.shouldRenderContentTitle(item.title) else {
+                    return nil
+                }
+
                 guard item.category == .ship || item.category == .vehicle else {
                     return nil
                 }
@@ -2611,6 +2686,7 @@ enum FleetProjector {
                     id: package.id * 100 + offset,
                     displayName: item.title,
                     manufacturer: manufacturer(for: item, matchedShip: matchedShip),
+                    manufacturerLogoURL: matchedShip?.manufacturerLogoURL,
                     role: role(for: item, matchedShip: matchedShip),
                     roleCategories: roleCategories(for: item, matchedShip: matchedShip),
                     msrpUSD: hostedMSRP(for: item, matchedShip: matchedShip),
@@ -3684,6 +3760,9 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       return "";
     };
 
+    const cleanContentTitle = (value) =>
+      normalizeText(value).replace(/\\s+(?:and\\s+)?\\d+\\s+(?:items?|ships?|vehicles?)$/i, '').trim();
+
     const normalizeUpgradeMatchItems = (items) =>
       Array.isArray(items)
         ? items
@@ -3818,11 +3897,46 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         const packageThumbnailNode =
           row.querySelector('.image-col, .image, .thumb, .thumbnail, picture, img') || row;
         const rawStatusValue = firstValue(row, ['.js-pledge-status']);
-        const items = Array.from(row.querySelectorAll('.with-images .item')).map((item) => ({
-          title: firstText(item, ['.title']),
-          kind: firstText(item, ['.kind']),
+        const contentItemNodes = (() => {
+          const selectors = [
+            '.with-images .item',
+            '.without-images .item',
+            '.items-col .item',
+            '.contains .item'
+          ];
+          const seen = new Set();
+          const nodes = [];
+
+          for (const selector of selectors) {
+            for (const item of Array.from(row.querySelectorAll(selector))) {
+              if (seen.has(item)) {
+                continue;
+              }
+
+              seen.add(item);
+              nodes.push(item);
+            }
+          }
+
+          return nodes.filter((item) => {
+            const title = cleanContentTitle(firstText(item, ['.title', '.name', 'h1', 'h2', 'h3']));
+            const normalizedTitle = normalizeText(title).toLowerCase();
+            if (!normalizedTitle) {
+              return false;
+            }
+
+            if (/^(?:and\\s+)?\\d+\\s+(?:items?|ships?|vehicles?)$/.test(normalizedTitle) || normalizedTitle === 'standard upgrade' || normalizedTitle === 'and') {
+              return false;
+            }
+
+            return true;
+          });
+        })();
+        const items = contentItemNodes.map((item) => ({
+          title: cleanContentTitle(firstText(item, ['.title', '.name', 'h1', 'h2', 'h3'])),
+          kind: firstText(item, ['.kind', '.type', '.category']),
           detail: firstText(item, ['.liner', '.subtitle']),
-          imageURL: firstImageURL(item)
+          imageURL: firstImageURL(item.querySelector('.image, .thumb, .thumbnail, picture, img, [style*="background-image"]') || item)
         }));
 
         return {
@@ -5979,6 +6093,138 @@ private struct AccountOverview {
     let didRefreshPrimaryOrganization: Bool
 }
 
+nonisolated enum HangarPledgeSummaryParser {
+    static func supplementalTitles(
+        from containsSummary: String,
+        alsoContains: [String],
+        excluding excludedTitles: [String]
+    ) -> [String] {
+        var seenKeys = Set(excludedTitles.map(normalizedKey).filter { !$0.isEmpty })
+        var titles: [String] = []
+
+        for candidate in visibleCandidates(from: alsoContains) + residualCandidates(from: containsSummary, excluding: excludedTitles) {
+            let title = cleanedTitle(candidate)
+            let key = normalizedKey(title)
+
+            guard !key.isEmpty, !seenKeys.contains(key), shouldRenderContentTitle(title) else {
+                continue
+            }
+
+            seenKeys.insert(key)
+            titles.append(title)
+        }
+
+        return titles
+    }
+
+    static func shouldRenderContentTitle(_ title: String) -> Bool {
+        !shouldSkip(title)
+    }
+
+    private static func visibleCandidates(from titles: [String]) -> [String] {
+        titles.flatMap { splitCandidates(from: $0) }
+    }
+
+    private static func residualCandidates(from containsSummary: String, excluding excludedTitles: [String]) -> [String] {
+        var residual = normalizedWhitespace(containsSummary)
+
+        for title in excludedTitles
+            .map(cleanedTitle)
+            .filter({ !$0.isEmpty })
+            .sorted(by: { $0.count > $1.count }) {
+            residual = residual.replacingOccurrences(
+                of: title,
+                with: "\n",
+                options: [.caseInsensitive, .diacriticInsensitive]
+            )
+        }
+
+        return splitCandidates(from: residual)
+    }
+
+    private static func splitCandidates(from value: String) -> [String] {
+        normalizedWhitespace(value)
+            .replacingOccurrences(of: "#", with: "\n")
+            .replacingOccurrences(of: "•", with: "\n")
+            .replacingOccurrences(of: "|", with: "\n")
+            .replacingOccurrences(of: ";", with: "\n")
+            .components(separatedBy: .newlines)
+    }
+
+    private static func cleanedTitle(_ value: String) -> String {
+        var title = normalizedWhitespace(value)
+
+        for prefix in ["also contains:", "contains:", "included:", "includes:"] {
+            if let range = title.range(of: prefix, options: [.caseInsensitive, .anchored]) {
+                title = String(title[range.upperBound...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        for prefix in ["also contains ", "contains ", "included ", "includes "] {
+            if let range = title.range(of: prefix, options: [.caseInsensitive, .anchored]) {
+                title = String(title[range.upperBound...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        title = title.replacingOccurrences(
+            of: #"\s+(?:and\s+)?\d+\s+(?:items?|ships?|vehicles?)$"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return title
+    }
+
+    private static func shouldSkip(_ title: String) -> Bool {
+        let key = normalizedKey(title)
+        let labels: Set<String> = [
+            "contains",
+            "contents",
+            "also contains",
+            "included",
+            "includes",
+            "and",
+            "standard upgrade"
+        ]
+
+        if labels.contains(key) {
+            return true
+        }
+
+        return key.range(
+            of: #"^(?:and )?\d+ (?:items?|ships?|vehicles?)$"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func normalizedWhitespace(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\u{00a0}", with: " ")
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+            .map { line in
+                line
+                    .split(whereSeparator: { $0.isWhitespace })
+                    .joined(separator: " ")
+            }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func normalizedKey(_ value: String) -> String {
+        cleanedTitle(value)
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+}
+
 private nonisolated struct RemotePledgePage: Decodable {
     let accessDenied: Bool
     let title: String
@@ -6024,7 +6270,8 @@ private nonisolated struct RemotePledge: Decodable {
             canGift ? "gift" : "locked",
             canReclaim ? "reclaim" : "keep",
             canUpgrade ? "upgrade" : "fixed",
-            upgradeMetadata == nil ? "no-owned-upgrade" : "owned-upgrade"
+            upgradeMetadata == nil ? "no-owned-upgrade" : "owned-upgrade",
+            items.map(\.pageSignature).joined(separator: ",")
         ].joined(separator: "•")
     }
 
@@ -6079,6 +6326,15 @@ private nonisolated struct RemotePledgeItem: Decodable {
     let kind: String
     let detail: String
     let imageURL: String?
+
+    var pageSignature: String {
+        [
+            title,
+            kind,
+            detail,
+            imageURL ?? ""
+        ].joined(separator: "~")
+    }
 }
 
 private nonisolated struct RemoteShipCatalogPayload: Decodable {

@@ -52,6 +52,8 @@ actor RSIAuthService: AuthenticationServicing {
     }
     """
 
+    nonisolated private static let browserChallengeMessage = "RSI needs browser verification for this sign-in. Continue in the in-app browser, finish the verification, then tap Finished Login."
+
     private let webSession: any AuthenticationWebSessionProviding
     private let diagnostics: AuthenticationDiagnosticsStore
     private let accountFetcher: @Sendable ([SessionCookie]) async throws -> AuthenticatedAccount
@@ -108,12 +110,12 @@ actor RSIAuthService: AuthenticationServicing {
                 summary: "Force Browser Login is enabled. Starting the separate in-app browser sign-in flow."
             )
             return .requiresBrowserChallenge(
-                "Forced browser login is enabled. Continue in the in-app browser to finish signing in."
+                Self.browserChallengeMessage
             )
         }
 
-        // The browserless path stays on the original GraphQL flow from v0.4 and does not
-        // switch into the in-app browser flow automatically.
+        // Try the lightweight hidden reCAPTCHA path first, then fall back to the
+        // browser challenge sheet only when RSI requires interactive verification.
         do {
             try await webSession.resetAuthenticationSession()
             await log(
@@ -197,14 +199,15 @@ actor RSIAuthService: AuthenticationServicing {
             throw AuthenticationError.signInFailed(message)
         } catch {
             if shouldSuggestBrowserLogin(for: error) {
-                let message = "RSI requested an interactive browser challenge for this sign-in. Turn on Force Browser Login in Advanced and try again."
+                pendingCredentials = nil
+                pendingBrowserCredentials = credentials
                 await log(
                     stage: "auth.graphql-sign-in",
-                    summary: "The browserless sign-in path hit a captcha or challenge that needs the separate browser flow.",
+                    summary: "The browserless sign-in path hit a captcha or challenge, so Hangar Express is opening the in-app browser sign-in flow automatically.",
                     detail: AuthenticationDebugFormatter.debugDescription(for: error),
                     level: .warning
                 )
-                throw AuthenticationError.signInFailed(message)
+                throw AuthenticationError.requiresBrowserChallenge(Self.browserChallengeMessage)
             }
 
             await log(
@@ -238,67 +241,83 @@ actor RSIAuthService: AuthenticationServicing {
             throw AuthenticationError.pendingVerificationExpired
         }
 
-        await log(
-            stage: "auth.two-factor",
-            summary: "Submitting the RSI verification code through the browserless GraphQL flow.",
-            detail: "deviceName=\(trimmedDeviceName), trustDuration=\(trustDuration.rawValue)"
-        )
-
-        let twoFactorResponse = try await webSession.submitTwoFactor(
-            code: trimmedCode,
-            deviceName: trimmedDeviceName,
-            trustDuration: trustDuration,
-            query: Self.twoFactorMutation
-        )
-        let response = try decodeGraphQL(twoFactorResponse, context: "multistep")
-
-        if let account = response.authenticatedAccount(for: "account_multistep") {
+        do {
             await log(
                 stage: "auth.two-factor",
-                summary: "The GraphQL verification mutation returned an authenticated account."
+                summary: "Submitting the RSI verification code through the browserless GraphQL flow.",
+                detail: "deviceName=\(trimmedDeviceName), trustDuration=\(trustDuration.rawValue)"
             )
-            let session = makeSession(
-                from: account,
-                credentials: pendingCredentials,
-                cookies: try await webSession.currentRSICookies()
+
+            let twoFactorResponse = try await webSession.submitTwoFactor(
+                code: trimmedCode,
+                deviceName: trimmedDeviceName,
+                trustDuration: trustDuration,
+                query: Self.twoFactorMutation
             )
-            self.pendingCredentials = nil
-            return session
-        }
+            let response = try decodeGraphQL(twoFactorResponse, context: "multistep")
 
-        let errors = response.errors ?? []
+            if let account = response.authenticatedAccount(for: "account_multistep") {
+                await log(
+                    stage: "auth.two-factor",
+                    summary: "The GraphQL verification mutation returned an authenticated account."
+                )
+                let session = makeSession(
+                    from: account,
+                    credentials: pendingCredentials,
+                    cookies: try await webSession.currentRSICookies()
+                )
+                self.pendingCredentials = nil
+                return session
+            }
 
-        if errors.contains(where: \.hasExpiredCSRFContext) {
-            self.pendingCredentials = nil
-            try? await webSession.resetAuthenticationSession()
+            let errors = response.errors ?? []
+
+            if errors.contains(where: \.hasExpiredCSRFContext) {
+                self.pendingCredentials = nil
+                try? await webSession.resetAuthenticationSession()
+                await log(
+                    stage: "auth.two-factor",
+                    summary: "The verification step expired because the RSI CSRF context was no longer valid.",
+                    level: .warning
+                )
+                throw AuthenticationError.pendingVerificationExpired
+            }
+
+            if errors.isEmpty {
+                throw makeDecodeError(
+                    response: twoFactorResponse,
+                    context: "multistep",
+                    reason: "RSI returned a verification response the app could not understand yet."
+                )
+            }
+
+            let message = presentableMessage(
+                for: errors,
+                context: .twoFactor,
+                fallback: "The verification code could not be accepted. Try again."
+            )
             await log(
                 stage: "auth.two-factor",
-                summary: "The verification step expired because the RSI CSRF context was no longer valid.",
+                summary: "The verification code was rejected.",
+                detail: message,
                 level: .warning
             )
-            throw AuthenticationError.pendingVerificationExpired
-        }
+            throw AuthenticationError.signInFailed(message)
+        } catch {
+            if shouldSuggestBrowserLogin(for: error) {
+                pendingBrowserCredentials = pendingCredentials
+                self.pendingCredentials = nil
+                await log(
+                    stage: "auth.two-factor",
+                    summary: "The browserless verification-code path hit a captcha or challenge, so Hangar Express is opening the in-app browser sign-in flow automatically.",
+                    detail: AuthenticationDebugFormatter.debugDescription(for: error),
+                    level: .warning
+                )
+                throw AuthenticationError.requiresBrowserChallenge(Self.browserChallengeMessage)
+            }
 
-        if errors.isEmpty {
-            throw makeDecodeError(
-                response: twoFactorResponse,
-                context: "multistep",
-                reason: "RSI returned a verification response the app could not understand yet."
-            )
+            throw error
         }
-
-        let message = presentableMessage(
-            for: errors,
-            context: .twoFactor,
-            fallback: "The verification code could not be accepted. Try again."
-        )
-        await log(
-            stage: "auth.two-factor",
-            summary: "The verification code was rejected.",
-            detail: message,
-            level: .warning
-        )
-        throw AuthenticationError.signInFailed(message)
     }
 
     func completeBrowserAuthentication(cookies: [SessionCookie], trustBrowserSession: Bool) async throws -> UserSession {
@@ -569,6 +588,9 @@ actor RSIAuthService: AuthenticationServicing {
             || searchSpace.contains("recaptcha")
             || searchSpace.contains("grecaptcha")
             || searchSpace.contains("verification helper")
+            || searchSpace.contains("browser verification")
+            || searchSpace.contains("human verification")
+            || searchSpace.contains("manual verification")
             || searchSpace.contains("csrf token")
     }
 
@@ -641,7 +663,7 @@ actor RSIAuthService: AuthenticationServicing {
         }
 
         if normalized.contains("captcha") || normalized.contains("recaptcha") {
-            return "RSI requested an additional CAPTCHA challenge. Turn on Force Browser Login in Advanced and try again."
+            return Self.browserChallengeMessage
         }
 
         if normalized.contains("csrf") {

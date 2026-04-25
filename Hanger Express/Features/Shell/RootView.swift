@@ -75,7 +75,7 @@ struct RootView: View {
             stage: .preparingSession,
             stepNumber: 1,
             stepCount: 4,
-            detail: "Starting the hangar refresh.",
+            detail: AppLocalizer.string("Starting the hangar refresh."),
             completedUnitCount: 0,
             totalUnitCount: nil
         )

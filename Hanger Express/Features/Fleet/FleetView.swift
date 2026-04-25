@@ -9,7 +9,7 @@ struct FleetView: View {
         var id: Self { self }
 
         var title: String {
-            rawValue
+            AppLocalizer.string(rawValue)
         }
     }
 
@@ -29,9 +29,9 @@ struct FleetView: View {
         var accessibilityLabel: String {
             switch self {
             case .singleColumn:
-                return "Switch to two-column cards"
+                return AppLocalizer.string("Switch to two-column cards")
             case .twoColumn:
-                return "Switch to one-column cards"
+                return AppLocalizer.string("Switch to one-column cards")
             }
         }
 
@@ -52,6 +52,7 @@ struct FleetView: View {
     @State private var selectedShipGroup: GroupedFleetShip?
     @State private var presentedPledgeSheet: FleetShipPledgeSheetContext?
     @Namespace private var shipCardTransitionNamespace
+    @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage("fleetDisplayMode") private var displayModeRawValue = DisplayMode.singleColumn.rawValue
 
     private var displayMode: DisplayMode {
@@ -72,7 +73,7 @@ struct FleetView: View {
                             if let title = section.title {
                                 Text(title)
                                     .font(.headline.weight(.semibold))
-                                    .foregroundStyle(Color.white.opacity(0.72))
+                                    .foregroundStyle(.secondary)
                                     .padding(.horizontal, 4)
                             }
 
@@ -84,6 +85,7 @@ struct FleetView: View {
                 .padding(.top, 4)
                 .padding(.bottom, 22)
             }
+            .id(appLanguageRawValue)
             .searchable(
                 text: $searchText,
                 prompt: "Search ships, manufacturers, functions"
@@ -108,10 +110,12 @@ struct FleetView: View {
                         Text("Sort")
                     }
 
-                    Button(appModel.isRefreshing(.hangar) ? "Refreshing..." : "Refresh") {
+                    Button {
                         Task {
                             await appModel.refresh(scope: .hangar)
                         }
+                    } label: {
+                        Text(appModel.isRefreshing(.hangar) ? LocalizedStringKey("Refreshing...") : LocalizedStringKey("Refresh"))
                     }
                     .disabled(appModel.isRefreshing)
                 }
@@ -217,7 +221,7 @@ struct FleetView: View {
         case .manufacturer:
             return groupedSections(for: sortedShipGroups) { shipGroup in
                 normalizedHeaderTitle(FleetPresentationFormatter.manufacturerDisplayName(shipGroup.representative.manufacturer))
-                    ?? "Unknown Manufacturer"
+                    ?? AppLocalizer.string("Unknown Manufacturer")
             }
         case .function:
             return functionSections(from: filteredShipGroups)
@@ -320,7 +324,7 @@ struct FleetView: View {
                 : shipGroup.representative.roleCategories
 
             for category in categories {
-                let title = normalizedHeaderTitle(category) ?? "Other Ships"
+                let title = normalizedHeaderTitle(category) ?? AppLocalizer.string("Other Ships")
                 if groupedShipGroups[title] == nil {
                     orderedTitles.append(title)
                 }
@@ -381,17 +385,17 @@ struct FleetView: View {
     private func msrpSummary(for shipGroup: GroupedFleetShip) -> String {
         if let msrpUSD = shipGroup.representative.msrpUSD {
             if shipGroup.quantity > 1 {
-                return "MSRP \(msrpUSD.usdString) each"
+                return AppLocalizer.format("MSRP %@ each", msrpUSD.usdString)
             }
 
-            return "MSRP \(msrpUSD.usdString)"
+            return AppLocalizer.format("MSRP %@", msrpUSD.usdString)
         }
 
         if let msrpLabel = shipGroup.representative.msrpLabel?.nilIfBlank {
             return msrpLabel
         }
 
-        return "MSRP unavailable"
+        return AppLocalizer.string("MSRP unavailable")
     }
 }
 
@@ -446,11 +450,66 @@ private struct FleetShipPledgeSheet: View {
 
     private var headerTitle: String {
         if context.packageGroups.count == 1 {
-            return "1 pledge includes this ship"
+            return AppLocalizer.string("1 pledge includes this ship")
         }
 
-        return "\(context.packageGroups.count) pledges include this ship"
+        return AppLocalizer.format("%lld pledges include this ship", context.packageGroups.count)
     }
+}
+
+private struct FleetManufacturerLogo: View {
+    let manufacturerName: String
+    let logoURL: URL?
+    let reloadToken: UUID?
+    let maxHeight: CGFloat
+    let maxWidth: CGFloat
+
+    private var adjustedMaxWidth: CGFloat {
+        maxWidth * FleetManufacturerLogoSizing.widthMultiplier(for: manufacturerName)
+    }
+
+    var body: some View {
+        if let logoURL {
+            CachedRemoteImage(
+                url: logoURL,
+                targetSize: CGSize(width: maxHeight * 6, height: maxHeight * 3),
+                reloadToken: reloadToken,
+                maxRetryCount: 5,
+                trimsTransparentPadding: true
+            ) { phase in
+                switch phase {
+                case let .success(image):
+                    image
+                        .resizable()
+                        .scaledToFit()
+                        .frame(
+                            maxWidth: adjustedMaxWidth,
+                            maxHeight: maxHeight,
+                            alignment: .trailing
+                        )
+                        .shadow(color: .black.opacity(0.28), radius: 10, x: 0, y: 2)
+                        .compositingGroup()
+                case .empty:
+                    ProgressView()
+                        .tint(.white.opacity(0.9))
+                        .frame(width: maxHeight, height: maxHeight)
+                case .failure:
+                    Image(systemName: "photo.badge.exclamationmark")
+                        .font(.system(size: min(maxHeight * 0.5, 28), weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.88))
+                        .frame(width: maxHeight, height: maxHeight)
+                }
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        } else {
+            Image(systemName: "questionmark.square.dashed")
+                .font(.system(size: min(maxHeight * 0.5, 28), weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.8))
+                .frame(width: maxHeight, height: maxHeight)
+        }
+    }
+
 }
 
 private struct FleetShipHeroCard: View {
@@ -465,130 +524,91 @@ private struct FleetShipHeroCard: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.10, green: 0.12, blue: 0.17),
-                            Color(red: 0.08, green: 0.19, blue: 0.27),
-                            Color(red: 0.05, green: 0.28, blue: 0.32)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .overlay(alignment: .topTrailing) {
-                    Circle()
-                        .fill(Color.cyan.opacity(0.12))
-                        .frame(width: 180, height: 180)
-                        .blur(radius: 10)
-                        .offset(x: 48, y: -28)
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .stroke(Color.cyan.opacity(0.18), lineWidth: 1)
-                }
+        GeometryReader { proxy in
+            ZStack(alignment: .topLeading) {
+                heroCardBase(size: proxy.size)
 
-            backdropImage
+                VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(ship.displayName)
+                                .font(.title3.weight(.heavy))
+                                .foregroundStyle(.white)
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.8)
+                                .shadow(color: .black.opacity(0.25), radius: 10, x: 0, y: 1)
 
-            LinearGradient(
-                colors: [
-                    Color.black.opacity(0.72),
-                    Color.black.opacity(0.48),
-                    Color.black.opacity(0.08)
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                            if ship.catalogWarning != nil {
+                                Button {
+                                    showsCatalogWarning = true
+                                } label: {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .font(.caption.weight(.bold))
+                                        .foregroundStyle(Color.orange.opacity(0.96))
+                                        .padding(7)
+                                        .background(
+                                            Circle()
+                                                .fill(Color.black.opacity(0.28))
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Ship info incomplete")
+                            }
 
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(FleetPresentationFormatter.manufacturerDisplayName(ship.manufacturer).uppercased())
-                        .font(.caption2.weight(.semibold))
-                        .tracking(3)
-                        .foregroundStyle(Color.cyan.opacity(0.92))
-                        .lineLimit(1)
-                        .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 1)
-
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text(ship.displayName)
-                            .font(.title3.weight(.heavy))
-                            .foregroundStyle(.white)
-                            .lineLimit(2)
-                            .minimumScaleFactor(0.8)
-                            .shadow(color: .black.opacity(0.25), radius: 10, x: 0, y: 1)
-
-                        if ship.catalogWarning != nil {
-                            Button {
-                                showsCatalogWarning = true
-                            } label: {
-                                Image(systemName: "exclamationmark.triangle.fill")
+                            if shipGroup.quantity > 1 {
+                                Text("x\(shipGroup.quantity)")
                                     .font(.caption.weight(.bold))
-                                    .foregroundStyle(Color.orange.opacity(0.96))
-                                    .padding(7)
+                                    .foregroundStyle(Color.white)
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 5)
                                     .background(
-                                        Circle()
-                                            .fill(Color.black.opacity(0.28))
+                                        Capsule(style: .continuous)
+                                            .fill(Color.cyan.opacity(0.28))
                                     )
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Ship info incomplete")
                         }
 
-                        if shipGroup.quantity > 1 {
-                            Text("x\(shipGroup.quantity)")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(Color.white)
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 5)
-                                .background(
-                                    Capsule(style: .continuous)
-                                        .fill(Color.cyan.opacity(0.28))
-                                )
+                        if let subtitle, !subtitle.isEmpty {
+                            Text(subtitle)
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(Color.white.opacity(0.8))
+                                .lineLimit(1)
+                                .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 1)
                         }
                     }
+                    .padding(.trailing, 152)
 
-                    if let subtitle, !subtitle.isEmpty {
-                        Text(subtitle)
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(Color.white.opacity(0.8))
-                            .lineLimit(1)
-                            .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 1)
-                    }
-                }
+                    Spacer(minLength: 14)
 
-                Spacer(minLength: 14)
-
-                HStack(alignment: .bottom, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(shipGroup.sourcePackageSummary)
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(Color.white.opacity(0.92))
-                            .lineLimit(2)
-
-                        Text(msrpSummary)
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(Color.white.opacity(0.74))
-
-                        if let warning = ship.catalogWarning {
-                            Label(warning, systemImage: "exclamationmark.triangle.fill")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(Color.orange.opacity(0.95))
+                    HStack(alignment: .bottom, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(shipGroup.sourcePackageSummary)
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(Color.white.opacity(0.92))
                                 .lineLimit(2)
+
+                            Text(msrpSummary)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(Color.white.opacity(0.74))
+
+                            if let warning = ship.catalogWarning {
+                                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(Color.orange.opacity(0.95))
+                                    .lineLimit(2)
+                            }
                         }
+
+                        Spacer(minLength: 0)
+
+                        fleetBadge(ship.insurance, tint: Color.cyan.opacity(0.18))
                     }
-
-                    Spacer(minLength: 0)
-
-                    fleetBadge(ship.insurance, tint: Color.cyan.opacity(0.18))
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.horizontal, 22)
+                .padding(.top, 18)
+                .padding(.bottom, 18)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(.horizontal, 22)
-            .padding(.top, 18)
-            .padding(.bottom, 18)
         }
         .frame(maxWidth: .infinity)
         .frame(height: 212, alignment: .bottomLeading)
@@ -596,81 +616,35 @@ private struct FleetShipHeroCard: View {
         .alert("Ship Info Incomplete", isPresented: $showsCatalogWarning) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(ship.catalogWarning ?? "Ship info incomplete. Please send the dev a screenshot so it can be patched.")
+            Text(ship.catalogWarning ?? AppLocalizer.string("Ship info incomplete. Please send the dev a screenshot so it can be patched."))
         }
     }
 
-    private var backdropImage: some View {
-        GeometryReader { proxy in
-            ZStack {
-                backdropPlaceholder
+    private func heroCardBase(size: CGSize) -> some View {
+        let recipe = FleetCardBaseSnapshotRecipe(
+            style: .hero,
+            pointSize: size,
+            manufacturerName: ship.manufacturer,
+            backdropURL: ship.imageURL,
+            logoURL: ship.manufacturerLogoURL
+        )
 
-                CachedRemoteImage(
-                    url: ship.imageURL,
-                    targetSize: proxy.size,
-                    reloadToken: reloadToken,
-                    maxRetryCount: 5
-                ) { phase in
-                    switch phase {
-                    case let .success(image):
-                        standardizedBackdropImage(
-                            image,
-                            size: proxy.size
-                        )
-                    case .empty:
-                        Color.clear
-                            .frame(width: proxy.size.width, height: proxy.size.height)
-                            .overlay {
-                                ProgressView()
-                                    .tint(.white.opacity(0.7))
-                            }
-                    case .failure:
-                        Color.clear
-                            .frame(width: proxy.size.width, height: proxy.size.height)
-                    }
-                }
+        return CachedFleetCardBaseImage(
+            recipe: recipe,
+            reloadToken: reloadToken
+        ) { phase in
+            switch phase {
+            case let .success(image):
+                image
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: size.width, height: size.height)
+                    .clipped()
+            case .empty:
+                FleetCardBaseSnapshotPlaceholder(recipe: recipe, showsProgress: true)
+            case .failure:
+                FleetCardBaseSnapshotPlaceholder(recipe: recipe)
             }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .overlay(
-            LinearGradient(
-                colors: [
-                    Color.clear,
-                    Color.black.opacity(0.12)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
-        .mask(
-            LinearGradient(
-                colors: [
-                    Color.clear,
-                    Color.black.opacity(0.42),
-                    Color.black
-                ],
-                startPoint: .leading,
-                endPoint: UnitPoint(x: 0.78, y: 0.5)
-            )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-    }
-
-    private func standardizedBackdropImage(_ image: Image, size: CGSize) -> some View {
-        image
-            .resizable()
-            .scaledToFill()
-            .frame(width: size.width, height: size.height)
-            .clipped()
-    }
-
-    private var backdropPlaceholder: some View {
-        HStack {
-            Spacer(minLength: 0)
-            Image(systemName: "airplane")
-                .font(.system(size: 58, weight: .light))
-                .foregroundStyle(Color.white.opacity(0.16))
-                .padding(.trailing, 24)
         }
     }
 
@@ -708,114 +682,81 @@ private struct FleetShipCompactCard: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.09, green: 0.11, blue: 0.16),
-                            Color(red: 0.07, green: 0.17, blue: 0.24),
-                            Color(red: 0.05, green: 0.24, blue: 0.29)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .stroke(Color.cyan.opacity(0.16), lineWidth: 1)
-                }
+        GeometryReader { proxy in
+            ZStack(alignment: .topLeading) {
+                compactCardBase(size: proxy.size)
 
-            compactBackdropImage
+                VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(ship.displayName)
+                                .font(.headline.weight(.heavy))
+                                .foregroundStyle(.white)
+                                .lineLimit(3)
+                                .minimumScaleFactor(0.82)
 
-            LinearGradient(
-                colors: [
-                    Color.black.opacity(0.82),
-                    Color.black.opacity(0.64),
-                    Color.black.opacity(0.34)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .top, spacing: 8) {
-                    Text(FleetPresentationFormatter.manufacturerDisplayName(ship.manufacturer).uppercased())
-                        .font(.caption2.weight(.semibold))
-                        .tracking(2.5)
-                        .foregroundStyle(Color.cyan.opacity(0.92))
-                        .lineLimit(2)
-
-                    Spacer(minLength: 0)
-
-                    if ship.catalogWarning != nil {
-                        Button {
-                            showsCatalogWarning = true
-                        } label: {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(Color.orange.opacity(0.96))
+                            if ship.catalogWarning != nil {
+                                Button {
+                                    showsCatalogWarning = true
+                                } label: {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .font(.caption.weight(.bold))
+                                        .foregroundStyle(Color.orange.opacity(0.96))
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Ship info incomplete")
+                            }
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Ship info incomplete")
+
+                        if let subtitle, !subtitle.isEmpty {
+                            Text(subtitle)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(Color.white.opacity(0.82))
+                                .lineLimit(2)
+                        }
                     }
-                }
+                    .padding(.top, 10)
+                    .padding(.trailing, compactTitleTrailingPadding(forCardWidth: proxy.size.width))
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(ship.displayName)
-                        .font(.headline.weight(.heavy))
-                        .foregroundStyle(.white)
-                        .lineLimit(3)
-                        .minimumScaleFactor(0.82)
+                    Spacer(minLength: 14)
 
-                    if let subtitle, !subtitle.isEmpty {
-                        Text(subtitle)
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(Color.white.opacity(0.82))
-                            .lineLimit(2)
-                    }
-                }
-                .padding(.top, 10)
+                    VStack(alignment: .leading, spacing: 5) {
+                        if shouldShowSourcePackageSummary {
+                            Text(shipGroup.sourcePackageSummary)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(Color.white.opacity(0.9))
+                                .lineLimit(2)
+                        }
 
-                Spacer(minLength: 14)
-
-                VStack(alignment: .leading, spacing: 5) {
-                    if shouldShowSourcePackageSummary {
-                        Text(shipGroup.sourcePackageSummary)
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(Color.white.opacity(0.9))
-                            .lineLimit(2)
-                    }
-
-                    Text(msrpSummary)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Color.white.opacity(0.76))
-                        .lineLimit(1)
-
-                    if ship.catalogWarning != nil {
-                        Text("Info incomplete. Send screenshot.")
+                        Text(msrpSummary)
                             .font(.caption2.weight(.semibold))
-                            .foregroundStyle(Color.orange.opacity(0.95))
-                            .lineLimit(2)
+                            .foregroundStyle(Color.white.opacity(0.76))
+                            .lineLimit(1)
+
+                        if ship.catalogWarning != nil {
+                            Text("Info incomplete. Send screenshot.")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(Color.orange.opacity(0.95))
+                                .lineLimit(2)
+                        }
                     }
-                }
 
-                HStack(alignment: .center, spacing: 8) {
-                    if shipGroup.quantity > 1 {
-                        compactBadge("x\(shipGroup.quantity)", tint: Color.cyan.opacity(0.24))
+                    HStack(alignment: .center, spacing: 8) {
+                        if shipGroup.quantity > 1 {
+                            compactBadge("x\(shipGroup.quantity)", tint: Color.cyan.opacity(0.24))
+                        }
+
+                        Spacer(minLength: 0)
+
+                        compactBadge(ship.insurance, tint: Color.cyan.opacity(0.18))
                     }
-
-                    Spacer(minLength: 0)
-
-                    compactBadge(ship.insurance, tint: Color.cyan.opacity(0.18))
+                    .padding(.top, 12)
                 }
-                .padding(.top, 12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                .padding(.bottom, 14)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-            .padding(.bottom, 14)
         }
         .frame(maxWidth: .infinity)
         .frame(height: 232, alignment: .topLeading)
@@ -823,66 +764,40 @@ private struct FleetShipCompactCard: View {
         .alert("Ship Info Incomplete", isPresented: $showsCatalogWarning) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(ship.catalogWarning ?? "Ship info incomplete. Please send the dev a screenshot so it can be patched.")
+            Text(ship.catalogWarning ?? AppLocalizer.string("Ship info incomplete. Please send the dev a screenshot so it can be patched."))
         }
     }
 
-    private var compactBackdropImage: some View {
-        GeometryReader { proxy in
-            ZStack {
-                compactBackdropPlaceholder
+    private func compactTitleTrailingPadding(forCardWidth cardWidth: CGFloat) -> CGFloat {
+        let desiredLogoClearance: CGFloat = 56
+        let halfWidthSafePadding = max(24, (cardWidth / 2) - 32)
+        return min(desiredLogoClearance, halfWidthSafePadding)
+    }
 
-                CachedRemoteImage(
-                    url: ship.imageURL,
-                    targetSize: proxy.size,
-                    reloadToken: reloadToken,
-                    maxRetryCount: 5
-                ) { phase in
-                    switch phase {
-                    case let .success(image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: proxy.size.width, height: proxy.size.height)
-                            .clipped()
-                    case .empty:
-                        Color.clear
-                            .frame(width: proxy.size.width, height: proxy.size.height)
-                            .overlay {
-                                ProgressView()
-                                    .tint(.white.opacity(0.7))
-                            }
-                    case .failure:
-                        Color.clear
-                            .frame(width: proxy.size.width, height: proxy.size.height)
-                    }
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .overlay(
-            LinearGradient(
-                colors: [
-                    Color.clear,
-                    Color.black.opacity(0.2)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
+    private func compactCardBase(size: CGSize) -> some View {
+        let recipe = FleetCardBaseSnapshotRecipe(
+            style: .compact,
+            pointSize: size,
+            manufacturerName: ship.manufacturer,
+            backdropURL: ship.imageURL,
+            logoURL: ship.manufacturerLogoURL
         )
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-    }
 
-    private var compactBackdropPlaceholder: some View {
-        VStack {
-            Spacer(minLength: 0)
-            HStack {
-                Spacer(minLength: 0)
-                Image(systemName: "airplane")
-                    .font(.system(size: 42, weight: .light))
-                    .foregroundStyle(Color.white.opacity(0.16))
-                    .padding(.trailing, 18)
-                    .padding(.bottom, 20)
+        return CachedFleetCardBaseImage(
+            recipe: recipe,
+            reloadToken: reloadToken
+        ) { phase in
+            switch phase {
+            case let .success(image):
+                image
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: size.width, height: size.height)
+                    .clipped()
+            case .empty:
+                FleetCardBaseSnapshotPlaceholder(recipe: recipe, showsProgress: true)
+            case .failure:
+                FleetCardBaseSnapshotPlaceholder(recipe: recipe)
             }
         }
     }
@@ -913,47 +828,55 @@ private struct FleetShipDetailView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                FleetShipDetailHeroCard(
-                    shipGroup: shipGroup,
-                    detail: loadState.detail,
-                    reloadToken: reloadToken
-                )
+        GeometryReader { proxy in
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 20) {
+                    FleetShipDetailHeroCard(
+                        shipGroup: shipGroup,
+                        detail: loadState.detail,
+                        reloadToken: reloadToken
+                    )
 
-                switch loadState {
-                case .loading:
-                    FleetShipDetailLoadingCard()
+                    switch loadState {
+                    case .loading:
+                        FleetShipDetailLoadingCard()
 
-                case let .loaded(detail):
-                    FleetShipOverviewCard(detail: detail)
+                    case let .loaded(detail):
+                        FleetShipOverviewCard(detail: detail)
 
-                    FleetShipDescriptionCard(description: detail.description)
-
-                    FleetShipTechnicalSpecsCard(detail: detail)
-
-                    if let pageURL = detail.pageURL {
-                        Link(destination: pageURL) {
-                            Label("Open Source Page", systemImage: "arrow.up.right.square")
-                                .font(.subheadline.weight(.semibold))
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 14)
+                        if detail.isUnavailable {
+                            FleetShipUnavailableCard(
+                                message: detail.unavailableReason
+                                    ?? AppLocalizer.string("Ship info unavailable for this variant.")
+                            )
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Color.cyan.opacity(0.22))
+
+                        if !detail.isUnavailable || detail.description?.nilIfBlank != nil {
+                            FleetShipDescriptionCard(description: detail.description)
+                        }
+
+                        if detail.hasSpecificationData {
+                            FleetShipLoadoutCard(detail: detail)
+                        }
+
+                        FleetShipTechnicalSpecsCard(detail: detail)
+
+                        FleetShipSourceLinks(detail: detail)
+
+                    case let .unavailable(message):
+                        FleetShipUnavailableCard(message: message)
+
+                    case let .failed(message):
+                        FleetShipUnavailableCard(message: message)
                     }
-
-                case let .unavailable(message):
-                    FleetShipUnavailableCard(message: message)
-
-                case let .failed(message):
-                    FleetShipUnavailableCard(message: message)
                 }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 24)
+                .frame(width: proxy.size.width, alignment: .topLeading)
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 24)
+            .contentMargins(.top, 0, for: .scrollContent)
+            .clipped()
         }
-        .contentMargins(.top, 0, for: .scrollContent)
         .background(Color.black.ignoresSafeArea())
         .navigationTitle(ship.displayName)
         .navigationBarTitleDisplayMode(.inline)
@@ -981,21 +904,14 @@ private struct FleetShipDetailView: View {
             )
 
             guard let detail = detailCatalog.matchShip(named: ship.displayName) else {
-                loadState = .unavailable("Ship info unavailable for this variant.")
-                return
-            }
-
-            if detail.isUnavailable {
-                loadState = .unavailable(
-                    detail.unavailableReason ?? "Ship info unavailable for this variant."
-                )
+                loadState = .unavailable(AppLocalizer.string("Ship info unavailable for this variant."))
                 return
             }
 
             loadState = .loaded(detail)
         } catch {
             loadState = .failed(
-                "Unable to load ship info right now. \(error.localizedDescription)"
+                AppLocalizer.format("Unable to load ship info right now. %@", error.localizedDescription)
             )
         }
     }
@@ -1034,6 +950,14 @@ private struct FleetShipDetailHeroCard: View {
             role: ship.role,
             categories: ship.roleCategories
         )
+    }
+
+    private var manufacturerName: String {
+        detail?.manufacturer ?? ship.manufacturer
+    }
+
+    private var manufacturerLogoURL: URL? {
+        detail?.manufacturerLogoURL ?? ship.manufacturerLogoURL
     }
 
     var body: some View {
@@ -1095,19 +1019,37 @@ private struct FleetShipDetailHeroCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
 
             VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(FleetPresentationFormatter.manufacturerDisplayName(ship.manufacturer).uppercased())
-                            .font(.caption.weight(.semibold))
-                            .tracking(3)
-                            .foregroundStyle(Color.cyan.opacity(0.94))
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(detail?.name ?? ship.displayName)
+                        .font(.system(size: 34, weight: .heavy, design: .default))
+                        .foregroundStyle(.white)
+                        .lineLimit(3)
+                        .minimumScaleFactor(0.72)
+                }
+                .padding(.trailing, 176)
 
-                        Text(detail?.name ?? ship.displayName)
-                            .font(.system(size: 34, weight: .heavy, design: .default))
-                            .foregroundStyle(.white)
-                            .lineLimit(3)
-                            .minimumScaleFactor(0.72)
+                Spacer(minLength: 18)
 
+                HStack(alignment: .bottom, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if let roleSummary, !roleSummary.isEmpty {
+                            Text(roleSummary)
+                                .font(.headline.weight(.medium))
+                                .foregroundStyle(Color.white.opacity(0.84))
+                                .lineLimit(2)
+                        }
+
+                        HStack(spacing: 10) {
+                            FleetShipDetailPill(
+                                title: AppLocalizer.format("Crew %@", detail?.crewSummary ?? AppLocalizer.string("Unavailable")),
+                                tint: Color.white.opacity(0.10)
+                            )
+
+                            FleetShipDetailPill(
+                                title: detail?.size?.nilIfBlank ?? AppLocalizer.string("Size unavailable"),
+                                tint: Color.white.opacity(0.10)
+                            )
+                        }
                     }
 
                     Spacer(minLength: 0)
@@ -1119,29 +1061,6 @@ private struct FleetShipDetailHeroCard: View {
                         )
                     }
                 }
-
-                Spacer(minLength: 18)
-
-                VStack(alignment: .leading, spacing: 14) {
-                    if let roleSummary, !roleSummary.isEmpty {
-                        Text(roleSummary)
-                            .font(.headline.weight(.medium))
-                            .foregroundStyle(Color.white.opacity(0.84))
-                            .lineLimit(2)
-                    }
-
-                    HStack(spacing: 10) {
-                        FleetShipDetailPill(
-                            title: "Crew \(detail?.crewSummary ?? "Unavailable")",
-                            tint: Color.white.opacity(0.10)
-                        )
-
-                        FleetShipDetailPill(
-                            title: detail?.size?.nilIfBlank ?? "Size unavailable",
-                            tint: Color.white.opacity(0.10)
-                        )
-                    }
-                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(.horizontal, 22)
@@ -1150,6 +1069,19 @@ private struct FleetShipDetailHeroCard: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: 300)
+        .overlay(alignment: .topTrailing) {
+            FleetManufacturerLogo(
+                manufacturerName: manufacturerName,
+                logoURL: manufacturerLogoURL,
+                reloadToken: reloadToken,
+                maxHeight: 66,
+                maxWidth: 98
+            )
+            .padding(.top, 16)
+            .padding(.trailing, 18)
+            .zIndex(10)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
     }
 
     private func detailBackdropImage(_ image: Image, size: CGSize) -> some View {
@@ -1165,16 +1097,16 @@ private struct FleetShipOverviewCard: View {
     let detail: RSIShipDetailCatalog.ShipDetail
 
     var body: some View {
-        FleetShipDetailPanel(title: "SHIP OVERVIEW", subtitle: "Variant-specific ship profile") {
+        FleetShipDetailPanel(title: "SHIP OVERVIEW", subtitle: nil) {
             VStack(spacing: 0) {
-                FleetShipOverviewRow(label: "Role", value: detail.role?.nilIfBlank ?? "Unavailable")
-                FleetShipOverviewRow(label: "Function", value: detail.career?.nilIfBlank ?? "Unavailable")
-                FleetShipOverviewRow(label: "Max Crew", value: detail.maxCrew.map(String.init) ?? detail.crewSummary ?? "Unavailable")
-                FleetShipOverviewRow(label: "Size", value: detail.size?.nilIfBlank ?? "Unavailable")
-                FleetShipOverviewRow(label: "In Game Status", value: detail.inGameStatus?.nilIfBlank ?? "Unavailable")
+                FleetShipOverviewRow(label: "Role", value: detail.role?.nilIfBlank ?? AppLocalizer.string("Unavailable"))
+                FleetShipOverviewRow(label: "Function", value: detail.career?.nilIfBlank ?? AppLocalizer.string("Unavailable"))
+                FleetShipOverviewRow(label: "Max Crew", value: detail.maxCrew.map(String.init) ?? detail.crewSummary ?? AppLocalizer.string("Unavailable"))
+                FleetShipOverviewRow(label: "Size", value: detail.size?.nilIfBlank ?? AppLocalizer.string("Unavailable"))
+                FleetShipOverviewRow(label: "In Game Status", value: detail.inGameStatus?.nilIfBlank ?? AppLocalizer.string("Unavailable"))
                 FleetShipOverviewRow(
                     label: "Pledge Availability",
-                    value: detail.pledgeAvailability?.nilIfBlank ?? "Unavailable",
+                    value: detail.pledgeAvailability?.nilIfBlank ?? AppLocalizer.string("Unavailable"),
                     showsDivider: false
                 )
             }
@@ -1186,14 +1118,246 @@ private struct FleetShipDescriptionCard: View {
     let description: String?
 
     var body: some View {
-        FleetShipDetailPanel(title: "DESCRIPTION", subtitle: "Directly sourced from the ship page") {
-            Text(description?.nilIfBlank ?? "Description unavailable.")
+        FleetShipDetailPanel(title: "DESCRIPTION", subtitle: nil) {
+            Text(description?.nilIfBlank ?? AppLocalizer.string("Description unavailable."))
                 .font(.body)
                 .foregroundStyle(Color.white.opacity(0.88))
                 .fixedSize(horizontal: false, vertical: true)
                 .lineSpacing(4)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+private struct FleetShipLoadoutCard: View {
+    let detail: RSIShipDetailCatalog.ShipDetail
+
+    var body: some View {
+        FleetShipDetailPanel(
+            title: "LOADOUT",
+            subtitle: "Powered by SPViewer."
+        ) {
+            VStack(alignment: .leading, spacing: 16) {
+                if !detail.weaponsUtilitySections.isEmpty {
+                    FleetShipSpecificationCategoryView(
+                        title: "WEAPONS & UTILITY",
+                        summary: detail.weaponsUtilitySummary,
+                        sections: detail.weaponsUtilitySections
+                    )
+                }
+
+                if !detail.componentSections.isEmpty {
+                    FleetShipSpecificationCategoryView(
+                        title: "COMPONENTS",
+                        summary: detail.componentSummary,
+                        sections: detail.componentSections
+                    )
+                }
+            }
+        }
+    }
+}
+
+private struct FleetShipSpecificationCategoryView: View {
+    let title: LocalizedStringKey
+    let summary: RSIShipDetailCatalog.SpecificationSummary
+    let sections: [RSIShipDetailCatalog.SpecificationSection]
+
+    private var summaryText: String? {
+        guard summary.totalEntries > 0 else {
+            return nil
+        }
+
+        return AppLocalizer.format(
+            "%lld total across %lld entries",
+            summary.totalCount,
+            summary.totalEntries
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(title)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(Color.cyan.opacity(0.9))
+
+                Spacer(minLength: 0)
+
+                if let summaryText {
+                    Text(summaryText)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.white.opacity(0.62))
+                        .multilineTextAlignment(.trailing)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(sections.indices, id: \.self) { index in
+                    FleetShipSpecificationSectionView(section: sections[index])
+                }
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.cyan.opacity(0.12), lineWidth: 1)
+        }
+    }
+}
+
+private struct FleetShipSpecificationSectionView: View {
+    let section: RSIShipDetailCatalog.SpecificationSection
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(section.title)
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.white.opacity(0.9))
+
+                Spacer(minLength: 0)
+
+                if !section.summaryBySize.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(section.summaryBySize.indices, id: \.self) { index in
+                            let summary = section.summaryBySize[index]
+                            FleetShipSpecCountPill(summary: summary)
+                        }
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(section.items.indices, id: \.self) { index in
+                    FleetShipSpecificationItemRow(item: section.items[index])
+                }
+            }
+        }
+        .padding(.top, 4)
+    }
+}
+
+private struct FleetShipSpecificationItemRow: View {
+    let item: RSIShipDetailCatalog.SpecificationItem
+
+    private var leadingLabel: String? {
+        let parts = [item.quantityLabel, item.size].compactMap { $0?.nilIfBlank }
+        guard !parts.isEmpty else {
+            return nil
+        }
+
+        return parts.joined(separator: " · ")
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let subtitle = item.subtitle?.nilIfBlank {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(Color.white.opacity(0.58))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Spacer(minLength: 12)
+
+            if let leadingLabel {
+                Text(leadingLabel)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Color.cyan.opacity(0.86))
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.black.opacity(0.16))
+        )
+    }
+}
+
+private struct FleetShipSpecCountPill: View {
+    let summary: RSIShipDetailCatalog.SizeSummary
+
+    private var label: String {
+        guard let size = summary.size?.nilIfBlank else {
+            return "\(summary.count)x"
+        }
+
+        return "\(summary.count)x \(size)"
+    }
+
+    var body: some View {
+        Text(label)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(.white.opacity(0.86))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.cyan.opacity(0.16))
+            )
+            .lineLimit(1)
+    }
+}
+
+private struct FleetShipSourceLinks: View {
+    let detail: RSIShipDetailCatalog.ShipDetail
+
+    private static let spviewerFallbackURL = URL(string: "https://www.spviewer.eu/")!
+
+    private var wikiURL: URL? {
+        detail.pageURL
+    }
+
+    private var spviewerURL: URL? {
+        guard detail.hasSpecificationData else {
+            return nil
+        }
+
+        return detail.spviewerPageURL ?? Self.spviewerFallbackURL
+    }
+
+    var body: some View {
+        if wikiURL != nil || spviewerURL != nil {
+            HStack(spacing: 12) {
+                if let wikiURL {
+                    sourceLink(title: "Wiki", systemImage: "book", destination: wikiURL)
+                }
+
+                if let spviewerURL {
+                    sourceLink(title: "SPViewer", systemImage: "scope", destination: spviewerURL)
+                }
+            }
+        }
+    }
+
+    private func sourceLink(
+        title: LocalizedStringKey,
+        systemImage: String,
+        destination: URL
+    ) -> some View {
+        Link(destination: destination) {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(Color.cyan.opacity(0.22))
     }
 }
 
@@ -1208,26 +1372,26 @@ private struct FleetShipTechnicalSpecsCard: View {
     var body: some View {
         FleetShipDetailPanel(
             title: "TECHNICAL SPECS",
-            subtitle: "These specs are sourced from the ship page and may change over time."
+            subtitle: nil
         ) {
             VStack(alignment: .leading, spacing: 20) {
                 if !detail.technicalSpecs.isEmpty {
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
-                        ForEach(detail.technicalSpecs, id: \.self) { item in
-                            FleetShipSpecTile(item: item)
+                        ForEach(detail.technicalSpecs.indices, id: \.self) { index in
+                            FleetShipSpecTile(item: detail.technicalSpecs[index])
                         }
                     }
                 }
 
-                if !detail.technicalSections.isEmpty {
+                if !detail.technicalSectionsForDisplay.isEmpty {
                     VStack(alignment: .leading, spacing: 14) {
-                        ForEach(detail.technicalSections, id: \.self) { section in
-                            FleetShipTechnicalSectionCard(section: section)
+                        ForEach(detail.technicalSectionsForDisplay.indices, id: \.self) { index in
+                            FleetShipTechnicalSectionCard(section: detail.technicalSectionsForDisplay[index])
                         }
                     }
                 }
 
-                if detail.technicalSpecs.isEmpty, detail.technicalSections.isEmpty {
+                if detail.technicalSpecs.isEmpty, detail.technicalSectionsForDisplay.isEmpty {
                     Text("Technical specs unavailable.")
                         .font(.subheadline)
                         .foregroundStyle(Color.white.opacity(0.72))
@@ -1268,8 +1432,8 @@ private struct FleetShipUnavailableCard: View {
 }
 
 private struct FleetShipDetailPanel<Content: View>: View {
-    let title: String
-    let subtitle: String
+    let title: LocalizedStringKey
+    let subtitle: LocalizedStringKey?
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -1279,10 +1443,12 @@ private struct FleetShipDetailPanel<Content: View>: View {
                     .font(.system(size: 28, weight: .heavy))
                     .foregroundStyle(.white)
 
-                Text(subtitle)
-                    .font(.subheadline)
-                    .foregroundStyle(Color.white.opacity(0.7))
-                    .fixedSize(horizontal: false, vertical: true)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(Color.white.opacity(0.7))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             content
@@ -1310,7 +1476,7 @@ private struct FleetShipDetailPanel<Content: View>: View {
 }
 
 private struct FleetShipOverviewRow: View {
-    let label: String
+    let label: LocalizedStringKey
     let value: String
     var showsDivider: Bool = true
 
@@ -1379,7 +1545,8 @@ private struct FleetShipTechnicalSectionCard: View {
                 .foregroundStyle(Color.cyan.opacity(0.9))
 
             VStack(alignment: .leading, spacing: 10) {
-                ForEach(section.items, id: \.self) { item in
+                ForEach(section.items.indices, id: \.self) { index in
+                    let item = section.items[index]
                     if let value = item.value.nilIfBlank {
                         HStack(alignment: .firstTextBaseline, spacing: 14) {
                             Text(item.label)
@@ -1442,6 +1609,14 @@ private struct FleetDisplaySection: Identifiable {
 }
 
 private extension String {
+    var logoSizingKey: String {
+        unicodeScalars
+            .filter { CharacterSet.alphanumerics.contains($0) }
+            .map(String.init)
+            .joined()
+            .localizedLowercase
+    }
+
     var nilIfBlank: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed

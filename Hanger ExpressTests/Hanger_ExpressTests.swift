@@ -185,6 +185,117 @@ struct Hanger_ExpressTests {
         #expect(colorMatches(sampledColor(from: refreshedComposite, normalizedPoint: CGPoint(x: 0.75, y: 0.5)), UIColor.systemBlue))
     }
 
+    @Test func urlCachedImageStorePersistsFleetCardBaseImagesWithoutRemoteSources() async throws {
+        defer {
+            MockURLProtocol.requestHandler = nil
+        }
+
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let shipImageURL = try #require(URL(string: "https://example.com/fleet-card-ship.jpg"))
+        let recipe = FleetCardBaseSnapshotRecipe(
+            style: .compact,
+            pointSize: CGSize(width: 220, height: 232),
+            manufacturerName: "Aegis Dynamics",
+            backdropURL: shipImageURL,
+            logoURL: nil
+        )
+        let initialSession = makeMockURLSession { request in
+            (
+                try #require(HTTPURLResponse(url: request.url ?? shipImageURL, statusCode: 200, httpVersion: nil, headerFields: nil)),
+                makeSolidImageData(color: .systemRed)
+            )
+        }
+
+        let firstStore = URLCachedImageStore(
+            cache: URLCache(memoryCapacity: 0, diskCapacity: 0),
+            session: initialSession,
+            storageDirectoryURL: tempDirectory
+        )
+
+        let initialImage = try await firstStore.fleetCardBaseImage(
+            for: recipe,
+            displayScale: 2,
+            maxRetries: 1
+        )
+        let sampledPoint = CGPoint(x: 0.72, y: 0.36)
+        let initialColor = sampledColor(from: initialImage, normalizedPoint: sampledPoint)
+        #expect(initialImage.size.width > 0)
+        #expect(initialImage.size.height > 0)
+
+        try? FileManager.default.removeItem(at: tempDirectory.appendingPathComponent("Remote", isDirectory: true))
+
+        let offlineSession = makeMockURLSession { _ in
+            throw URLError(.notConnectedToInternet)
+        }
+
+        let secondStore = URLCachedImageStore(
+            cache: URLCache(memoryCapacity: 0, diskCapacity: 0),
+            session: offlineSession,
+            storageDirectoryURL: tempDirectory
+        )
+
+        let restoredImage = try await secondStore.fleetCardBaseImage(
+            for: recipe,
+            displayScale: 2,
+            maxRetries: 1
+        )
+        let restoredColor = sampledColor(from: restoredImage, normalizedPoint: sampledPoint)
+
+        #expect(colorsMatch(restoredColor, initialColor, tolerance: 0.03))
+    }
+
+    @Test func urlCachedImageStoreClearsFleetCardBaseImagesWhenSourceURLsInvalidate() async throws {
+        defer {
+            MockURLProtocol.requestHandler = nil
+        }
+
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let shipImageURL = try #require(URL(string: "https://example.com/fleet-card-refresh.jpg"))
+        let sourceDataBox = MutableImageDataBox(data: makeSolidImageData(color: .systemRed))
+        let recipe = FleetCardBaseSnapshotRecipe(
+            style: .compact,
+            pointSize: CGSize(width: 220, height: 232),
+            manufacturerName: "Origin Jumpworks",
+            backdropURL: shipImageURL,
+            logoURL: nil
+        )
+
+        let session = makeMockURLSession { request in
+            (
+                try #require(HTTPURLResponse(url: request.url ?? shipImageURL, statusCode: 200, httpVersion: nil, headerFields: nil)),
+                sourceDataBox.data
+            )
+        }
+
+        let store = URLCachedImageStore(
+            cache: URLCache(memoryCapacity: 0, diskCapacity: 0),
+            session: session,
+            storageDirectoryURL: tempDirectory
+        )
+
+        let sampledPoint = CGPoint(x: 0.72, y: 0.36)
+        let firstImage = try await store.fleetCardBaseImage(
+            for: recipe,
+            displayScale: 2,
+            maxRetries: 1
+        )
+        let firstColor = sampledColor(from: firstImage, normalizedPoint: sampledPoint)
+
+        sourceDataBox.data = makeSolidImageData(color: .systemGreen)
+        await store.clear(urls: [shipImageURL])
+
+        let refreshedImage = try await store.fleetCardBaseImage(
+            for: recipe,
+            displayScale: 2,
+            maxRetries: 1
+        )
+        let refreshedColor = sampledColor(from: refreshedImage, normalizedPoint: sampledPoint)
+
+        #expect(!colorsMatch(refreshedColor, firstColor, tolerance: 0.08))
+    }
+
     @Test func trustedDeviceDurationIncludesYearOption() async throws {
         #expect(TrustedDeviceDuration.allCases.contains(.year))
         #expect(TrustedDeviceDuration.year.displayName == "1 year")
@@ -594,7 +705,7 @@ struct Hanger_ExpressTests {
         )
 
         #expect(package.displayedInsurance == "LTI")
-        #expect(package.detailInsuranceText == "LTI, 120 months, 6 months")
+        #expect(package.detailInsuranceText == "LTI, 120M, 6M")
         #expect(package.searchableInsuranceText.contains("120 months"))
     }
 
@@ -622,8 +733,8 @@ struct Hanger_ExpressTests {
 
         #expect(package.insurance == "120 months")
         #expect(package.insuranceOptions == nil)
-        #expect(package.displayedInsurance == "120 months")
-        #expect(package.detailInsuranceText == "120 months")
+        #expect(package.displayedInsurance == "120M")
+        #expect(package.detailInsuranceText == "120M")
     }
 
     @Test func hangarSnapshotDecodesLegacyCacheWithoutReferralStats() async throws {
@@ -685,6 +796,97 @@ struct Hanger_ExpressTests {
         #expect(package.isMultiShipPackage)
         #expect(!package.hasLifetimeInsurance)
         #expect(!package.hasUpgradeItems)
+    }
+
+    @Test func hangarPledgeSummaryParserPreservesTextOnlyHangarEntitlements() async throws {
+        let titles = HangarPledgeSummaryParser.supplementalTitles(
+            from: """
+            Contains
+            Aurora Mk I SE
+            Lifetime Insurance
+            Self-Land Hangar
+            """,
+            alsoContains: [
+                "Standalone Ships - Aurora Mk I SE",
+                "Aurora Mk I SE",
+                "Lifetime Insurance"
+            ],
+            excluding: [
+                "Standalone Ships - Aurora Mk I SE",
+                "Aurora Mk I SE",
+                "Lifetime Insurance"
+            ]
+        )
+
+        #expect(titles == ["Self-Land Hangar"])
+    }
+
+    @Test func hangarPledgeSummaryParserExtractsResidualHangarFromCompressedSummary() async throws {
+        let titles = HangarPledgeSummaryParser.supplementalTitles(
+            from: "Contains Aurora Mk I SE Lifetime Insurance Self-Land Hangar",
+            alsoContains: [],
+            excluding: [
+                "Standalone Ships - Aurora Mk I SE",
+                "Aurora Mk I SE",
+                "Lifetime Insurance"
+            ]
+        )
+
+        #expect(titles == ["Self-Land Hangar"])
+    }
+
+    @Test func hangarPledgeSummaryParserSkipsCollapsedItemCountLabels() async throws {
+        let titles = HangarPledgeSummaryParser.supplementalTitles(
+            from: "Contains 315p Explorer 6 Month Insurance Self-Land Hangar and 2 items",
+            alsoContains: [],
+            excluding: [
+                "315p Explorer",
+                "6 Month Insurance"
+            ]
+        )
+
+        #expect(titles == ["Self-Land Hangar"])
+    }
+
+    @Test func hangarPledgeSummaryParserSkipsPlainCollapsedCountLabels() async throws {
+        let titles = HangarPledgeSummaryParser.supplementalTitles(
+            from: "Contains Monde HighSec Helmet Monde HighSec Core 8 items",
+            alsoContains: [
+                "Monde HighSec Helmet",
+                "Monde HighSec Core",
+                "8 items",
+                "4 ships",
+                "6 ships",
+                "and"
+            ],
+            excluding: [
+                "Monde HighSec Helmet",
+                "Monde HighSec Core"
+            ]
+        )
+
+        #expect(titles.isEmpty)
+        #expect(!HangarPledgeSummaryParser.shouldRenderContentTitle("8 items"))
+        #expect(!HangarPledgeSummaryParser.shouldRenderContentTitle("4 ships"))
+        #expect(!HangarPledgeSummaryParser.shouldRenderContentTitle("6 ships"))
+        #expect(!HangarPledgeSummaryParser.shouldRenderContentTitle("and"))
+    }
+
+    @Test func hangarPledgeSummaryParserSkipsGenericUpgradeEntitlements() async throws {
+        let titles = HangarPledgeSummaryParser.supplementalTitles(
+            from: "Contains Upgrade - Terrapin To Railen Standard Upgrade",
+            alsoContains: [
+                "Upgrade - Terrapin To Railen",
+                "Standard Upgrade"
+            ],
+            excluding: [
+                "Upgrade - Terrapin To Railen"
+            ]
+        )
+
+        #expect(titles.isEmpty)
+        #expect(!HangarPledgeSummaryParser.shouldRenderContentTitle("and 2 items"))
+        #expect(!HangarPledgeSummaryParser.shouldRenderContentTitle("Standard Upgrade"))
     }
 
     @Test func hangarPackagesGroupOnlyWhenVisibleAttributesMatchExactly() async throws {
@@ -1075,6 +1277,75 @@ struct Hanger_ExpressTests {
         }
     }
 
+    @Test func signInAutomaticallyStartsBrowserChallengeWhenCaptchaIsRequired() async throws {
+        let webSession = FakeAuthenticationWebSession(
+            signInResponse: BrowserGraphQLResponse(
+                statusCode: 200,
+                body: """
+                {
+                  "data": {
+                    "account_signin": null
+                  },
+                  "errors": [
+                    {
+                      "message": "CaptchaRequired",
+                      "extensions": {
+                        "category": "authorization",
+                        "details": {
+                          "captcha": "manual verification required"
+                        }
+                      }
+                    }
+                  ]
+                }
+                """
+            )
+        )
+
+        let service = RSIAuthService(
+            recaptchaBroker: webSession,
+            diagnostics: AuthenticationDiagnosticsStore(),
+            accountFetcher: { cookies in
+                #expect(cookies.map(\.name).sorted() == ["Rsi-Token"])
+                return AuthenticatedAccount(
+                    avatar: "/avatar.png",
+                    displayname: "Pilot Example",
+                    email: "pilot@example.com",
+                    username: "PilotHandle"
+                )
+            }
+        )
+
+        do {
+            _ = try await service.signIn(
+                loginIdentifier: "pilot@example.com",
+                password: "secret-password",
+                rememberMe: true,
+                forceBrowserLogin: false
+            )
+            Issue.record("Expected a CAPTCHA response to start browser-assisted sign-in.")
+        } catch let error as AuthenticationError {
+            guard case let .requiresBrowserChallenge(message) = error else {
+                Issue.record("Expected browser challenge fallback, got \(error).")
+                return
+            }
+
+            #expect(message.contains("in-app browser"))
+        } catch {
+            Issue.record("Expected AuthenticationError, got \(error).")
+        }
+
+        let session = try await service.completeBrowserAuthentication(
+            cookies: [
+                makeSessionCookie(name: "Rsi-Token", value: "rsi-token")
+            ],
+            trustBrowserSession: true
+        )
+
+        #expect(session.displayName == "Pilot Example")
+        #expect(session.credentials?.loginIdentifier == "pilot@example.com")
+    }
+
     @Test func signInHumanizesInvalidCredentialsErrors() async throws {
         let webSession = FakeAuthenticationWebSession(
             signInResponse: BrowserGraphQLResponse(
@@ -1409,6 +1680,43 @@ struct Hanger_ExpressTests {
         #expect(fleet.first?.manufacturer == "Anvil Aerospace")
     }
 
+    @Test func fleetProjectorSkipsCollapsedShipCountPlaceholders() async throws {
+        let package = HangarPackage(
+            id: 502,
+            title: "Packs - Aurora Mk I Series Pack",
+            status: "Attributed",
+            insurance: "LTI",
+            acquiredAt: .now,
+            originalValueUSD: 100,
+            currentValueUSD: 100,
+            canGift: false,
+            canReclaim: true,
+            canUpgrade: false,
+            contents: [
+                PackageItem(
+                    id: "ship-count-502",
+                    title: "6 ships",
+                    detail: "RSI pledge entitlement",
+                    category: .ship,
+                    imageURL: nil,
+                    upgradePricing: nil
+                ),
+                PackageItem(
+                    id: "vehicle-count-502",
+                    title: "4 vehicles",
+                    detail: "RSI pledge entitlement",
+                    category: .vehicle,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+
+        let fleet = FleetProjector.project(packages: [package], shipCatalog: nil)
+
+        #expect(fleet.isEmpty)
+    }
+
     @Test func hostedShipCatalogDecodesMSRPAndThumbnailData() async throws {
         let data = Data(
             """
@@ -1478,6 +1786,90 @@ struct Hanger_ExpressTests {
         #expect(match.roleSummary == "Multi: Starter | Light Freight")
         #expect(match.roleCategories == ["Multi", "Starter", "Light Freight"])
         #expect(match.msrpUSD == 65)
+    }
+
+    @Test func hostedShipCatalogPrefersWhiteManufacturerLogoVariantWhenAvailable() async throws {
+        let data = Data(
+            """
+            {
+              "generatedAt": "2026-04-23T22:40:00.000Z",
+              "manufacturers": [
+                {
+                  "slug": "aegis-dynamics",
+                  "name": "Aegis Dynamics",
+                  "aliases": ["Aegis"],
+                  "logos": {
+                    "default": {
+                      "path": "media/manufacturers/aegis-dynamics/black.png",
+                      "primaryUrl": "https://cdn.example.com/aegis-black.png"
+                    },
+                    "onDarkBackground": {
+                      "path": "media/manufacturers/aegis-dynamics/white.png",
+                      "primaryUrl": "https://cdn.example.com/aegis-white.png"
+                    },
+                    "variants": {
+                      "white": {
+                        "path": "media/manufacturers/aegis-dynamics/white.png",
+                        "primaryUrl": "https://cdn.example.com/aegis-white.png"
+                      }
+                    }
+                  }
+                }
+              ],
+              "ships": [
+                {
+                  "id": "501",
+                  "name": "Gladius",
+                  "manufacturer": "Aegis Dynamics",
+                  "manufacturerSlug": "aegis-dynamics",
+                  "thumbnailUrl": "https://mirror.example.com/gladius.webp"
+                }
+              ]
+            }
+            """.utf8
+        )
+
+        let catalog = try HostedShipCatalogClient.decodeCatalog(from: data)
+        let match = try #require(catalog.matchShip(named: "Gladius"))
+
+        #expect(match.manufacturerLogoURL == URL(string: "https://cdn.example.com/aegis-white.png"))
+    }
+
+    @Test func hostedShipCatalogUsesSVGManufacturerLogoWhenNoRasterVariantExists() async throws {
+        let data = Data(
+            """
+            {
+              "generatedAt": "2026-04-24T00:30:00.000Z",
+              "manufacturers": [
+                {
+                  "slug": "greycat-industrial",
+                  "name": "Greycat Industrial",
+                  "aliases": ["Greycat Industrial"],
+                  "logos": {
+                    "onDarkBackground": {
+                      "path": "media/manufacturers/greycat-industrial/black-white.svg",
+                      "primaryUrl": "https://cdn.example.com/greycat-white.svg"
+                    }
+                  }
+                }
+              ],
+              "ships": [
+                {
+                  "id": "901",
+                  "name": "MDC",
+                  "manufacturer": "Greycat Industrial",
+                  "manufacturerSlug": "greycat-industrial",
+                  "thumbnailUrl": "https://mirror.example.com/mdc.webp"
+                }
+              ]
+            }
+            """.utf8
+        )
+
+        let catalog = try HostedShipCatalogClient.decodeCatalog(from: data)
+        let match = try #require(catalog.matchShip(named: "MDC"))
+
+        #expect(match.manufacturerLogoURL == URL(string: "https://cdn.example.com/greycat-white.svg"))
     }
 
     @Test func hostedShipFeedEndpointsPreferPagesDevAndFallbackToGitHubPages() async throws {
@@ -1608,6 +2000,273 @@ struct Hanger_ExpressTests {
                 )
             ]
         )
+    }
+
+    @Test func hostedShipDetailCatalogDecodesSpviewerBackedLoadoutShape() async throws {
+        let data = Data(
+            """
+            {
+              "generatedAt": "2026-04-24T18:47:05.397Z",
+              "sourcePageUrl": "https://starcitizen.tools/List_of_pledge_vehicles",
+              "detailSourceUrl": "https://www.spviewer.eu",
+              "shipCount": 1,
+              "ships": [
+                {
+                  "name": "Gladius",
+                  "pageUrl": "https://starcitizen.tools/Gladius",
+                  "spviewerPageUrl": "https://www.spviewer.eu/performance?ship=aegs_gladius",
+                  "manufacturer": "Aegis Dynamics",
+                  "manufacturerSlug": "aegis-dynamics",
+                  "career": "Combat",
+                  "role": "Light Fighter",
+                  "size": "Small",
+                  "inGameStatus": "Flight ready",
+                  "pledgeAvailability": "Always available",
+                  "minCrew": 1,
+                  "maxCrew": 1,
+                  "description": "A dedicated light fighter built for combat patrols.",
+                  "technicalSpecs": [
+                    { "label": "Length", "value": "20 m" }
+                  ],
+                  "technicalSections": [
+                    {
+                      "title": "Hull",
+                      "items": [
+                        { "label": "Total health points", "value": "8,500 HP" }
+                      ]
+                    },
+                    {
+                      "title": "Weapons",
+                      "items": [
+                        { "label": "CF-337 Panther Repeater", "value": "2x · S3 · 1,024 HP · A" }
+                      ]
+                    }
+                  ],
+                  "specificationSections": [
+                    {
+                      "tab": "Weapons & Utility",
+                      "title": "Weapons",
+                      "items": [
+                        {
+                          "name": "CF-337 Panther Repeater",
+                          "internalName": null,
+                          "countLabel": "2x",
+                          "count": 2,
+                          "size": "S3",
+                          "sizeNumber": 3,
+                          "subtitle": "1,024 HP · A",
+                          "level": null,
+                          "pageUrl": null
+                        }
+                      ],
+                      "summaryBySize": [
+                        { "size": "S3", "sizeNumber": 3, "count": 2, "entryCount": 1 }
+                      ]
+                    },
+                    {
+                      "tab": "Avionics & Systems",
+                      "title": "Shields",
+                      "items": [
+                        {
+                          "name": "Sentry Shield Generator",
+                          "countLabel": "1x",
+                          "count": 1,
+                          "size": "S1",
+                          "sizeNumber": 1,
+                          "subtitle": "1,500 HP"
+                        }
+                      ],
+                      "summaryBySize": [
+                        { "size": "S1", "sizeNumber": 1, "count": 1, "entryCount": 1 }
+                      ]
+                    }
+                  ],
+                  "componentEntries": [
+                    {
+                      "tab": "Avionics & Systems",
+                      "section": "Shields",
+                      "name": "Sentry Shield Generator",
+                      "countLabel": "1x",
+                      "count": 1,
+                      "size": "S1",
+                      "sizeNumber": 1,
+                      "subtitle": "1,500 HP"
+                    }
+                  ],
+                  "weaponsUtilityEntries": [
+                    {
+                      "tab": "Weapons & Utility",
+                      "section": "Weapons",
+                      "name": "CF-337 Panther Repeater",
+                      "countLabel": "2x",
+                      "count": 2,
+                      "size": "S3",
+                      "sizeNumber": 3,
+                      "subtitle": "1,024 HP · A"
+                    }
+                  ],
+                  "componentSummary": {
+                    "totalEntries": 1,
+                    "totalCount": 1,
+                    "bySection": [
+                      {
+                        "tab": "Avionics & Systems",
+                        "section": "Shields",
+                        "size": "S1",
+                        "sizeNumber": 1,
+                        "count": 1,
+                        "entryCount": 1
+                      }
+                    ],
+                    "bySize": [
+                      { "size": "S1", "sizeNumber": 1, "count": 1, "entryCount": 1 }
+                    ]
+                  },
+                  "weaponsUtilitySummary": {
+                    "totalEntries": 1,
+                    "totalCount": 2,
+                    "bySection": [
+                      {
+                        "tab": "Weapons & Utility",
+                        "section": "Weapons",
+                        "size": "S3",
+                        "sizeNumber": 3,
+                        "count": 2,
+                        "entryCount": 1
+                      }
+                    ],
+                    "bySize": [
+                      { "size": "S3", "sizeNumber": 3, "count": 2, "entryCount": 1 }
+                    ]
+                  },
+                  "unavailableReason": null
+                }
+              ]
+            }
+            """.utf8
+        )
+
+        let catalog = try HostedShipDetailCatalogClient.decodeCatalog(from: data)
+        let match = try #require(catalog.matchShip(named: "Aegis Gladius"))
+
+        #expect(match.sourceDetailURL == URL(string: "https://www.spviewer.eu/performance?ship=aegs_gladius"))
+        #expect(match.hasSpecificationData)
+        #expect(match.weaponsUtilitySections.map(\.title) == ["Weapons"])
+        #expect(match.componentSections.map(\.title) == ["Shields"])
+        #expect(match.weaponsUtilityEntries.first?.name == "CF-337 Panther Repeater")
+        #expect(match.weaponsUtilityEntries.first?.item.quantityLabel == "2x")
+        #expect(match.weaponsUtilitySummary.totalCount == 2)
+        #expect(match.componentSummary.totalCount == 1)
+        #expect(match.technicalSectionsForDisplay.map(\.title) == ["Hull"])
+    }
+
+    @Test func hostedShipDetailCatalogKeepsMetadataForUnavailableSpviewerEntries() async throws {
+        let data = Data(
+            """
+            {
+              "generatedAt": "2026-04-24T18:47:05.397Z",
+              "sourcePageUrl": "https://starcitizen.tools/List_of_pledge_vehicles",
+              "detailSourceUrl": "https://www.spviewer.eu",
+              "shipCount": 1,
+              "ships": [
+                {
+                  "name": "A.T.L.S.",
+                  "pageUrl": "https://starcitizen.tools/A.T.L.S.",
+                  "manufacturer": "Argo Astronautics",
+                  "manufacturerSlug": "argo-astronautics",
+                  "career": "Ground",
+                  "role": "Utility",
+                  "size": "Vehicle",
+                  "inGameStatus": "Flight ready",
+                  "pledgeAvailability": "Always available",
+                  "minCrew": 1,
+                  "maxCrew": 1,
+                  "description": null,
+                  "technicalSpecs": [
+                    { "label": "Maximum Crew", "value": "1" }
+                  ],
+                  "technicalSections": [],
+                  "specificationSections": [],
+                  "componentEntries": [],
+                  "weaponsUtilityEntries": [],
+                  "componentSummary": {
+                    "totalEntries": 0,
+                    "totalCount": 0,
+                    "bySection": [],
+                    "bySize": []
+                  },
+                  "weaponsUtilitySummary": {
+                    "totalEntries": 0,
+                    "totalCount": 0,
+                    "bySection": [],
+                    "bySize": []
+                  },
+                  "unavailableReason": "No matching SPViewer vehicle entry"
+                }
+              ]
+            }
+            """.utf8
+        )
+
+        let catalog = try HostedShipDetailCatalogClient.decodeCatalog(from: data)
+        let match = try #require(catalog.matchShip(named: "A.T.L.S."))
+
+        #expect(match.isUnavailable)
+        #expect(!match.hasSpecificationData)
+        #expect(match.size == "Vehicle")
+        #expect(match.maxCrew == 1)
+        #expect(match.technicalSpecs == [.init(label: "Maximum Crew", value: "1")])
+    }
+
+    @Test func hostedShipDetailCatalogUsesSVGManufacturerLogoWhenPreferredVariantIsSVG() async throws {
+        let data = Data(
+            """
+            {
+              "generatedAt": "2026-04-23T22:40:00.000Z",
+              "manufacturers": [
+                {
+                  "slug": "origin-jumpworks",
+                  "name": "Origin Jumpworks",
+                  "aliases": ["Origin"],
+                  "logos": {
+                    "default": {
+                      "path": "media/manufacturers/origin-jumpworks/color.png",
+                      "primaryUrl": "https://cdn.example.com/origin-color.png"
+                    },
+                    "onDarkBackground": {
+                      "path": "media/manufacturers/origin-jumpworks/white.svg",
+                      "primaryUrl": "https://cdn.example.com/origin-white.svg"
+                    }
+                  }
+                }
+              ],
+              "ships": [
+                {
+                  "name": "100i",
+                  "pageUrl": "https://starcitizen.tools/100i",
+                  "manufacturer": "Origin Jumpworks",
+                  "manufacturerSlug": "origin-jumpworks",
+                  "career": "Multi-role",
+                  "role": "Starter / Touring",
+                  "size": "Small",
+                  "inGameStatus": "Flight ready",
+                  "pledgeAvailability": "Always available",
+                  "minCrew": 1,
+                  "maxCrew": 1,
+                  "description": "A compact starter ship.",
+                  "technicalSpecs": [],
+                  "technicalSections": [],
+                  "unavailableReason": null
+                }
+              ]
+            }
+            """.utf8
+        )
+
+        let catalog = try HostedShipDetailCatalogClient.decodeCatalog(from: data)
+        let match = try #require(catalog.matchShip(named: "100i"))
+
+        #expect(match.manufacturerLogoURL == URL(string: "https://cdn.example.com/origin-white.svg"))
     }
 
     @Test func hostedShipDetailCatalogRequestsIgnoreLocalURLCacheData() async throws {
@@ -1916,6 +2575,7 @@ struct Hanger_ExpressTests {
     @Test func fleetProjectorPrefersHostedShipImageForMatchedShips() async throws {
         let hangarImageURL = try #require(URL(string: "https://example.com/hangar-thumb.jpg"))
         let hostedImageURL = try #require(URL(string: "https://example.com/ship-listing-wide.webp"))
+        let manufacturerLogoURL = try #require(URL(string: "https://example.com/rsi-white.png"))
         let package = HangarPackage(
             id: 700,
             title: "Polaris Expedition Pack",
@@ -1944,6 +2604,7 @@ struct Hanger_ExpressTests {
                     id: 116,
                     name: "Polaris",
                     manufacturer: "Roberts Space Industries",
+                    manufacturerLogoURL: manufacturerLogoURL,
                     msrpUSD: 975,
                     type: "combat",
                     focus: "Capital",
@@ -1956,6 +2617,7 @@ struct Hanger_ExpressTests {
 
         #expect(fleet.count == 1)
         #expect(fleet.first?.imageURL == hostedImageURL)
+        #expect(fleet.first?.manufacturerLogoURL == manufacturerLogoURL)
         #expect(fleet.first?.role == "Combat / Capital")
         #expect(fleet.first?.roleCategories == ["Combat", "Capital"])
         #expect(fleet.first?.msrpUSD == 975)
@@ -2208,6 +2870,218 @@ struct Hanger_ExpressTests {
         #expect(stats.currentLadderCount == 7)
         #expect(stats.legacyLadderCount == nil)
         #expect(!stats.hasLegacyLadder)
+    }
+
+    @Test func successfulMeltRemovesPackagesImmediatelyWithoutVisibleRefreshState() async throws {
+        let session = makeUserSession(
+            handle: "melt-action",
+            email: "melt-action@example.com",
+            loginIdentifier: "melt-action@example.com",
+            password: "secret-melt",
+            createdAt: Date(timeIntervalSince1970: 905)
+        )
+        let meltedPackage = HangarPackage(
+            id: 4101,
+            title: "Gladius and Gold",
+            status: "Attributed",
+            insurance: "LTI",
+            acquiredAt: .now,
+            originalValueUSD: 90,
+            currentValueUSD: 90,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: true,
+            contents: [
+                PackageItem(
+                    id: "4101-ship",
+                    title: "Aegis Gladius",
+                    detail: "Light Fighter",
+                    category: .ship,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+        let survivingPackage = HangarPackage(
+            id: 4102,
+            title: "Cutter Scout",
+            status: "Attributed",
+            insurance: "120 months",
+            acquiredAt: .now,
+            originalValueUSD: 50,
+            currentValueUSD: 50,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: true,
+            contents: [
+                PackageItem(
+                    id: "4102-ship",
+                    title: "Drake Cutter Scout",
+                    detail: "Starter",
+                    category: .ship,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+        let cachedSnapshot = PreviewHangarRepository.sampleSnapshot.updatingHangar(
+            packages: [meltedPackage, survivingPackage],
+            fleet: [
+                FleetShip(
+                    id: 9001,
+                    displayName: "Gladius",
+                    manufacturer: "Aegis Dynamics",
+                    role: "Combat: Light Fighter",
+                    insurance: "LTI",
+                    sourcePackageID: meltedPackage.id,
+                    sourcePackageName: meltedPackage.title,
+                    meltValueUSD: 90,
+                    canGift: true,
+                    canReclaim: true
+                )
+            ],
+            lastSyncedAt: Date(timeIntervalSince1970: 906)
+        )
+
+        let appModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: cachedSnapshot),
+                hangarRepository: FakeHangarRepository(hangarSnapshot: cachedSnapshot)
+            )
+        )
+        appModel.session = session
+        appModel.savedSessions = [session]
+        appModel.loadState = .loaded(cachedSnapshot)
+
+        let packageGroup = try #require([meltedPackage].groupedForInventoryDisplay.first)
+
+        try await appModel.melt(packageGroup: packageGroup, quantity: 1)
+        await Task.yield()
+
+        let updatedSnapshot = try #require(appModel.snapshot)
+        #expect(updatedSnapshot.packages.map(\.id) == [survivingPackage.id])
+        #expect(updatedSnapshot.fleet.isEmpty)
+        #expect(appModel.activeRefreshScope == nil)
+        #expect(appModel.refreshProgress == nil)
+        #expect(!appModel.isRefreshing)
+
+        await appModel.refresh(scope: .hangar)
+    }
+
+    @Test func successfulUpgradeRemovesConsumedUpgradeImmediatelyWithoutVisibleRefreshState() async throws {
+        let session = makeUserSession(
+            handle: "upgrade-action",
+            email: "upgrade-action@example.com",
+            loginIdentifier: "upgrade-action@example.com",
+            password: "secret-upgrade",
+            createdAt: Date(timeIntervalSince1970: 907)
+        )
+        let upgradePackage = HangarPackage(
+            id: 5101,
+            title: "Gladius to Sabre Upgrade",
+            status: "Attributed",
+            insurance: "None",
+            acquiredAt: .now,
+            originalValueUSD: 20,
+            currentValueUSD: 20,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: false,
+            upgradeMetadata: HangarPackage.UpgradeMetadata(
+                id: 77,
+                name: "Gladius to Sabre Upgrade",
+                upgradeType: "ship_upgrade",
+                matchItems: [.init(id: nil, name: "Gladius")],
+                targetItems: [.init(id: nil, name: "Sabre")]
+            ),
+            contents: [
+                PackageItem(
+                    id: "5101-upgrade",
+                    title: "Gladius to Sabre Upgrade",
+                    detail: "Upgrade",
+                    category: .upgrade,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+        let targetPackage = HangarPackage(
+            id: 5102,
+            title: "Gladius Owner Pack",
+            status: "Attributed",
+            insurance: "LTI",
+            acquiredAt: .now,
+            originalValueUSD: 90,
+            currentValueUSD: 90,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: true,
+            contents: [
+                PackageItem(
+                    id: "5102-ship",
+                    title: "Aegis Gladius",
+                    detail: "Light Fighter",
+                    category: .ship,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+        let cachedSnapshot = PreviewHangarRepository.sampleSnapshot.updatingHangar(
+            packages: [upgradePackage, targetPackage],
+            fleet: [
+                FleetShip(
+                    id: 9002,
+                    displayName: "Gladius",
+                    manufacturer: "Aegis Dynamics",
+                    role: "Combat: Light Fighter",
+                    insurance: "LTI",
+                    sourcePackageID: targetPackage.id,
+                    sourcePackageName: targetPackage.title,
+                    meltValueUSD: 90,
+                    canGift: true,
+                    canReclaim: true
+                )
+            ],
+            lastSyncedAt: Date(timeIntervalSince1970: 908)
+        )
+
+        let appModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: cachedSnapshot),
+                hangarRepository: FakeHangarRepository(hangarSnapshot: cachedSnapshot)
+            )
+        )
+        appModel.session = session
+        appModel.savedSessions = [session]
+        appModel.loadState = .loaded(cachedSnapshot)
+
+        let packageGroup = try #require([upgradePackage].groupedForInventoryDisplay.first)
+        let target = UpgradeTargetCandidate(
+            pledgeID: targetPackage.id,
+            title: targetPackage.title,
+            status: targetPackage.status,
+            insurance: targetPackage.insurance,
+            thumbnailURL: nil
+        )
+
+        try await appModel.applyUpgrade(packageGroup: packageGroup, target: target)
+        await Task.yield()
+
+        let updatedSnapshot = try #require(appModel.snapshot)
+        #expect(updatedSnapshot.packages.map(\.id) == [targetPackage.id])
+        #expect(updatedSnapshot.fleet.map(\.sourcePackageID) == [targetPackage.id])
+        #expect(appModel.activeRefreshScope == nil)
+        #expect(appModel.refreshProgress == nil)
+        #expect(!appModel.isRefreshing)
+
+        await appModel.refresh(scope: .hangar)
     }
 
     @Test func refreshFailureKeepsCachedSnapshotVisibleWhenRefreshFails() async throws {
@@ -2641,6 +3515,14 @@ private func colorMatches(_ lhs: UIColor?, _ rhs: UIColor, tolerance: CGFloat = 
     return abs(lhsComponents[0] - rhsComponents[0]) <= tolerance
         && abs(lhsComponents[1] - rhsComponents[1]) <= tolerance
         && abs(lhsComponents[2] - rhsComponents[2]) <= tolerance
+}
+
+private func colorsMatch(_ lhs: UIColor?, _ rhs: UIColor?, tolerance: CGFloat = 0.12) -> Bool {
+    guard let rhs else {
+        return lhs == nil
+    }
+
+    return colorMatches(lhs, rhs, tolerance: tolerance)
 }
 
 private func makeMockURLSession(

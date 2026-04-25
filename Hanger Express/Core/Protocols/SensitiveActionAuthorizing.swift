@@ -23,7 +23,7 @@ enum SensitiveActionAuthorizationError: Error, LocalizedError, Sendable, Equatab
         case let .unavailable(message), let .failed(message):
             return message
         case .cancelled:
-            return "Identity verification was cancelled."
+            return AppLocalizer.string("Identity verification was cancelled.")
         }
     }
 }

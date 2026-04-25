@@ -2,13 +2,28 @@ import SwiftUI
 
 struct BuybackView: View {
     let appModel: AppModel
-    enum SearchFilter: String, CaseIterable, Identifiable {
-        case standaloneShips = "Standalone ships"
-        case packages = "Packages"
-        case upgrades = "Upgrades"
-        case gears = "Gears"
+    @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
+
+    enum SearchFilter: CaseIterable, Identifiable {
+        case standaloneShips
+        case packages
+        case upgrades
+        case gears
 
         var id: Self { self }
+
+        var title: String {
+            switch self {
+            case .standaloneShips:
+                return AppLocalizer.string("Standalone ships")
+            case .packages:
+                return AppLocalizer.string("Packages")
+            case .upgrades:
+                return AppLocalizer.string("Upgrades")
+            case .gears:
+                return AppLocalizer.string("Gears")
+            }
+        }
     }
 
     let snapshot: HangarSnapshot
@@ -28,7 +43,7 @@ struct BuybackView: View {
                                     Button {
                                         toggle(searchFilter)
                                     } label: {
-                                        Text(searchFilter.rawValue)
+                                        Text(searchFilter.title)
                                             .font(.subheadline.weight(.medium))
                                             .padding(.horizontal, 12)
                                             .padding(.vertical, 8)
@@ -66,6 +81,7 @@ struct BuybackView: View {
                     }
                 }
             }
+            .id(appLanguageRawValue)
             .searchable(
                 text: $searchText,
                 isPresented: $isSearchPresented,
@@ -81,10 +97,12 @@ struct BuybackView: View {
             .navigationTitle("Buy Back")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(appModel.isRefreshing(.buyback) ? "Refreshing..." : "Refresh") {
+                    Button {
                         Task {
                             await appModel.refresh(scope: .buyback)
                         }
+                    } label: {
+                        Text(appModel.isRefreshing(.buyback) ? LocalizedStringKey("Refreshing...") : LocalizedStringKey("Refresh"))
                     }
                     .disabled(appModel.isRefreshing)
                 }
@@ -133,10 +151,10 @@ struct BuybackView: View {
 
     private var emptyStateTitle: String {
         if snapshot.buyback.isEmpty {
-            return "Buy Back Is Empty"
+            return AppLocalizer.string("Buy Back Is Empty")
         }
 
-        return "No Matching Buy-Back Items"
+        return AppLocalizer.string("No Matching Buy-Back Items")
     }
 
     private var emptyStateSystemImage: String {
@@ -149,10 +167,10 @@ struct BuybackView: View {
 
     private var emptyStateDescription: String {
         if snapshot.buyback.isEmpty {
-            return "This RSI account does not currently have any pledges in buy back."
+            return AppLocalizer.string("This RSI account does not currently have any pledges in buy back.")
         }
 
-        return "Try a different search term or clear one of the active filters."
+        return AppLocalizer.string("Try a different search term or clear one of the active filters.")
     }
 }
 
@@ -205,26 +223,26 @@ private struct BuybackGroupRow: View {
 
     private var typeSummary: String {
         if item.isUpgrade {
-            return "Upgrade"
+            return AppLocalizer.string("Upgrade")
         }
 
         if item.isPackage {
-            return "Package"
+            return AppLocalizer.string("Package")
         }
 
         if item.isGear {
-            return "Gear"
+            return AppLocalizer.string("Gear")
         }
 
         if item.isSkin {
-            return "Skin"
+            return AppLocalizer.string("Skin")
         }
 
         if item.isStandaloneShip {
-            return "Standalone ship"
+            return AppLocalizer.string("Standalone ship")
         }
 
-        return "Buy-back item"
+        return AppLocalizer.string("Buy-back item")
     }
 
     private var metadataLine: String {

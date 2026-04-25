@@ -2,29 +2,48 @@ import SwiftUI
 import UIKit
 
 struct HangarDashboardView: View {
-    enum PackageFilter: String, CaseIterable, Identifiable {
-        case all = "All"
-        case giftable = "Giftable"
-        case reclaimable = "Reclaimable"
-
-        var id: Self { self }
-    }
-
-    enum SearchFilter: String, CaseIterable, Identifiable {
-        case lti = "LTI"
-        case upgrades = "Upgrades"
-        case packages = "Packages"
+    enum PackageFilter: CaseIterable, Identifiable {
+        case all
+        case giftable
+        case reclaimable
 
         var id: Self { self }
 
         var title: String {
-            rawValue
+            switch self {
+            case .all:
+                return AppLocalizer.string("All")
+            case .giftable:
+                return AppLocalizer.string("Giftable")
+            case .reclaimable:
+                return AppLocalizer.string("Reclaimable")
+            }
+        }
+    }
+
+    enum SearchFilter: CaseIterable, Identifiable {
+        case lti
+        case upgrades
+        case packages
+
+        var id: Self { self }
+
+        var title: String {
+            switch self {
+            case .lti:
+                return "LTI"
+            case .upgrades:
+                return AppLocalizer.string("Upgrades")
+            case .packages:
+                return AppLocalizer.string("Packages")
+            }
         }
     }
 
     let appModel: AppModel
     let snapshot: HangarSnapshot
 
+    @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage(DisplayPreferences.hangarGiftedHighlightKey) private var highlightsGiftedHangarRows = DisplayPreferences.hangarGiftedHighlightEnabledByDefault
     @AppStorage(DisplayPreferences.hangarUpgradedHighlightKey) private var highlightsUpgradedHangarRows = DisplayPreferences.hangarUpgradedHighlightEnabledByDefault
     @State private var filter: PackageFilter = .all
@@ -39,7 +58,7 @@ struct HangarDashboardView: View {
                 Section {
                     Picker("Filter", selection: $filter) {
                         ForEach(PackageFilter.allCases) { option in
-                            Text(option.rawValue).tag(option)
+                            Text(option.title).tag(option)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -110,6 +129,7 @@ struct HangarDashboardView: View {
                     Text("Pledges")
                 }
             }
+            .id(appLanguageRawValue)
             .searchable(
                 text: $searchText,
                 isPresented: $isSearchPresented,
@@ -132,10 +152,12 @@ struct HangarDashboardView: View {
                         isLogPresented = true
                     }
 
-                    Button(appModel.isRefreshing(.hangar) ? "Refreshing..." : "Refresh") {
+                    Button {
                         Task {
                             await appModel.refresh(scope: .hangar)
                         }
+                    } label: {
+                        Text(appModel.isRefreshing(.hangar) ? LocalizedStringKey("Refreshing...") : LocalizedStringKey("Refresh"))
                     }
                     .disabled(appModel.isRefreshing)
                 }
@@ -331,15 +353,7 @@ struct HangarPackageGroupRow: View {
                     )
 
                     if let insuranceBadgeText {
-                        Text(insuranceBadgeText)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(Color.accentColor)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(
-                                Capsule(style: .continuous)
-                                    .fill(Color.accentColor.opacity(0.14))
-                            )
+                        HangarInsuranceBadge(text: insuranceBadgeText)
                             .padding(6)
                     }
                 }
@@ -421,7 +435,7 @@ struct HangarPackageGroupRow: View {
 
     private var visibleInsurance: String? {
         guard let displayedInsurance = package.displayedInsurance,
-              displayedInsurance.localizedCaseInsensitiveCompare("Unknown") != .orderedSame else {
+              !HangarPackage.isUnknownInsuranceLabel(displayedInsurance) else {
             return nil
         }
 
@@ -461,6 +475,100 @@ struct HangarPackageGroupRow: View {
         formatter.dateFormat = "MM/dd/yyyy"
         return formatter
     }()
+}
+
+private struct HangarInsuranceBadge: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let text: String
+
+    private var palette: HangarInsuranceBadgePalette {
+        HangarInsuranceBadgePalette(colorScheme: colorScheme)
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(palette.foregroundColor)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .modifier(HangarInsuranceBadgeGlassStyle(palette: palette))
+    }
+}
+
+private struct HangarInsuranceBadgePalette {
+    let backgroundColor: Color
+    let foregroundColor: Color
+    let strokeColor: Color
+    let shadowColor: Color
+
+    init(colorScheme: ColorScheme) {
+        let backgroundUIColor: UIColor
+        switch colorScheme {
+        case .light:
+            backgroundUIColor = UIColor(red: 0.82, green: 0.88, blue: 0.93, alpha: 1)
+        case .dark:
+            backgroundUIColor = UIColor(red: 0.08, green: 0.20, blue: 0.27, alpha: 1)
+        @unknown default:
+            backgroundUIColor = UIColor(red: 0.82, green: 0.88, blue: 0.93, alpha: 1)
+        }
+
+        backgroundColor = Color(uiColor: backgroundUIColor)
+        foregroundColor = backgroundUIColor.prefersDarkContrastText
+            ? Color.black.opacity(0.86)
+            : Color.white.opacity(0.94)
+        strokeColor = backgroundUIColor.prefersDarkContrastText
+            ? Color.white.opacity(0.82)
+            : Color.white.opacity(0.20)
+        shadowColor = Color.black.opacity(backgroundUIColor.prefersDarkContrastText ? 0.10 : 0.18)
+    }
+}
+
+private struct HangarInsuranceBadgeGlassStyle: ViewModifier {
+    let palette: HangarInsuranceBadgePalette
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                Capsule(style: .continuous)
+                    .fill(palette.backgroundColor)
+                    .shadow(color: palette.shadowColor, radius: 3, x: 0, y: 1)
+            )
+            .overlay {
+                Capsule(style: .continuous)
+                    .stroke(palette.strokeColor, lineWidth: 0.8)
+            }
+    }
+}
+
+private extension UIColor {
+    var prefersDarkContrastText: Bool {
+        let components = cgColor.converted(
+            to: CGColorSpaceCreateDeviceRGB(),
+            intent: .defaultIntent,
+            options: nil
+        )?.components
+
+        guard let components, components.count >= 3 else {
+            return true
+        }
+
+        let red = linearizedColorComponent(components[0])
+        let green = linearizedColorComponent(components[1])
+        let blue = linearizedColorComponent(components[2])
+        let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+        let blackTextContrast = (luminance + 0.05) / 0.05
+        let whiteTextContrast = 1.05 / (luminance + 0.05)
+        return blackTextContrast >= whiteTextContrast
+    }
+
+    private func linearizedColorComponent(_ value: CGFloat) -> CGFloat {
+        if value <= 0.03928 {
+            return value / 12.92
+        }
+
+        return pow((value + 0.055) / 1.055, 2.4)
+    }
 }
 
 private struct PriceSummaryView: View {
@@ -548,6 +656,24 @@ struct HangarPackageDetailView: View {
         package.packageThumbnailURL
     }
 
+    private var displayedContents: [PackageItem] {
+        package.contents.filter {
+            HangarPledgeSummaryParser.shouldRenderContentTitle($0.title)
+        }
+    }
+
+    private var primaryContents: [PackageItem] {
+        displayedContents.filter { item in
+            item.imageURL != nil || item.upgradePricing != nil
+        }
+    }
+
+    private var alsoContainsContents: [PackageItem] {
+        displayedContents.filter { item in
+            item.imageURL == nil && item.upgradePricing == nil
+        }
+    }
+
     var body: some View {
         List {
             if let compositeUpgradePricing {
@@ -573,34 +699,36 @@ struct HangarPackageDetailView: View {
             }
 
             Section {
-                LabeledContent {
-                    Text(package.status)
-                        .foregroundStyle(statusColor(for: package.status))
-                } label: {
-                    Text("Status")
-                }
-                if let detailInsuranceText = package.detailInsuranceText {
-                    LabeledContent("Insurance", value: detailInsuranceText)
-                }
-                LabeledContent("Acquired", value: package.acquiredAt.formatted(date: .abbreviated, time: .omitted))
-                LabeledContent(originalValueLabel, value: package.originalValueUSD.usdString)
-                LabeledContent(currentValueLabel, value: package.currentValueUSD.usdString)
-                if packageGroup.containsMultipleCopies {
-                    LabeledContent("Copies", value: "\(packageGroup.quantity)")
-                }
+                CompactPackageSummaryView(packageGroup: packageGroup)
+                    .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
             } header: {
                 Text("Package")
             }
 
-            Section {
-                ForEach(package.contents) { item in
-                    PackageItemRow(
-                        item: item,
-                        reloadToken: reloadToken
-                    )
+            if !primaryContents.isEmpty {
+                Section {
+                    ForEach(primaryContents) { item in
+                        PackageItemRow(
+                            item: item,
+                            reloadToken: reloadToken
+                        )
+                    }
+                } header: {
+                    Text("Contents")
                 }
-            } header: {
-                Text("Contents")
+            }
+
+            if !alsoContainsContents.isEmpty {
+                Section {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(alsoContainsContents) { item in
+                            PackageAlsoContainsRow(item: item)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                } header: {
+                    Text("Also Contains")
+                }
             }
 
             Section {
@@ -699,17 +827,120 @@ struct HangarPackageDetailView: View {
             }
         }
     }
+}
+
+private struct CompactPackageSummaryView: View {
+    let packageGroup: GroupedHangarPackage
+
+    private var package: HangarPackage {
+        packageGroup.representative
+    }
+
+    private var columns: [GridItem] {
+        [
+            GridItem(.flexible(minimum: 112), spacing: 10),
+            GridItem(.flexible(minimum: 112), spacing: 10)
+        ]
+    }
+
+    private var acquiredDate: String {
+        package.acquiredAt.formatted(date: .abbreviated, time: .omitted)
+    }
 
     private var originalValueLabel: String {
-        packageGroup.containsMultipleCopies ? "Melt Value (Each)" : "Melt Value"
+        AppLocalizer.string(packageGroup.containsMultipleCopies ? "Melt Value (Each)" : "Melt Value")
     }
 
     private var currentValueLabel: String {
-        packageGroup.containsMultipleCopies ? "Current Value (Each)" : "Current Value"
+        AppLocalizer.string(packageGroup.containsMultipleCopies ? "Current Value (Each)" : "Current Value")
+    }
+
+    private var insuranceText: String {
+        package.detailInsuranceText ?? package.insurance
+    }
+
+    var body: some View {
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
+            PackageSummaryTile(
+                label: AppLocalizer.string("Status"),
+                value: package.status,
+                valueColor: statusColor(for: package.status)
+            )
+            PackageSummaryTile(
+                label: AppLocalizer.string("Insurance"),
+                value: insuranceText
+            )
+            PackageSummaryTile(
+                label: AppLocalizer.string("Acquired"),
+                value: acquiredDate
+            )
+            PackageSummaryTile(
+                label: originalValueLabel,
+                value: package.originalValueUSD.usdString,
+                monospacedValue: true
+            )
+            PackageSummaryTile(
+                label: currentValueLabel,
+                value: package.currentValueUSD.usdString,
+                monospacedValue: true
+            )
+            if packageGroup.containsMultipleCopies {
+                PackageSummaryTile(
+                    label: AppLocalizer.string("Copies"),
+                    value: "\(packageGroup.quantity)",
+                    monospacedValue: true
+                )
+            }
+        }
+        .padding(.vertical, 2)
     }
 
     private func statusColor(for status: String) -> Color {
-        status.localizedLowercase.contains("gifted") ? .green : .secondary
+        status.localizedLowercase.contains("gifted") ? .green : .primary
+    }
+}
+
+private struct PackageSummaryTile: View {
+    let label: String
+    let value: String
+    var valueColor: Color = .primary
+    var monospacedValue = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label)
+                .font(.caption2.weight(.bold))
+                .textCase(.uppercase)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .minimumScaleFactor(0.82)
+
+            Text(value)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(valueColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+                .modifier(MonospacedDigitModifier(isEnabled: monospacedValue))
+        }
+        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.secondary.opacity(0.10))
+        )
+    }
+}
+
+private struct MonospacedDigitModifier: ViewModifier {
+    let isEnabled: Bool
+
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.monospacedDigit()
+        } else {
+            content
+        }
     }
 }
 
@@ -736,7 +967,7 @@ private struct HangarGiftConfirmationView: View {
 
     private var fallbackRecipientName: String {
         let displayName = appModel.session?.displayName.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return displayName.isEmpty ? "Hangar Express User" : displayName
+        return displayName.isEmpty ? AppLocalizer.string("Hangar Express User") : displayName
     }
 
     private var recipientNamePreview: String {
@@ -755,7 +986,7 @@ private struct HangarGiftConfirmationView: View {
                 }
 
                 LabeledContent("Status", value: package.status)
-                LabeledContent("Insurance", value: package.insurance)
+                LabeledContent("Insurance", value: package.detailInsuranceText ?? package.insurance)
             } header: {
                 Text("Selected Item")
             }
@@ -890,7 +1121,7 @@ private struct HangarGiftConfirmationView: View {
 }
 
 private struct HangarActionTile: View {
-    let title: String
+    let title: LocalizedStringKey
     let systemImage: String
     let accentColor: Color
     let isEnabled: Bool
@@ -1128,7 +1359,7 @@ private struct HangarMeltConfirmationView: View {
         }
 
         guard !requiresSquadron42Acknowledgement || hasMetSquadron42Acknowledgement else {
-            errorMessage = "This package contains Squadron 42. Type I understand before Hangar Express can continue to Face ID and submit the melt request."
+            errorMessage = AppLocalizer.string("This package contains Squadron 42. Type I understand before Hangar Express can continue to Face ID and submit the melt request.")
             return
         }
 
@@ -1529,6 +1760,14 @@ private struct PackageItemRow: View {
     let reloadToken: UUID?
 
     var body: some View {
+        if item.imageURL == nil {
+            compactListRow
+        } else {
+            thumbnailRow
+        }
+    }
+
+    private var thumbnailRow: some View {
         HStack(alignment: .top, spacing: 12) {
             RemoteThumbnailView(
                 url: item.imageURL,
@@ -1554,6 +1793,31 @@ private struct PackageItemRow: View {
         .padding(.vertical, 2)
     }
 
+    private var compactListRow: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: fallbackSystemImage)
+                .font(.headline)
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 28)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(item.title)
+                    .font(.headline)
+
+                Text("\(item.category.rawValue) • \(item.detail)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if let pricing = item.upgradePricing {
+                    UpgradePricingSummary(pricing: pricing)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 8)
+    }
+
     private var fallbackSystemImage: String {
         switch item.category {
         case .ship:
@@ -1568,6 +1832,42 @@ private struct PackageItemRow: View {
             return "arrow.up.right.square"
         case .perk:
             return "gift.fill"
+        }
+    }
+}
+
+private struct PackageAlsoContainsRow: View {
+    let item: PackageItem
+
+    private var detailText: String? {
+        let detail = item.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !detail.isEmpty,
+              detail.localizedCaseInsensitiveCompare("Unknown") != .orderedSame,
+              detail.localizedCaseInsensitiveCompare("RSI pledge entitlement") != .orderedSame else {
+            return nil
+        }
+
+        return "\(item.category.rawValue) • \(detail)"
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(Color.cyan)
+                .frame(width: 9, height: 5)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+
+                if let detailText {
+                    Text(detailText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
@@ -1593,7 +1893,7 @@ private struct UpgradePricingSummary: View {
 }
 
 private struct LabeledValueRow: View {
-    let label: String
+    let label: LocalizedStringKey
     let value: String
 
     var body: some View {

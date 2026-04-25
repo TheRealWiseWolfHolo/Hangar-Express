@@ -35,7 +35,7 @@ final class DeviceOwnerSensitiveActionAuthorizer: SensitiveActionAuthorizing {
     }
 
     private func mapAvailabilityError(_ error: NSError?) -> SensitiveActionAuthorizationError {
-        let fallbackMessage = "Face ID or your iPhone passcode must be enabled before Hangar Express can confirm irreversible RSI account actions."
+        let fallbackMessage = AppLocalizer.string("Face ID or your iPhone passcode must be enabled before Hangar Express can confirm irreversible RSI account actions.")
 
         guard let error else {
             return .unavailable(fallbackMessage)
@@ -69,16 +69,16 @@ final class DeviceOwnerSensitiveActionAuthorizer: SensitiveActionAuthorizing {
                 return .cancelled
             case .biometryNotAvailable, .biometryNotEnrolled, .biometryLockout, .passcodeNotSet:
                 return .unavailable(
-                    "Face ID or your iPhone passcode must be enabled before Hangar Express can confirm irreversible RSI account actions."
+                    AppLocalizer.string("Face ID or your iPhone passcode must be enabled before Hangar Express can confirm irreversible RSI account actions.")
                 )
             default:
                 let message = laError.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-                return .failed(message.isEmpty ? "Identity verification failed." : message)
+                return .failed(message.isEmpty ? AppLocalizer.string("Identity verification failed.") : message)
             }
         }
 
         let nsError = error as NSError
         let message = nsError.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-        return .failed(message.isEmpty ? "Identity verification failed." : message)
+        return .failed(message.isEmpty ? AppLocalizer.string("Identity verification failed.") : message)
     }
 }
