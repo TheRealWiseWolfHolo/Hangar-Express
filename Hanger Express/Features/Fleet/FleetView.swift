@@ -50,6 +50,7 @@ struct FleetView: View {
     @State private var searchText = ""
     @State private var sortMode: SortMode = .manufacturer
     @State private var selectedShipGroup: GroupedFleetShip?
+    @State private var activeTransitionSourceID: String?
     @State private var presentedPledgeSheet: FleetShipPledgeSheetContext?
     @Namespace private var shipCardTransitionNamespace
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
@@ -127,6 +128,9 @@ struct FleetView: View {
                     transitionNamespace: shipCardTransitionNamespace
                 )
             }
+            .onChange(of: selectedShipGroup?.id) { _, newValue in
+                activeTransitionSourceID = newValue
+            }
             .sheet(item: $presentedPledgeSheet) { context in
                 FleetShipPledgeSheet(
                     appModel: appModel,
@@ -179,18 +183,14 @@ struct FleetView: View {
             }
         }
         .contentShape(Rectangle())
-        .matchedTransitionSource(
+        .fleetCardTransitionSource(
+            isActive: activeTransitionSourceID == shipGroup.id,
             id: shipGroup.id,
-            in: shipCardTransitionNamespace
-        ) { source in
-            source.clipShape(
-                RoundedRectangle(
-                    cornerRadius: displayMode == .singleColumn ? 24 : 22,
-                    style: .continuous
-                )
-            )
-        }
+            in: shipCardTransitionNamespace,
+            cornerRadius: displayMode == .singleColumn ? 24 : 22
+        )
         .onTapGesture {
+            activeTransitionSourceID = shipGroup.id
             selectedShipGroup = shipGroup
         }
         .onLongPressGesture(minimumDuration: 0.4) {
@@ -1605,6 +1605,29 @@ private struct FleetDisplaySection: Identifiable {
 
     var id: String {
         title ?? "all-ships"
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func fleetCardTransitionSource(
+        isActive: Bool,
+        id: String,
+        in namespace: Namespace.ID,
+        cornerRadius: CGFloat
+    ) -> some View {
+        if isActive {
+            matchedTransitionSource(id: id, in: namespace) { source in
+                source.clipShape(
+                    RoundedRectangle(
+                        cornerRadius: cornerRadius,
+                        style: .continuous
+                    )
+                )
+            }
+        } else {
+            self
+        }
     }
 }
 
