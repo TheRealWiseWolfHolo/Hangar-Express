@@ -243,6 +243,17 @@ struct PreviewHangarRepository: HangarRepository {
         )
     }
 
+    func prepareBuybackCheckout(
+        for session: UserSession,
+        pledge: BuybackPledge
+    ) async throws -> BuybackCheckoutPreparation {
+        BuybackCheckoutPreparation(
+            buybackPledgeID: pledge.id,
+            checkoutURL: URL(string: "https://robertsspaceindustries.com/en/pledge/cart")!,
+            updatedCookies: session.cookies
+        )
+    }
+
     static let sampleSnapshot = HangarSnapshot(
         accountHandle: UserSession.preview.handle,
         lastSyncedAt: referenceDate(year: 2026, month: 4, day: 17),

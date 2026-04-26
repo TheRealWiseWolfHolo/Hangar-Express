@@ -178,6 +178,7 @@ final class AppModel {
     private static let giftRequestTimeoutSeconds = 20
     private static let upgradeRequestTimeoutSeconds = 20
     private static let upgradeTargetLookupTimeoutSeconds = 20
+    private static let buybackCheckoutPreparationTimeoutSeconds = 30
     private static let actionCompletionBannerDurationNanoseconds: UInt64 = 2_000_000_000
 
     init(environment: AppEnvironment) {
@@ -843,10 +844,68 @@ final class AppModel {
         )
     }
 
+    func prepareBuybackCheckout(for pledge: BuybackPledge) async throws -> BuybackCheckoutPreparation {
+        guard !isRefreshing else {
+            throw HangarAccountActionError.actionInProgress
+        }
+
+        guard pledge.id > 0 else {
+            throw HangarAccountActionError.invalidBuybackItem
+        }
+
+        guard let session else {
+            throw HangarAccountActionError.missingSession
+        }
+
+        let timeoutSeconds = Self.buybackCheckoutPreparationTimeoutSeconds
+        do {
+            let result = try await withTimeout(seconds: timeoutSeconds) { [self] in
+                try await self.hangarRepository.prepareBuybackCheckout(
+                    for: session,
+                    pledge: pledge
+                )
+            } onTimeout: {
+                HangarAccountActionError.buybackCheckoutRejected(
+                    message: AppLocalizer.format(
+                        "RSI did not prepare the buy-back cart within %lld seconds.",
+                        timeoutSeconds
+                    )
+                )
+            }
+
+            if !result.updatedCookies.isEmpty {
+                await persistUpdatedSessionCookies(result.updatedCookies, baseSession: session)
+            }
+
+            return result
+        } catch let error as HangarAccountActionError {
+            throw error
+        } catch {
+            throw HangarAccountActionError.buybackCheckoutRejected(message: error.localizedDescription)
+        }
+    }
+
+    func persistBrowserCookies(_ cookies: [SessionCookie]) async {
+        guard !cookies.isEmpty, let session else {
+            return
+        }
+
+        await persistUpdatedSessionCookies(cookies, baseSession: session)
+    }
+
     private func cancelSilentHangarActionReconciliation() {
         silentHangarActionReconciliationTask?.cancel()
         silentHangarActionReconciliationTask = nil
         silentHangarActionReconciliationGeneration += 1
+    }
+
+    private func persistUpdatedSessionCookies(_ cookies: [SessionCookie], baseSession: UserSession) async {
+        guard !cookies.isEmpty else {
+            return
+        }
+
+        let updatedSession = baseSession.updatingCookies(cookies)
+        applyStoredSessions(await sessionStore.save(updatedSession, makeActive: true), resetContent: false)
     }
 
     private func scheduleSilentHangarActionReconciliation(
