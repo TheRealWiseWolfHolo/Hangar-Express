@@ -145,7 +145,7 @@ struct BuybackView: View {
                         }
                     }
                 )
-                .presentationDetents([.height(520), .medium])
+                .presentationDetents([.height(560)])
                 .presentationDragIndicator(.visible)
             }
             .alert(item: $buybackError) { error in
@@ -296,7 +296,7 @@ private struct BuybackConfirmationSheet: View {
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 8) {
                 Text(title)
                     .font(.title3.weight(.semibold))
@@ -345,7 +345,10 @@ private struct BuybackConfirmationSheet: View {
                 .frame(maxWidth: .infinity)
             }
         }
-        .padding(24)
+        .padding(.top, 42)
+        .padding(.horizontal, 24)
+        .padding(.bottom, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var title: String {
