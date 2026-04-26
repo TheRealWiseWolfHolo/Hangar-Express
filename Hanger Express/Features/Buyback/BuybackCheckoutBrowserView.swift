@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import WebKit
 
 struct BuybackCheckoutBrowserView: View {
@@ -144,11 +145,35 @@ private struct BuybackCheckoutWebView: UIViewRepresentable {
             for navigationAction: WKNavigationAction,
             windowFeatures: WKWindowFeatures
         ) -> WKWebView? {
+            if let url = navigationAction.request.url, shouldOpenExternally(url) {
+                openExternalURL(url)
+                return nil
+            }
+
             if navigationAction.targetFrame == nil {
                 webView.load(navigationAction.request)
             }
 
             return nil
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            guard let url = navigationAction.request.url else {
+                decisionHandler(.allow)
+                return
+            }
+
+            if shouldOpenExternally(url) {
+                openExternalURL(url)
+                decisionHandler(.cancel)
+                return
+            }
+
+            decisionHandler(.allow)
         }
 
         private func installCookies(_ cookies: [SessionCookie], in webView: WKWebView) async {
@@ -217,5 +242,51 @@ private struct BuybackCheckoutWebView: UIViewRepresentable {
         private func cookieKey(_ cookie: HTTPCookie) -> String {
             "\(cookie.domain)|\(cookie.path)|\(cookie.name)"
         }
+
+        private func shouldOpenExternally(_ url: URL) -> Bool {
+            guard let scheme = url.scheme?.lowercased() else {
+                return false
+            }
+
+            if !Self.inAppSchemes.contains(scheme) {
+                return true
+            }
+
+            guard scheme == "https",
+                  let host = url.host?.lowercased() else {
+                return false
+            }
+
+            return Self.externalPaymentDomains.contains { domain in
+                host == domain || host.hasSuffix(".\(domain)")
+            }
+        }
+
+        private func openExternalURL(_ url: URL) {
+            Task { @MainActor in
+                UIApplication.shared.open(url, options: [:])
+            }
+        }
+
+        private static let inAppSchemes: Set<String> = [
+            "about",
+            "blob",
+            "data",
+            "http",
+            "https",
+            "javascript"
+        ]
+
+        private static let externalPaymentDomains: Set<String> = [
+            "alipay.com",
+            "alipay.hk",
+            "alipayobjects.com",
+            "tenpay.com",
+            "wechatpay.com",
+            "paypal.com",
+            "paypalobjects.com",
+            "unionpay.com",
+            "95516.com"
+        ]
     }
 }
