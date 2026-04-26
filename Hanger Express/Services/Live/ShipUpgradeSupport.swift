@@ -462,6 +462,26 @@ struct HostedShipCatalogClient: Sendable {
     }
 }
 
+actor HostedShipCatalogStore {
+    static let shared = HostedShipCatalogStore()
+
+    private var cachedCatalog: RSIShipCatalog?
+
+    func catalog(using client: HostedShipCatalogClient) async throws -> RSIShipCatalog {
+        if let cachedCatalog {
+            return cachedCatalog
+        }
+
+        let catalog = try await client.fetchCatalog()
+        cachedCatalog = catalog
+        return catalog
+    }
+
+    func clear() {
+        cachedCatalog = nil
+    }
+}
+
 enum HostedShipCatalogError: Error, LocalizedError {
     case httpStatus(Int)
 
