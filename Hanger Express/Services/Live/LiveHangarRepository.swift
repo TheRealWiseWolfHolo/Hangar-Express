@@ -599,7 +599,7 @@ final class LiveHangarRepository: HangarRepository {
                 stepNumber: stepNumber,
                 stepCount: stepCount,
                 detail: pageDetail(
-                    for: "pledges",
+                    for: .pledge,
                     page: 1,
                     totalPages: nil,
                     loadedCount: 0,
@@ -667,7 +667,7 @@ final class LiveHangarRepository: HangarRepository {
                 stepNumber: stepNumber,
                 stepCount: stepCount,
                 detail: pageDetail(
-                    for: "pledges",
+                    for: .pledge,
                     page: 1,
                     totalPages: inferredTotalPages,
                     loadedCount: remotePledges.count,
@@ -739,7 +739,7 @@ final class LiveHangarRepository: HangarRepository {
                         stepNumber: stepNumber,
                         stepCount: stepCount,
                         detail: self.parallelPageDetail(
-                            for: "pledges",
+                            for: .pledge,
                             completedPages: completedPages,
                             totalPages: totalPages,
                             loadedCount: loadedCount,
@@ -896,7 +896,7 @@ final class LiveHangarRepository: HangarRepository {
                 stepNumber: stepNumber,
                 stepCount: stepCount,
                 detail: pageDetail(
-                    for: "pledges",
+                    for: .pledge,
                     page: startPage,
                     totalPages: inferredTotalPages,
                     loadedCount: remotePledges.count,
@@ -968,7 +968,7 @@ final class LiveHangarRepository: HangarRepository {
                         stepNumber: stepNumber,
                         stepCount: stepCount,
                         detail: self.parallelPageDetail(
-                            for: "pledges",
+                            for: .pledge,
                             completedPages: completedPages,
                             totalPages: max(totalPages - startPage + 1, 1),
                             loadedCount: loadedCount,
@@ -1045,7 +1045,7 @@ final class LiveHangarRepository: HangarRepository {
                 stepNumber: stepNumber,
                 stepCount: stepCount,
                 detail: pageDetail(
-                    for: "buy-back items",
+                    for: .buybackItem,
                     page: 1,
                     totalPages: nil,
                     loadedCount: 0,
@@ -1111,7 +1111,7 @@ final class LiveHangarRepository: HangarRepository {
                 stepNumber: stepNumber,
                 stepCount: stepCount,
                 detail: pageDetail(
-                    for: "buy-back items",
+                    for: .buybackItem,
                     page: 1,
                     totalPages: inferredTotalPages,
                     loadedCount: remoteBuyback.count,
@@ -1183,7 +1183,7 @@ final class LiveHangarRepository: HangarRepository {
                         stepNumber: stepNumber,
                         stepCount: stepCount,
                         detail: self.parallelPageDetail(
-                            for: "buy-back items",
+                            for: .buybackItem,
                             completedPages: completedPages,
                             totalPages: totalPages,
                             loadedCount: loadedCount,
@@ -1255,7 +1255,7 @@ final class LiveHangarRepository: HangarRepository {
                     stepNumber: stepNumber,
                     stepCount: stepCount,
                     detail: pageDetail(
-                        for: "pledges",
+                        for: .pledge,
                         page: page,
                         totalPages: pledgeTotalPages,
                         loadedCount: remotePledges.count,
@@ -1300,7 +1300,7 @@ final class LiveHangarRepository: HangarRepository {
                     stepNumber: stepNumber,
                     stepCount: stepCount,
                     detail: pageDetail(
-                        for: "pledges",
+                        for: .pledge,
                         page: page,
                         totalPages: pledgeTotalPages,
                         loadedCount: remotePledges.count,
@@ -1364,7 +1364,7 @@ final class LiveHangarRepository: HangarRepository {
                     stepNumber: stepNumber,
                     stepCount: stepCount,
                     detail: pageDetail(
-                        for: "buy-back items",
+                        for: .buybackItem,
                         page: page,
                         totalPages: buybackTotalPages,
                         loadedCount: remoteBuyback.count,
@@ -1405,7 +1405,7 @@ final class LiveHangarRepository: HangarRepository {
                     stepNumber: stepNumber,
                     stepCount: stepCount,
                     detail: pageDetail(
-                        for: "buy-back items",
+                        for: .buybackItem,
                         page: page,
                         totalPages: buybackTotalPages,
                         loadedCount: remoteBuyback.count,
@@ -2133,8 +2133,26 @@ final class LiveHangarRepository: HangarRepository {
         return false
     }
 
+    private enum RefreshItemKind {
+        case pledge
+        case buybackItem
+
+        func countLabel(_ count: Int) -> String {
+            switch self {
+            case .pledge:
+                return count == 1
+                    ? AppLocalizer.format("%lld pledge", count)
+                    : AppLocalizer.format("%lld pledges", count)
+            case .buybackItem:
+                return count == 1
+                    ? AppLocalizer.format("%lld buy-back item", count)
+                    : AppLocalizer.format("%lld buy-back items", count)
+            }
+        }
+    }
+
     private func pageDetail(
-        for itemLabel: String,
+        for itemKind: RefreshItemKind,
         page: Int,
         totalPages: Int?,
         loadedCount: Int,
@@ -2147,10 +2165,7 @@ final class LiveHangarRepository: HangarRepository {
             pageLabel = AppLocalizer.format("page %lld", page)
         }
 
-        let singularItemLabel = String(itemLabel.dropLast())
-        let countLabel = loadedCount == 1
-            ? AppLocalizer.format("1 %@", singularItemLabel)
-            : AppLocalizer.format("%lld %@", loadedCount, itemLabel)
+        let countLabel = itemKind.countLabel(loadedCount)
 
         if isLoading {
             if loadedCount > 0 {
@@ -2164,16 +2179,13 @@ final class LiveHangarRepository: HangarRepository {
     }
 
     private func parallelPageDetail(
-        for itemLabel: String,
+        for itemKind: RefreshItemKind,
         completedPages: Int,
         totalPages: Int,
         loadedCount: Int,
         workerCount: Int
     ) -> String {
-        let singularItemLabel = String(itemLabel.dropLast())
-        let countLabel = loadedCount == 1
-            ? AppLocalizer.format("1 %@", singularItemLabel)
-            : AppLocalizer.format("%lld %@", loadedCount, itemLabel)
+        let countLabel = itemKind.countLabel(loadedCount)
         return AppLocalizer.format(
             "Loaded %lld of %lld pages across %lld workers. %@ synced so far.",
             completedPages,
