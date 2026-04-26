@@ -52,6 +52,7 @@ struct FleetView: View {
     @State private var selectedShipGroup: GroupedFleetShip?
     @State private var transitionSourceResetToken = 0
     @State private var presentedPledgeSheet: FleetShipPledgeSheetContext?
+    @State private var presentedTool: FleetTool?
     @Namespace private var shipCardTransitionNamespace
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage("fleetDisplayMode") private var displayModeRawValue = DisplayMode.singleColumn.rawValue
@@ -69,6 +70,14 @@ struct FleetView: View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 24) {
+                    FleetToolsSection { tool in
+                        guard tool.isAvailable else {
+                            return
+                        }
+
+                        presentedTool = tool
+                    }
+
                     ForEach(displaySections) { section in
                         VStack(alignment: .leading, spacing: 14) {
                             if let title = section.title {
@@ -139,6 +148,14 @@ struct FleetView: View {
                     context: context,
                     reloadToken: appModel.hangarFleetImageReloadToken
                 )
+            }
+            .sheet(item: $presentedTool) { tool in
+                switch tool {
+                case .allShips:
+                    AllShipsBrowserView(reloadToken: appModel.hangarFleetImageReloadToken)
+                case .ccuChainCalculator, .resetCharacter:
+                    EmptyView()
+                }
             }
         }
     }
@@ -403,6 +420,630 @@ struct FleetView: View {
         }
 
         return AppLocalizer.string("MSRP unavailable")
+    }
+}
+
+private enum FleetTool: String, CaseIterable, Identifiable {
+    case allShips
+    case ccuChainCalculator
+    case resetCharacter
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .allShips:
+            return AppLocalizer.string("All Ships")
+        case .ccuChainCalculator:
+            return AppLocalizer.string("CCU Chain Calculator")
+        case .resetCharacter:
+            return AppLocalizer.string("Reset Character")
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .allShips:
+            return AppLocalizer.string("Browse the hosted ship catalog")
+        case .ccuChainCalculator, .resetCharacter:
+            return AppLocalizer.string("To be implemented")
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .allShips:
+            return "airplane.circle"
+        case .ccuChainCalculator:
+            return "link.circle"
+        case .resetCharacter:
+            return "person.crop.circle.badge.exclamationmark"
+        }
+    }
+
+    var isAvailable: Bool {
+        self == .allShips
+    }
+}
+
+private struct FleetToolsSection: View {
+    let onSelect: (FleetTool) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(AppLocalizer.string("Tools"))
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+
+            VStack(spacing: 10) {
+                ForEach(FleetTool.allCases) { tool in
+                    FleetToolRow(tool: tool) {
+                        onSelect(tool)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct FleetToolRow: View {
+    let tool: FleetTool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: tool.systemImage)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(tool.isAvailable ? Color.accentColor : .secondary)
+                    .frame(width: 34, height: 34)
+                    .background(
+                        Circle()
+                            .fill((tool.isAvailable ? Color.accentColor : Color.secondary).opacity(0.12))
+                    )
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(tool.title)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+
+                    Text(tool.subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 8)
+
+                if tool.isAvailable {
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!tool.isAvailable)
+        .opacity(tool.isAvailable ? 1 : 0.62)
+    }
+}
+
+private struct AllShipsBrowserView: View {
+    let reloadToken: UUID?
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var searchText = ""
+    @State private var priceFilter: AllShipsPriceFilter = .all
+    @State private var availabilityFilter: AllShipsAvailabilityFilter = .all
+    @State private var loadState: AllShipsLoadState = .idle
+    @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
+
+    private var filteredItems: [AllShipsCatalogItem] {
+        guard case let .loaded(items) = loadState else {
+            return []
+        }
+
+        let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
+        return items.filter { item in
+            let matchesSearch = normalizedSearchText.isEmpty || item.searchHaystack.contains(normalizedSearchText)
+            return matchesSearch
+                && priceFilter.includes(priceUSD: item.priceUSD)
+                && availabilityFilter.includes(item: item)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                switch loadState {
+                case .idle, .loading:
+                    AllShipsLoadingView()
+                case let .loaded(items):
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 14) {
+                            AllShipsQuickFilters(
+                                priceFilter: $priceFilter,
+                                availabilityFilter: $availabilityFilter,
+                                resultCount: filteredItems.count,
+                                totalCount: items.count
+                            )
+
+                            if filteredItems.isEmpty {
+                                AllShipsEmptyView()
+                            } else {
+                                ForEach(filteredItems) { item in
+                                    AllShipsCard(item: item, reloadToken: reloadToken)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                        .padding(.bottom, 24)
+                    }
+                case let .failed(message):
+                    AllShipsErrorView(message: message) {
+                        Task {
+                            await loadCatalog(force: true)
+                        }
+                    }
+                }
+            }
+            .id(appLanguageRawValue)
+            .navigationTitle(AppLocalizer.string("All Ships"))
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(
+                text: $searchText,
+                prompt: AppLocalizer.string("Search all ships")
+            )
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(AppLocalizer.string("Done")) {
+                        dismiss()
+                    }
+                }
+            }
+            .task {
+                await loadCatalog(force: false)
+            }
+        }
+    }
+
+    private func loadCatalog(force: Bool) async {
+        if !force,
+           case .loaded = loadState {
+            return
+        }
+
+        loadState = .loading
+
+        do {
+            async let shipCatalog = HostedShipCatalogStore.shared.catalog(using: HostedShipCatalogClient())
+            async let detailCatalog = HostedShipDetailCatalogStore.shared.catalog(using: HostedShipDetailCatalogClient())
+            loadState = .loaded(
+                try await AllShipsCatalogItem.makeItems(
+                    shipCatalog: shipCatalog,
+                    detailCatalog: detailCatalog
+                )
+            )
+        } catch {
+            loadState = .failed(error.localizedDescription)
+        }
+    }
+}
+
+private enum AllShipsLoadState {
+    case idle
+    case loading
+    case loaded([AllShipsCatalogItem])
+    case failed(String)
+}
+
+private enum AllShipsPriceFilter: String, CaseIterable, Identifiable {
+    case all
+    case under100
+    case between100And250
+    case between250And500
+    case above500
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .all:
+            return AppLocalizer.string("Any Price")
+        case .under100:
+            return AppLocalizer.string("$0-$100")
+        case .between100And250:
+            return AppLocalizer.string("$100-$250")
+        case .between250And500:
+            return AppLocalizer.string("$250-$500")
+        case .above500:
+            return AppLocalizer.string("$500+")
+        }
+    }
+
+    func includes(priceUSD: Decimal?) -> Bool {
+        guard self != .all else {
+            return true
+        }
+
+        guard let priceUSD else {
+            return false
+        }
+
+        switch self {
+        case .all:
+            return true
+        case .under100:
+            return priceUSD.isLessThan(100)
+        case .between100And250:
+            return priceUSD.isGreaterThanOrEqualTo(100) && priceUSD.isLessThan(250)
+        case .between250And500:
+            return priceUSD.isGreaterThanOrEqualTo(250) && priceUSD.isLessThan(500)
+        case .above500:
+            return priceUSD.isGreaterThanOrEqualTo(500)
+        }
+    }
+}
+
+private enum AllShipsAvailabilityFilter: String, CaseIterable, Identifiable {
+    case all
+    case available
+    case unavailable
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .all:
+            return AppLocalizer.string("Any Availability")
+        case .available:
+            return AppLocalizer.string("Available in Store")
+        case .unavailable:
+            return AppLocalizer.string("Unavailable in Store")
+        }
+    }
+
+    func includes(item: AllShipsCatalogItem) -> Bool {
+        switch self {
+        case .all:
+            return true
+        case .available:
+            return item.isAvailableInStore == true
+        case .unavailable:
+            return item.isAvailableInStore == false
+        }
+    }
+}
+
+private struct AllShipsCatalogItem: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let manufacturer: String
+    let priceUSD: Decimal?
+    let priceLabel: String?
+    let storeAvailability: String?
+    let inGameStatus: String?
+    let imageURL: URL?
+
+    var priceText: String {
+        if let priceUSD {
+            return priceUSD.usdString
+        }
+
+        return priceLabel?.nilIfBlank ?? AppLocalizer.string("MSRP unavailable")
+    }
+
+    var availabilityText: String {
+        storeAvailability?.nilIfBlank ?? AppLocalizer.string("Unavailable")
+    }
+
+    var statusText: String {
+        inGameStatus?.nilIfBlank ?? AppLocalizer.string("Unavailable")
+    }
+
+    var isAvailableInStore: Bool? {
+        guard let availability = storeAvailability?.nilIfBlank?.localizedLowercase else {
+            return nil
+        }
+
+        if availability.contains("no longer")
+            || availability.contains("not available")
+            || availability.contains("unavailable")
+            || availability.contains("not for sale") {
+            return false
+        }
+
+        if availability.contains("available")
+            || availability.contains("always")
+            || availability.contains("limited")
+            || availability.contains("sale") {
+            return true
+        }
+
+        return nil
+    }
+
+    var searchHaystack: String {
+        [
+            name,
+            manufacturer,
+            priceText,
+            storeAvailability,
+            inGameStatus
+        ]
+        .compactMap { $0?.nilIfBlank }
+        .joined(separator: " ")
+        .localizedLowercase
+    }
+
+    static func makeItems(
+        shipCatalog: RSIShipCatalog,
+        detailCatalog: RSIShipDetailCatalog
+    ) -> [AllShipsCatalogItem] {
+        let catalogItems = shipCatalog.ships.map { ship in
+            let detail = detailCatalog.matchShip(named: ship.name)
+            return AllShipsCatalogItem(
+                id: "catalog-\(ship.id)",
+                name: ship.name,
+                manufacturer: manufacturerName(
+                    catalogManufacturer: ship.manufacturer,
+                    detailManufacturer: detail?.manufacturer
+                ),
+                priceUSD: ship.msrpUSD,
+                priceLabel: ship.msrpLabel,
+                storeAvailability: detail?.pledgeAvailability,
+                inGameStatus: detail?.inGameStatus,
+                imageURL: ship.imageURL
+            )
+        }
+
+        let catalogKeys = Set(shipCatalog.ships.map { UpgradeTitleParser.normalizedShipKey($0.name) })
+        let detailOnlyItems = detailCatalog.ships.compactMap { detail -> AllShipsCatalogItem? in
+            let detailKey = UpgradeTitleParser.normalizedShipKey(detail.name)
+            guard !catalogKeys.contains(detailKey) else {
+                return nil
+            }
+
+            return AllShipsCatalogItem(
+                id: "detail-\(detailKey)",
+                name: detail.name,
+                manufacturer: manufacturerName(catalogManufacturer: nil, detailManufacturer: detail.manufacturer),
+                priceUSD: nil,
+                priceLabel: nil,
+                storeAvailability: detail.pledgeAvailability,
+                inGameStatus: detail.inGameStatus,
+                imageURL: nil
+            )
+        }
+
+        return (catalogItems + detailOnlyItems).sorted { lhs, rhs in
+            lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    private static func manufacturerName(catalogManufacturer: String?, detailManufacturer: String?) -> String {
+        let rawManufacturer = catalogManufacturer?.nilIfBlank ?? detailManufacturer?.nilIfBlank
+        guard let rawManufacturer else {
+            return AppLocalizer.string("Unknown Manufacturer")
+        }
+
+        return FleetPresentationFormatter.manufacturerDisplayName(rawManufacturer)
+    }
+}
+
+private struct AllShipsQuickFilters: View {
+    @Binding var priceFilter: AllShipsPriceFilter
+    @Binding var availabilityFilter: AllShipsAvailabilityFilter
+    let resultCount: Int
+    let totalCount: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                filterMenu(
+                    title: AppLocalizer.string("Price Range"),
+                    value: priceFilter.title
+                ) {
+                    Picker(AppLocalizer.string("Price Range"), selection: $priceFilter) {
+                        ForEach(AllShipsPriceFilter.allCases) { filter in
+                            Text(filter.title).tag(filter)
+                        }
+                    }
+                }
+
+                filterMenu(
+                    title: AppLocalizer.string("Availability"),
+                    value: availabilityFilter.title
+                ) {
+                    Picker(AppLocalizer.string("Availability"), selection: $availabilityFilter) {
+                        ForEach(AllShipsAvailabilityFilter.allCases) { filter in
+                            Text(filter.title).tag(filter)
+                        }
+                    }
+                }
+            }
+
+            Text(AppLocalizer.format("Showing %lld of %lld ships", resultCount, totalCount))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 2)
+        }
+    }
+
+    private func filterMenu<Content: View>(
+        title: String,
+        value: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        Menu {
+            content()
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title.uppercased())
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+
+                Text(value)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct AllShipsCard: View {
+    let item: AllShipsCatalogItem
+    let reloadToken: UUID?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            RemoteThumbnailView(
+                url: item.imageURL,
+                reloadToken: reloadToken,
+                fallbackSystemImage: "airplane",
+                size: 78
+            )
+
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.name)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text(item.manufacturer)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    AllShipsMetadataRow(label: AppLocalizer.string("Price"), value: item.priceText)
+                    AllShipsMetadataRow(label: AppLocalizer.string("Availability in RSI Store"), value: item.availabilityText)
+                    AllShipsMetadataRow(label: AppLocalizer.string("In Game Status"), value: item.statusText)
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        )
+    }
+}
+
+private struct AllShipsMetadataRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 8)
+
+            Text(value)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.primary)
+                .multilineTextAlignment(.trailing)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private struct AllShipsLoadingView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+
+            Text(AppLocalizer.string("Loading all ships"))
+                .font(.headline)
+
+            Text(AppLocalizer.string("Loading the hosted ship catalog."))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+}
+
+private struct AllShipsEmptyView: View {
+    var body: some View {
+        VStack(alignment: .center, spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .font(.title2)
+                .foregroundStyle(.secondary)
+
+            Text(AppLocalizer.string("No matching ships"))
+                .font(.headline)
+
+            Text(AppLocalizer.string("Try a different search term or loosen the filters."))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        )
+    }
+}
+
+private struct AllShipsErrorView: View {
+    let message: String
+    let retry: () -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.title2)
+                .foregroundStyle(.orange)
+
+            Text(AppLocalizer.string("Unable to Load Ships"))
+                .font(.headline)
+
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            Button(AppLocalizer.string("Try Again"), action: retry)
+                .buttonStyle(.borderedProminent)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private extension Decimal {
+    func isLessThan(_ value: Int) -> Bool {
+        NSDecimalNumber(decimal: self).compare(NSDecimalNumber(value: value)) == .orderedAscending
+    }
+
+    func isGreaterThanOrEqualTo(_ value: Int) -> Bool {
+        let comparison = NSDecimalNumber(decimal: self).compare(NSDecimalNumber(value: value))
+        return comparison == .orderedSame || comparison == .orderedDescending
     }
 }
 

@@ -409,6 +409,7 @@ final class AppModel {
         let resolvedScope = existingSnapshot == nil ? RefreshScope.full : scope
 
         if resolvedScope == .full || resolvedScope == .hangar {
+            await HostedShipCatalogStore.shared.clear()
             await HostedShipDetailCatalogStore.shared.clear()
         }
 
@@ -534,6 +535,7 @@ final class AppModel {
         await snapshotStore.clear()
         URLCache.shared.removeAllCachedResponses()
         await imageCache.clear()
+        await HostedShipCatalogStore.shared.clear()
         await HostedShipDetailCatalogStore.shared.clear()
         hangarFleetImageReloadToken = UUID()
         buybackImageReloadToken = UUID()
