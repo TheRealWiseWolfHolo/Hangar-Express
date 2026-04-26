@@ -241,7 +241,7 @@ struct BuybackView: View {
         }
 
         do {
-            let preparation = try await appModel.prepareBuybackCheckout(for: itemGroup.representative)
+            let preparation = try await appModel.prepareBuybackCheckout(for: itemGroup.checkoutPledge)
             let cookies = appModel.session?.cookies ?? preparation.updatedCookies
             checkoutContext = BuybackCheckoutContext(
                 itemTitle: itemGroup.representative.title,
@@ -295,6 +295,12 @@ struct BuybackCheckoutContext: Identifiable, Hashable {
 private struct BuybackCheckoutError: Identifiable {
     let id = UUID()
     let message: String
+}
+
+private extension GroupedBuybackPledge {
+    var checkoutPledge: BuybackPledge {
+        pledges.first { $0.upgradeContext?.isValid == true } ?? representative
+    }
 }
 
 private struct BuybackGroupRow: View {
