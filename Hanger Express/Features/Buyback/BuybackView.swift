@@ -31,6 +31,10 @@ struct BuybackView: View {
     @State private var searchText = ""
     @State private var searchFilters: Set<SearchFilter> = []
     @State private var isSearchPresented = false
+    @State private var pendingBuybackGroup: GroupedBuybackPledge?
+    @State private var checkoutContext: BuybackCheckoutContext?
+    @State private var buybackError: BuybackCheckoutError?
+    @State private var isPreparingCheckout = false
 
     var body: some View {
         NavigationStack {
@@ -73,10 +77,16 @@ struct BuybackView: View {
                         .frame(maxWidth: .infinity)
                     } else {
                         ForEach(filteredItemGroups) { itemGroup in
-                            BuybackGroupRow(
-                                itemGroup: itemGroup,
-                                reloadToken: appModel.buybackImageReloadToken
-                            )
+                            Button {
+                                pendingBuybackGroup = itemGroup
+                            } label: {
+                                BuybackGroupRow(
+                                    itemGroup: itemGroup,
+                                    reloadToken: appModel.buybackImageReloadToken
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isPreparingCheckout || appModel.isRefreshing)
                         }
                     }
                 }
@@ -94,6 +104,21 @@ struct BuybackView: View {
 
                 searchFilters.removeAll()
             }
+            .overlay {
+                if isPreparingCheckout {
+                    ZStack {
+                        Color.black.opacity(0.2)
+                            .ignoresSafeArea()
+
+                        ProgressView("Preparing buy-back checkout...")
+                            .padding(18)
+                            .background(
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                    .fill(.regularMaterial)
+                            )
+                    }
+                }
+            }
             .navigationTitle("Buy Back")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -106,6 +131,42 @@ struct BuybackView: View {
                     }
                     .disabled(appModel.isRefreshing)
                 }
+            }
+            .alert(confirmBuybackTitle, isPresented: confirmBuybackBinding) {
+                Button("Open Browser") {
+                    guard let pendingBuybackGroup else {
+                        return
+                    }
+
+                    let group = pendingBuybackGroup
+                    self.pendingBuybackGroup = nil
+                    Task {
+                        await startBuybackCheckout(for: group)
+                    }
+                }
+                Button("Back", role: .cancel) {
+                    pendingBuybackGroup = nil
+                }
+            }
+            .alert(item: $buybackError) { error in
+                Alert(
+                    title: Text("Buy-back Checkout Failed"),
+                    message: Text(error.message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
+            .sheet(item: $checkoutContext) { context in
+                BuybackCheckoutBrowserView(
+                    context: context,
+                    onCancel: { cookies in
+                        checkoutContext = nil
+                        completeBuybackCheckout(exportedCookies: cookies)
+                    },
+                    onFinished: { cookies in
+                        checkoutContext = nil
+                        completeBuybackCheckout(exportedCookies: cookies)
+                    }
+                )
             }
         }
     }
@@ -149,6 +210,56 @@ struct BuybackView: View {
         }
     }
 
+    private var confirmBuybackBinding: Binding<Bool> {
+        Binding(
+            get: { pendingBuybackGroup != nil },
+            set: { isPresented in
+                if !isPresented {
+                    pendingBuybackGroup = nil
+                }
+            }
+        )
+    }
+
+    private var confirmBuybackTitle: String {
+        guard let title = pendingBuybackGroup?.representative.title.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty else {
+            return AppLocalizer.string("Do you want to buyback this item?")
+        }
+
+        return AppLocalizer.format("Do you want to buyback %@?", title)
+    }
+
+    private func startBuybackCheckout(for itemGroup: GroupedBuybackPledge) async {
+        guard !isPreparingCheckout else {
+            return
+        }
+
+        isPreparingCheckout = true
+        defer {
+            isPreparingCheckout = false
+        }
+
+        do {
+            let preparation = try await appModel.prepareBuybackCheckout(for: itemGroup.representative)
+            let cookies = appModel.session?.cookies ?? preparation.updatedCookies
+            checkoutContext = BuybackCheckoutContext(
+                itemTitle: itemGroup.representative.title,
+                checkoutURL: preparation.checkoutURL,
+                cookies: cookies
+            )
+        } catch {
+            buybackError = BuybackCheckoutError(message: error.localizedDescription)
+        }
+    }
+
+    private func completeBuybackCheckout(exportedCookies: [SessionCookie]) {
+        Task {
+            await appModel.persistBrowserCookies(exportedCookies)
+            await appModel.refresh(scope: .full)
+        }
+    }
+
     private var emptyStateTitle: String {
         if snapshot.buyback.isEmpty {
             return AppLocalizer.string("Buy Back Is Empty")
@@ -172,6 +283,18 @@ struct BuybackView: View {
 
         return AppLocalizer.string("Try a different search term or clear one of the active filters.")
     }
+}
+
+struct BuybackCheckoutContext: Identifiable, Hashable {
+    let id = UUID()
+    let itemTitle: String
+    let checkoutURL: URL
+    let cookies: [SessionCookie]
+}
+
+private struct BuybackCheckoutError: Identifiable {
+    let id = UUID()
+    let message: String
 }
 
 private struct BuybackGroupRow: View {

@@ -1519,6 +1519,7 @@ struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
     let addedToBuybackAt: Date
     let notes: String
     let imageURL: URL?
+    let upgradeContext: BuybackUpgradeContext?
 
     init(
         id: Int,
@@ -1526,7 +1527,8 @@ struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
         recoveredValueUSD: Decimal,
         addedToBuybackAt: Date,
         notes: String,
-        imageURL: URL? = nil
+        imageURL: URL? = nil,
+        upgradeContext: BuybackUpgradeContext? = nil
     ) {
         self.id = id
         self.title = title
@@ -1534,6 +1536,7 @@ struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
         self.addedToBuybackAt = addedToBuybackAt
         self.notes = notes
         self.imageURL = imageURL
+        self.upgradeContext = upgradeContext
     }
 
     var displayedNotes: String? {
@@ -1646,6 +1649,16 @@ struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
     struct GroupingKey: Hashable, Sendable {
         let title: String
         let displayedNotes: String
+    }
+}
+
+struct BuybackUpgradeContext: Hashable, Sendable, Codable {
+    let fromShipID: Int
+    let toShipID: Int
+    let toSkuID: Int
+
+    var isValid: Bool {
+        fromShipID > 0 && toShipID > 0 && toSkuID > 0
     }
 }
 

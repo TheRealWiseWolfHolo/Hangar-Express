@@ -500,6 +500,24 @@ final class LiveHangarRepository: HangarRepository {
         )
     }
 
+    func prepareBuybackCheckout(
+        for session: UserSession,
+        pledge: BuybackPledge
+    ) async throws -> BuybackCheckoutPreparation {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.prepareBuybackCheckout(
+                for: session,
+                pledge: pledge
+            )
+        }
+
+        try validate(session: session)
+        return try await browser.prepareBuybackCheckout(
+            using: session.cookies,
+            pledge: pledge
+        )
+    }
+
     private func validate(session: UserSession) throws {
         guard !session.cookies.isEmpty else {
             throw LiveHangarRepositoryError.sessionUnavailable
@@ -2432,7 +2450,8 @@ final class LiveHangarRepository: HangarRepository {
             imageURL: mirroredCatalogImageURL(
                 remote.imageURL.flatMap(URL.init(string:)),
                 shipCatalog: shipCatalog
-            )
+            ),
+            upgradeContext: remote.upgradeContext
         )
     }
 
@@ -3178,6 +3197,53 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             wasSuccessful: shouldTreatAsSuccess,
             failureMessage: failureMessage,
             updatedCookies: updatedCookies
+        )
+    }
+
+    fileprivate func prepareBuybackCheckout(
+        using cookies: [SessionCookie],
+        pledge: BuybackPledge
+    ) async throws -> BuybackCheckoutPreparation {
+        let url = try storefrontURL(path: "/en/account/buy-back-pledges")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let upgradeContext = pledge.upgradeContext
+        let result = try await evaluate(
+            script: Self.prepareBuybackCheckoutScript,
+            arguments: [
+                "buybackPledgeID": pledge.id,
+                "isUpgradeBuyback": upgradeContext?.isValid == true,
+                "fromShipID": upgradeContext?.fromShipID ?? 0,
+                "toShipID": upgradeContext?.toShipID ?? 0,
+                "toSkuID": upgradeContext?.toSkuID ?? 0
+            ],
+            as: RemoteBuybackCheckoutPreparation.self
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        guard result.status == "ok" else {
+            let failureMessage = [result.failureMessage, result.debugSummary]
+                .compactMap { value in
+                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                }
+                .joined(separator: "\n\n")
+                .nilIfEmpty ?? "RSI did not add the selected buy-back pledge to the cart."
+            throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
+        }
+
+        let fallbackCheckoutURL = try storefrontURL(path: "/en/pledge/cart")
+        let checkoutURL = result.checkoutURL
+            .flatMap(URL.init(string:))
+            ?? fallbackCheckoutURL
+
+        return BuybackCheckoutPreparation(
+            buybackPledgeID: pledge.id,
+            checkoutURL: checkoutURL,
+            updatedCookies: await currentRSICookies()
         )
     }
 
@@ -5248,9 +5314,21 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         const href = button?.getAttribute('href') || '';
         const hrefId = Number(href.split('/').filter(Boolean).pop());
         const dataId = Number(button?.getAttribute('data-pledgeid'));
+        const fromShipID = Number(button?.getAttribute('data-fromshipid'));
+        const toShipID = Number(button?.getAttribute('data-toshipid'));
+        const toSkuID = Number(button?.getAttribute('data-toskuid'));
         const definitionValues = Array.from(article.querySelectorAll('dl dd'))
           .map((node) => node.textContent.trim())
           .filter(Boolean);
+        const upgradeContext = Number.isFinite(fromShipID) && fromShipID > 0 &&
+          Number.isFinite(toShipID) && toShipID > 0 &&
+          Number.isFinite(toSkuID) && toSkuID > 0
+            ? {
+                fromShipID,
+                toShipID,
+                toSkuID
+              }
+            : null;
 
         return {
           id: Number.isFinite(hrefId) && hrefId > 0 ? hrefId : (Number.isFinite(dataId) && dataId > 0 ? dataId : null),
@@ -5258,7 +5336,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
           dateText: definitionValues[0] || '',
           containsText: definitionValues[2] || firstText(article, ['.information .contains']),
           valueText: firstText(article, ['.price', '.value', '.cost']),
-          imageURL: firstImageURL(article.querySelector('.image, .thumb, .thumbnail, picture, img') || article)
+          imageURL: firstImageURL(article.querySelector('.image, .thumb, .thumbnail, picture, img') || article),
+          upgradeContext
         };
       })
     };
@@ -5610,6 +5689,266 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       items,
       failureMessage,
       debugSummary
+    };
+    """
+
+    private static let prepareBuybackCheckoutScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+
+    const parsedBuybackPledgeID = Number(buybackPledgeID);
+    const parsedFromShipID = Number(fromShipID);
+    const parsedToShipID = Number(toShipID);
+    const parsedToSkuID = Number(toSkuID);
+    const shouldUseUpgradeBuybackFlow = isUpgradeBuyback === true;
+
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        checkoutURL: null,
+        failureMessage: 'The RSI buy-back page reported access denied before checkout preparation started.',
+        debugSummary: null
+      };
+    }
+
+    if (!Number.isFinite(parsedBuybackPledgeID) || parsedBuybackPledgeID <= 0) {
+      return {
+        accessDenied: false,
+        status: 'invalid-buyback-pledge',
+        checkoutURL: null,
+        failureMessage: 'Hangar Express could not determine the selected buy-back pledge id.',
+        debugSummary: `buybackPledgeID=${String(buybackPledgeID)}`
+      };
+    }
+
+    if (shouldUseUpgradeBuybackFlow) {
+      const hasValidUpgradeContext =
+        Number.isFinite(parsedFromShipID) && parsedFromShipID > 0 &&
+        Number.isFinite(parsedToShipID) && parsedToShipID > 0 &&
+        Number.isFinite(parsedToSkuID) && parsedToSkuID > 0;
+
+      if (!hasValidUpgradeContext) {
+        return {
+          accessDenied: false,
+          status: 'invalid-upgrade-buyback-context',
+          checkoutURL: null,
+          failureMessage: 'Hangar Express could not determine the ship-upgrade metadata for this buy-back item.',
+          debugSummary: `pledge=${parsedBuybackPledgeID}, fromShipID=${String(fromShipID)}, toShipID=${String(toShipID)}, toSkuID=${String(toSkuID)}`
+        };
+      }
+    }
+
+    const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
+    const rsiDevice = cookieValue('_rsi_device');
+    const requestHeaders = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Accept': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+
+    if (csrfToken) {
+      requestHeaders['x-csrf-token'] = csrfToken;
+    }
+    if (rsiToken) {
+      requestHeaders['x-rsi-token'] = rsiToken;
+    }
+    if (rsiDevice) {
+      requestHeaders['x-rsi-device'] = rsiDevice;
+    }
+
+    const readJSONResponse = async (response) => {
+      const responseText = await response.text();
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        payload = null;
+      }
+
+      return {
+        responseText,
+        payload
+      };
+    };
+
+    const postJSON = async (endpoint, body, label, requiresSuccessFlag = false) => {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        credentials: 'include',
+        headers: requestHeaders,
+        body: JSON.stringify(body)
+      });
+      const { responseText, payload } = await readJSONResponse(response);
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          ok: false,
+          accessDenied: true,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI rejected ${label}.`),
+          debugSummary: `${label}: httpStatus=${response.status}`
+        };
+      }
+
+      const hasSuccessFlag = payload && Object.prototype.hasOwnProperty.call(payload, 'success');
+      const successValue = Number(payload?.success ?? 1);
+      if (!response.ok || (requiresSuccessFlag && (!hasSuccessFlag || successValue !== 1)) || (hasSuccessFlag && successValue === 0)) {
+        return {
+          ok: false,
+          accessDenied: false,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI returned HTTP ${response.status} while preparing ${label}.`),
+          debugSummary: `${label}: httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}`
+        };
+      }
+
+      return {
+        ok: true,
+        accessDenied: false,
+        payload,
+        debugSummary: `${label}: httpStatus=${response.status}`
+      };
+    };
+
+    const checkoutURL = new URL('/en/pledge/cart', window.location.origin).toString();
+
+    if (!shouldUseUpgradeBuybackFlow) {
+      const buybackResponse = await postJSON(
+        '/api/store/buyBackPledge',
+        { id: parsedBuybackPledgeID },
+        'buy-back cart insertion',
+        true
+      );
+
+      if (!buybackResponse.ok) {
+        return {
+          accessDenied: buybackResponse.accessDenied,
+          status: buybackResponse.accessDenied ? 'access-denied' : 'failed',
+          checkoutURL: null,
+          failureMessage: buybackResponse.failureMessage,
+          debugSummary: `${buybackResponse.debugSummary}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+        };
+      }
+
+      return {
+        accessDenied: false,
+        status: 'ok',
+        checkoutURL,
+        failureMessage: null,
+        debugSummary: `pledge=${parsedBuybackPledgeID}, flow=buyBackPledge, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+      };
+    }
+
+    const authTokenResponse = await postJSON(
+      '/api/account/v2/setAuthToken',
+      {},
+      'buy-back auth token setup'
+    );
+    if (!authTokenResponse.ok) {
+      return {
+        accessDenied: authTokenResponse.accessDenied,
+        status: authTokenResponse.accessDenied ? 'access-denied' : 'failed',
+        checkoutURL: null,
+        failureMessage: authTokenResponse.failureMessage,
+        debugSummary: authTokenResponse.debugSummary
+      };
+    }
+
+    const contextResponse = await postJSON(
+      '/api/ship-upgrades/setContextToken',
+      {
+        fromShipId: parsedFromShipID,
+        pledgeId: parsedBuybackPledgeID,
+        toShipId: parsedToShipID,
+        toSkuId: parsedToSkuID
+      },
+      'buy-back upgrade context setup',
+      true
+    );
+    if (!contextResponse.ok) {
+      return {
+        accessDenied: contextResponse.accessDenied,
+        status: contextResponse.accessDenied ? 'access-denied' : 'failed',
+        checkoutURL: null,
+        failureMessage: contextResponse.failureMessage,
+        debugSummary: contextResponse.debugSummary
+      };
+    }
+
+    const upgradeAddToCartQuery = `mutation addToCart($from: Int!, $to: Int!) {
+      addToCart(from: $from, to: $to) {
+        jwt
+      }
+    }`;
+
+    const graphQLResponse = await fetch('/pledge-store/api/upgrade/graphql', {
+      method: 'POST',
+      credentials: 'include',
+      headers: requestHeaders,
+      body: JSON.stringify({
+        query: upgradeAddToCartQuery,
+        variables: {
+          from: parsedFromShipID,
+          to: parsedToSkuID
+        }
+      })
+    });
+    const graphQLBody = await readJSONResponse(graphQLResponse);
+    const graphQLErrors = Array.isArray(graphQLBody.payload?.errors)
+      ? graphQLBody.payload.errors.map((entry) => normalizeText(entry?.message || JSON.stringify(entry))).filter(Boolean)
+      : [];
+    const upgradeToken = graphQLBody.payload?.data?.addToCart?.jwt || '';
+
+    if (graphQLResponse.status === 401 || graphQLResponse.status === 403) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        checkoutURL: null,
+        failureMessage: normalizeText(graphQLBody.responseText || 'RSI rejected the buy-back upgrade cart request.'),
+        debugSummary: `upgradeGraphQL: httpStatus=${graphQLResponse.status}`
+      };
+    }
+
+    if (!graphQLResponse.ok || graphQLErrors.length > 0 || !upgradeToken) {
+      return {
+        accessDenied: false,
+        status: 'failed',
+        checkoutURL: null,
+        failureMessage: normalizeText(graphQLErrors.join(' ') || graphQLBody.responseText || 'RSI did not return the buy-back upgrade cart token.'),
+        debugSummary: `upgradeGraphQL: httpStatus=${graphQLResponse.status}, tokenPresent=${upgradeToken ? 'yes' : 'no'}, responsePreview=${normalizeText(graphQLBody.responseText).slice(0, 280) || 'n/a'}`
+      };
+    }
+
+    const tokenResponse = await postJSON(
+      '/api/store/v2/cart/token',
+      { jwt: upgradeToken },
+      'buy-back upgrade cart token',
+      true
+    );
+    if (!tokenResponse.ok) {
+      return {
+        accessDenied: tokenResponse.accessDenied,
+        status: tokenResponse.accessDenied ? 'access-denied' : 'failed',
+        checkoutURL: null,
+        failureMessage: tokenResponse.failureMessage,
+        debugSummary: tokenResponse.debugSummary
+      };
+    }
+
+    return {
+      accessDenied: false,
+      status: 'ok',
+      checkoutURL,
+      failureMessage: null,
+      debugSummary: `pledge=${parsedBuybackPledgeID}, flow=upgradeBuyback, fromShipID=${parsedFromShipID}, toShipID=${parsedToShipID}, toSkuID=${parsedToSkuID}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
     };
     """
 
@@ -6454,6 +6793,7 @@ private nonisolated struct RemoteBuybackPledge: Decodable {
     let containsText: String
     let valueText: String
     let imageURL: String?
+    let upgradeContext: BuybackUpgradeContext?
 
     var pageSignature: String {
         [
@@ -6462,9 +6802,18 @@ private nonisolated struct RemoteBuybackPledge: Decodable {
             dateText,
             containsText,
             valueText,
-            imageURL ?? ""
+            imageURL ?? "",
+            upgradeContext.map { "\($0.fromShipID)-\($0.toShipID)-\($0.toSkuID)" } ?? ""
         ].joined(separator: "•")
     }
+}
+
+private nonisolated struct RemoteBuybackCheckoutPreparation: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let checkoutURL: String?
+    let failureMessage: String?
+    let debugSummary: String?
 }
 
 private nonisolated struct RemoteHangarLogPage: Decodable {

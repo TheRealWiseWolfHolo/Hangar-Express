@@ -220,6 +220,12 @@ nonisolated struct ApplyUpgradeResult: Hashable, Sendable {
     let updatedCookies: [SessionCookie]
 }
 
+nonisolated struct BuybackCheckoutPreparation: Hashable, Sendable {
+    let buybackPledgeID: Int
+    let checkoutURL: URL
+    let updatedCookies: [SessionCookie]
+}
+
 protocol HangarRepository: Sendable {
     func fetchSnapshot(
         for session: UserSession,
@@ -283,6 +289,11 @@ protocol HangarRepository: Sendable {
         targetPledgeID: Int,
         password: String
     ) async throws -> ApplyUpgradeResult
+
+    func prepareBuybackCheckout(
+        for session: UserSession,
+        pledge: BuybackPledge
+    ) async throws -> BuybackCheckoutPreparation
 }
 
 extension HangarRepository {

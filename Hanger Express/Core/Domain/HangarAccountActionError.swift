@@ -18,6 +18,8 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
     case upgradeTargetLookupFailed(message: String)
     case upgradeTimedOut(timeoutSeconds: Int)
     case upgradeRejected(message: String)
+    case invalidBuybackItem
+    case buybackCheckoutRejected(message: String)
 
     var errorDescription: String? {
         switch self {
@@ -74,6 +76,10 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
             )
         case let .upgradeRejected(message):
             return AppLocalizer.format("RSI did not accept the upgrade request.\n\n%@", message)
+        case .invalidBuybackItem:
+            return AppLocalizer.string("Choose a valid buy-back pledge before Hangar Express can prepare checkout.")
+        case let .buybackCheckoutRejected(message):
+            return AppLocalizer.format("RSI did not add the selected buy-back pledge to the cart.\n\n%@", message)
         }
     }
 }

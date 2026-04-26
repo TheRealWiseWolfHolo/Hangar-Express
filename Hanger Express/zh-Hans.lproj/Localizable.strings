@@ -381,3 +381,14 @@
 "Actual Value" = "实际价值";
 "From" = "从";
 "To" = "到";
+"Do you want to buyback %@?" = "是否要回购 %@？";
+"Do you want to buyback this item?" = "是否要回购此物品？";
+"Open Browser" = "打开浏览器";
+"Back" = "返回";
+"Preparing buy-back checkout..." = "正在准备回购结账...";
+"Buy-back Checkout Failed" = "回购结账准备失败";
+"Buy-back Checkout" = "回购结账";
+"Finished Shopping" = "完成购物";
+"Choose a valid buy-back pledge before Hangar Express can prepare checkout." = "请先选择有效的回购项目，Hangar Express 才能准备结账。";
+"RSI did not add the selected buy-back pledge to the cart.\n\n%@" = "RSI 未能将所选回购项目加入购物车。\n\n%@";
+"RSI did not prepare the buy-back cart within %lld seconds." = "RSI 未在 %lld 秒内准备好回购购物车。";
