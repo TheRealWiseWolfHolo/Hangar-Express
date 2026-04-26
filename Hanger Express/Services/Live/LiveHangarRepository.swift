@@ -5701,10 +5701,10 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     };
 
     const parsedBuybackPledgeID = Number(buybackPledgeID);
-    const parsedFromShipID = Number(fromShipID);
-    const parsedToShipID = Number(toShipID);
-    const parsedToSkuID = Number(toSkuID);
-    const shouldUseUpgradeBuybackFlow = isUpgradeBuyback === true;
+    let parsedFromShipID = Number(fromShipID);
+    let parsedToShipID = Number(toShipID);
+    let parsedToSkuID = Number(toSkuID);
+    let shouldUseUpgradeBuybackFlow = isUpgradeBuyback === true;
 
     const hasAccessDeniedMarkup =
       document.title.toLowerCase().includes('access denied') ||
@@ -5728,6 +5728,41 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         failureMessage: 'Hangar Express could not determine the selected buy-back pledge id.',
         debugSummary: `buybackPledgeID=${String(buybackPledgeID)}`
       };
+    }
+
+    const buybackButtonID = (button) => {
+      if (!button) {
+        return 0;
+      }
+
+      const href = button.getAttribute('href') || '';
+      const hrefID = Number(href.split('/').filter(Boolean).pop());
+      if (Number.isFinite(hrefID) && hrefID > 0) {
+        return hrefID;
+      }
+
+      const dataID = Number(button.getAttribute('data-pledgeid'));
+      return Number.isFinite(dataID) && dataID > 0 ? dataID : 0;
+    };
+
+    const selectedButton = Array.from(document.querySelectorAll('.holosmallbtn, a[href*="/pledge/buyback/"]'))
+      .find((button) => buybackButtonID(button) === parsedBuybackPledgeID);
+
+    if (selectedButton) {
+      const liveFromShipID = Number(selectedButton.getAttribute('data-fromshipid'));
+      const liveToShipID = Number(selectedButton.getAttribute('data-toshipid'));
+      const liveToSkuID = Number(selectedButton.getAttribute('data-toskuid'));
+      const hasLiveUpgradeContext =
+        Number.isFinite(liveFromShipID) && liveFromShipID > 0 &&
+        Number.isFinite(liveToShipID) && liveToShipID > 0 &&
+        Number.isFinite(liveToSkuID) && liveToSkuID > 0;
+
+      if (hasLiveUpgradeContext) {
+        parsedFromShipID = liveFromShipID;
+        parsedToShipID = liveToShipID;
+        parsedToSkuID = liveToSkuID;
+        shouldUseUpgradeBuybackFlow = true;
+      }
     }
 
     if (shouldUseUpgradeBuybackFlow) {
