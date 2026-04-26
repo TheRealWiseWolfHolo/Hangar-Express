@@ -530,7 +530,7 @@ struct AllShipsBrowserView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var searchText = ""
-    @State private var priceFilter: AllShipsPriceFilter = .all
+    @State private var selectedPriceRange: ClosedRange<Double>?
     @State private var availabilityFilter: AllShipsAvailabilityFilter = .all
     @State private var loadState: AllShipsLoadState = .idle
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
@@ -541,12 +541,34 @@ struct AllShipsBrowserView: View {
         }
 
         let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
+        let priceRange = activePriceRange
+        let fullPriceRange = priceBounds
         return items.filter { item in
             let matchesSearch = normalizedSearchText.isEmpty || item.searchHaystack.contains(normalizedSearchText)
             return matchesSearch
-                && priceFilter.includes(priceUSD: item.priceUSD)
+                && item.isWithinPriceRange(priceRange, fullRange: fullPriceRange)
                 && availabilityFilter.includes(item: item)
         }
+    }
+
+    private var priceBounds: ClosedRange<Double> {
+        guard case let .loaded(items) = loadState else {
+            return 0 ... 0
+        }
+
+        let prices = items.compactMap(\.priceDouble)
+        guard let minimumPrice = prices.min(),
+              let maximumPrice = prices.max() else {
+            return 0 ... 0
+        }
+
+        let lowerBound = floor(minimumPrice / 5) * 5
+        let upperBound = max(lowerBound, ceil(maximumPrice / 5) * 5)
+        return lowerBound ... upperBound
+    }
+
+    private var activePriceRange: ClosedRange<Double> {
+        selectedPriceRange ?? priceBounds
     }
 
     var body: some View {
@@ -559,7 +581,11 @@ struct AllShipsBrowserView: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 14) {
                             AllShipsQuickFilters(
-                                priceFilter: $priceFilter,
+                                priceRange: Binding(
+                                    get: { activePriceRange },
+                                    set: { selectedPriceRange = $0 }
+                                ),
+                                priceBounds: priceBounds,
                                 availabilityFilter: $availabilityFilter,
                                 resultCount: filteredItems.count,
                                 totalCount: items.count
@@ -616,15 +642,27 @@ struct AllShipsBrowserView: View {
         do {
             async let shipCatalog = HostedShipCatalogStore.shared.catalog(using: HostedShipCatalogClient())
             async let detailCatalog = HostedShipDetailCatalogStore.shared.catalog(using: HostedShipDetailCatalogClient())
-            loadState = .loaded(
-                try await AllShipsCatalogItem.makeItems(
-                    shipCatalog: shipCatalog,
-                    detailCatalog: detailCatalog
-                )
+            let items = try await AllShipsCatalogItem.makeItems(
+                shipCatalog: shipCatalog,
+                detailCatalog: detailCatalog
             )
+            loadState = .loaded(items)
+            selectedPriceRange = Self.priceBounds(for: items)
         } catch {
             loadState = .failed(error.localizedDescription)
         }
+    }
+
+    private static func priceBounds(for items: [AllShipsCatalogItem]) -> ClosedRange<Double>? {
+        let prices = items.compactMap(\.priceDouble)
+        guard let minimumPrice = prices.min(),
+              let maximumPrice = prices.max() else {
+            return nil
+        }
+
+        let lowerBound = floor(minimumPrice / 5) * 5
+        let upperBound = max(lowerBound, ceil(maximumPrice / 5) * 5)
+        return lowerBound ... upperBound
     }
 }
 
@@ -633,54 +671,6 @@ private enum AllShipsLoadState {
     case loading
     case loaded([AllShipsCatalogItem])
     case failed(String)
-}
-
-private enum AllShipsPriceFilter: String, CaseIterable, Identifiable {
-    case all
-    case under100
-    case between100And250
-    case between250And500
-    case above500
-
-    var id: Self { self }
-
-    var title: String {
-        switch self {
-        case .all:
-            return AppLocalizer.string("Any Price")
-        case .under100:
-            return AppLocalizer.string("$0-$100")
-        case .between100And250:
-            return AppLocalizer.string("$100-$250")
-        case .between250And500:
-            return AppLocalizer.string("$250-$500")
-        case .above500:
-            return AppLocalizer.string("$500+")
-        }
-    }
-
-    func includes(priceUSD: Decimal?) -> Bool {
-        guard self != .all else {
-            return true
-        }
-
-        guard let priceUSD else {
-            return false
-        }
-
-        switch self {
-        case .all:
-            return true
-        case .under100:
-            return priceUSD.isLessThan(100)
-        case .between100And250:
-            return priceUSD.isGreaterThanOrEqualTo(100) && priceUSD.isLessThan(250)
-        case .between250And500:
-            return priceUSD.isGreaterThanOrEqualTo(250) && priceUSD.isLessThan(500)
-        case .above500:
-            return priceUSD.isGreaterThanOrEqualTo(500)
-        }
-    }
 }
 
 private enum AllShipsAvailabilityFilter: String, CaseIterable, Identifiable {
@@ -739,6 +729,10 @@ private struct AllShipsCatalogItem: Identifiable, Hashable {
         inGameStatus?.nilIfBlank ?? AppLocalizer.string("Unavailable")
     }
 
+    var priceDouble: Double? {
+        priceUSD.map { NSDecimalNumber(decimal: $0).doubleValue }
+    }
+
     var isAvailableInStore: Bool? {
         guard let availability = storeAvailability?.nilIfBlank?.localizedLowercase else {
             return nil
@@ -772,6 +766,14 @@ private struct AllShipsCatalogItem: Identifiable, Hashable {
         .compactMap { $0?.nilIfBlank }
         .joined(separator: " ")
         .localizedLowercase
+    }
+
+    func isWithinPriceRange(_ range: ClosedRange<Double>, fullRange: ClosedRange<Double>) -> Bool {
+        guard let priceDouble else {
+            return range.isEffectivelyEqual(to: fullRange)
+        }
+
+        return range.contains(priceDouble)
     }
 
     static func makeItems(
@@ -815,7 +817,21 @@ private struct AllShipsCatalogItem: Identifiable, Hashable {
         }
 
         return (catalogItems + detailOnlyItems).sorted { lhs, rhs in
-            lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            switch (lhs.priceUSD, rhs.priceUSD) {
+            case let (lhsPrice?, rhsPrice?):
+                let comparison = NSDecimalNumber(decimal: lhsPrice).compare(NSDecimalNumber(decimal: rhsPrice))
+                if comparison != .orderedSame {
+                    return comparison == .orderedAscending
+                }
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                break
+            }
+
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         }
     }
 
@@ -830,25 +846,39 @@ private struct AllShipsCatalogItem: Identifiable, Hashable {
 }
 
 private struct AllShipsQuickFilters: View {
-    @Binding var priceFilter: AllShipsPriceFilter
+    @Binding var priceRange: ClosedRange<Double>
+    let priceBounds: ClosedRange<Double>
     @Binding var availabilityFilter: AllShipsAvailabilityFilter
     let resultCount: Int
     let totalCount: Int
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                filterMenu(
-                    title: AppLocalizer.string("Price Range"),
-                    value: priceFilter.title
-                ) {
-                    Picker(AppLocalizer.string("Price Range"), selection: $priceFilter) {
-                        ForEach(AllShipsPriceFilter.allCases) { filter in
-                            Text(filter.title).tag(filter)
-                        }
-                    }
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(AppLocalizer.string("Price Range"))
+                        .font(.headline.weight(.semibold))
+
+                    Spacer(minLength: 12)
+
+                    Text(priceRangeSummary)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
                 }
 
+                AllShipsPriceRangeSlider(
+                    range: $priceRange,
+                    bounds: priceBounds
+                )
+                .disabled(priceBounds.lowerBound == priceBounds.upperBound)
+            }
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+            )
+
+            HStack(spacing: 10) {
                 filterMenu(
                     title: AppLocalizer.string("Availability"),
                     value: availabilityFilter.title
@@ -866,6 +896,10 @@ private struct AllShipsQuickFilters: View {
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 2)
         }
+    }
+
+    private var priceRangeSummary: String {
+        "\(currencyText(for: priceRange.lowerBound)) - \(currencyText(for: priceRange.upperBound))"
     }
 
     private func filterMenu<Content: View>(
@@ -896,6 +930,117 @@ private struct AllShipsQuickFilters: View {
         }
         .buttonStyle(.plain)
     }
+
+    private func currencyText(for value: Double) -> String {
+        NSDecimalNumber(value: value).decimalValue.usdString
+    }
+}
+
+private struct AllShipsPriceRangeSlider: View {
+    @Binding var range: ClosedRange<Double>
+    let bounds: ClosedRange<Double>
+    @State private var dragStartRange: ClosedRange<Double>?
+
+    private let handleDiameter: CGFloat = 28
+    private let step: Double = 5
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(proxy.size.width - handleDiameter, 1)
+            let lowerX = xPosition(for: range.lowerBound, width: width)
+            let upperX = xPosition(for: range.upperBound, width: width)
+
+            ZStack(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(Color.secondary.opacity(0.18))
+                    .frame(height: 6)
+                    .offset(x: handleDiameter / 2)
+
+                Capsule(style: .continuous)
+                    .fill(Color.accentColor.opacity(0.65))
+                    .frame(width: max(upperX - lowerX, 0), height: 6)
+                    .offset(x: lowerX + handleDiameter / 2)
+
+                sliderHandle
+                    .offset(x: lowerX)
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                updateLowerBound(
+                                    translation: value.translation.width,
+                                    width: width
+                                )
+                            }
+                            .onEnded { _ in
+                                dragStartRange = nil
+                            }
+                    )
+
+                sliderHandle
+                    .offset(x: upperX)
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                updateUpperBound(
+                                    translation: value.translation.width,
+                                    width: width
+                                )
+                            }
+                            .onEnded { _ in
+                                dragStartRange = nil
+                            }
+                    )
+            }
+            .frame(height: handleDiameter)
+        }
+        .frame(height: handleDiameter)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(AppLocalizer.string("Price Range"))
+        .accessibilityValue("\(NSDecimalNumber(value: range.lowerBound).decimalValue.usdString) - \(NSDecimalNumber(value: range.upperBound).decimalValue.usdString)")
+    }
+
+    private var sliderHandle: some View {
+        Circle()
+            .fill(Color(.systemBackground))
+            .frame(width: handleDiameter, height: handleDiameter)
+            .shadow(color: .black.opacity(0.16), radius: 8, x: 0, y: 3)
+            .overlay {
+                Circle()
+                    .stroke(Color.accentColor.opacity(0.72), lineWidth: 2)
+            }
+    }
+
+    private func xPosition(for value: Double, width: CGFloat) -> CGFloat {
+        let span = max(bounds.upperBound - bounds.lowerBound, 1)
+        let normalizedValue = (value - bounds.lowerBound) / span
+        return CGFloat(max(0, min(1, normalizedValue))) * width
+    }
+
+    private func steppedClampedValue(_ value: Double) -> Double {
+        let steppedValue = (value / step).rounded() * step
+        return max(bounds.lowerBound, min(bounds.upperBound, steppedValue))
+    }
+
+    private func valueDelta(for translation: CGFloat, width: CGFloat) -> Double {
+        let span = max(bounds.upperBound - bounds.lowerBound, 1)
+        return Double(translation / max(width, 1)) * span
+    }
+
+    private func updateLowerBound(translation: CGFloat, width: CGFloat) {
+        let startRange = dragStartRange ?? range
+        dragStartRange = startRange
+        let proposedLowerBound = startRange.lowerBound + valueDelta(for: translation, width: width)
+        let nextLowerBound = min(steppedClampedValue(proposedLowerBound), startRange.upperBound)
+        range = nextLowerBound ... startRange.upperBound
+    }
+
+    private func updateUpperBound(translation: CGFloat, width: CGFloat) {
+        let startRange = dragStartRange ?? range
+        dragStartRange = startRange
+        let proposedUpperBound = startRange.upperBound + valueDelta(for: translation, width: width)
+        let nextUpperBound = max(steppedClampedValue(proposedUpperBound), startRange.lowerBound)
+        range = startRange.lowerBound ... nextUpperBound
+    }
 }
 
 private struct AllShipsCard: View {
@@ -912,21 +1057,26 @@ private struct AllShipsCard: View {
             )
 
             VStack(alignment: .leading, spacing: 8) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(item.name)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .top, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(item.name)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
 
-                    Text(item.manufacturer)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        Text(item.manufacturer)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    AllShipsStatusPill(title: item.statusText)
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
                     AllShipsMetadataRow(label: AppLocalizer.string("Price"), value: item.priceText)
                     AllShipsMetadataRow(label: AppLocalizer.string("Availability in RSI Store"), value: item.availabilityText)
-                    AllShipsMetadataRow(label: AppLocalizer.string("In Game Status"), value: item.statusText)
                 }
             }
         }
@@ -936,6 +1086,43 @@ private struct AllShipsCard: View {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(Color(.secondarySystemGroupedBackground))
         )
+    }
+}
+
+private struct AllShipsStatusPill: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(.caption.weight(.semibold))
+            .lineLimit(1)
+            .minimumScaleFactor(0.78)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(statusTint)
+            )
+    }
+
+    private var statusTint: Color {
+        let normalizedTitle = title.localizedLowercase
+        if normalizedTitle.contains("flight") {
+            return Color.green.opacity(0.68)
+        }
+
+        if normalizedTitle.contains("concept")
+            || normalizedTitle.contains("production")
+            || normalizedTitle.contains("development") {
+            return Color.orange.opacity(0.72)
+        }
+
+        if normalizedTitle.contains("unavailable") {
+            return Color.secondary.opacity(0.55)
+        }
+
+        return Color.accentColor.opacity(0.68)
     }
 }
 
@@ -1027,14 +1214,10 @@ private struct AllShipsErrorView: View {
     }
 }
 
-private extension Decimal {
-    func isLessThan(_ value: Int) -> Bool {
-        NSDecimalNumber(decimal: self).compare(NSDecimalNumber(value: value)) == .orderedAscending
-    }
-
-    func isGreaterThanOrEqualTo(_ value: Int) -> Bool {
-        let comparison = NSDecimalNumber(decimal: self).compare(NSDecimalNumber(value: value))
-        return comparison == .orderedSame || comparison == .orderedDescending
+private extension ClosedRange where Bound == Double {
+    func isEffectivelyEqual(to other: ClosedRange<Double>) -> Bool {
+        abs(lowerBound - other.lowerBound) < 0.001
+            && abs(upperBound - other.upperBound) < 0.001
     }
 }
 
