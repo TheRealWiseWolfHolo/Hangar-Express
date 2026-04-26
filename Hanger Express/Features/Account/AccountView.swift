@@ -12,6 +12,7 @@ struct AccountView: View {
     @State private var selectedBackgroundSelectionKey: String?
     @State private var isOverviewEmailVisible = false
     @State private var isOverviewSavedLoginVisible = false
+    @State private var presentedTool: FleetTool?
 
     var body: some View {
         NavigationStack {
@@ -74,6 +75,22 @@ struct AccountView: View {
                     .padding(.vertical, 4)
                 } header: {
                     Text("Snapshot")
+                }
+
+                Section {
+                    FleetToolsSection(showsHeader: false) { tool in
+                        guard tool.isAvailable else {
+                            return
+                        }
+
+                        presentedTool = tool
+                    }
+                    .padding(.vertical, 4)
+                    .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                } header: {
+                    Text("Tools")
                 }
 
                 Section {
@@ -148,6 +165,14 @@ struct AccountView: View {
                     currentLevel: conciergeLevel,
                     totalSpendUSD: snapshot.metrics.totalSpendUSD
                 )
+            }
+            .sheet(item: $presentedTool) { tool in
+                switch tool {
+                case .allShips:
+                    AllShipsBrowserView(reloadToken: appModel.hangarFleetImageReloadToken)
+                case .ccuChainCalculator, .resetCharacter:
+                    EmptyView()
+                }
             }
             .alert("Account Total Value", isPresented: $isShowingAccountTotalValueExplanation) {
                 Button("OK", role: .cancel) {}
