@@ -52,7 +52,6 @@ struct FleetView: View {
     @State private var selectedShipGroup: GroupedFleetShip?
     @State private var transitionSourceResetToken = 0
     @State private var presentedPledgeSheet: FleetShipPledgeSheetContext?
-    @State private var presentedTool: FleetTool?
     @Namespace private var shipCardTransitionNamespace
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage("fleetDisplayMode") private var displayModeRawValue = DisplayMode.singleColumn.rawValue
@@ -70,14 +69,6 @@ struct FleetView: View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 24) {
-                    FleetToolsSection { tool in
-                        guard tool.isAvailable else {
-                            return
-                        }
-
-                        presentedTool = tool
-                    }
-
                     ForEach(displaySections) { section in
                         VStack(alignment: .leading, spacing: 14) {
                             if let title = section.title {
@@ -148,14 +139,6 @@ struct FleetView: View {
                     context: context,
                     reloadToken: appModel.hangarFleetImageReloadToken
                 )
-            }
-            .sheet(item: $presentedTool) { tool in
-                switch tool {
-                case .allShips:
-                    AllShipsBrowserView(reloadToken: appModel.hangarFleetImageReloadToken)
-                case .ccuChainCalculator, .resetCharacter:
-                    EmptyView()
-                }
             }
         }
     }
@@ -423,7 +406,7 @@ struct FleetView: View {
     }
 }
 
-private enum FleetTool: String, CaseIterable, Identifiable {
+enum FleetTool: String, CaseIterable, Identifiable {
     case allShips
     case ccuChainCalculator
     case resetCharacter
@@ -466,15 +449,23 @@ private enum FleetTool: String, CaseIterable, Identifiable {
     }
 }
 
-private struct FleetToolsSection: View {
+struct FleetToolsSection: View {
     let onSelect: (FleetTool) -> Void
+    var showsHeader = true
+
+    init(showsHeader: Bool = true, onSelect: @escaping (FleetTool) -> Void) {
+        self.showsHeader = showsHeader
+        self.onSelect = onSelect
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(AppLocalizer.string("Tools"))
-                .font(.headline.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 4)
+            if showsHeader {
+                Text(AppLocalizer.string("Tools"))
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+            }
 
             VStack(spacing: 10) {
                 ForEach(FleetTool.allCases) { tool in
@@ -534,7 +525,7 @@ private struct FleetToolRow: View {
     }
 }
 
-private struct AllShipsBrowserView: View {
+struct AllShipsBrowserView: View {
     let reloadToken: UUID?
 
     @Environment(\.dismiss) private var dismiss
