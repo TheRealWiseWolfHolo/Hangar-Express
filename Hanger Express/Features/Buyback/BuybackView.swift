@@ -132,21 +132,21 @@ struct BuybackView: View {
                     .disabled(appModel.isRefreshing)
                 }
             }
-            .alert(confirmBuybackTitle, isPresented: confirmBuybackBinding) {
-                Button("Open Browser") {
-                    guard let pendingBuybackGroup else {
-                        return
+            .sheet(item: $pendingBuybackGroup) { itemGroup in
+                BuybackConfirmationSheet(
+                    itemTitle: itemGroup.representative.title,
+                    onBack: {
+                        pendingBuybackGroup = nil
+                    },
+                    onOpenBrowser: {
+                        pendingBuybackGroup = nil
+                        Task {
+                            await startBuybackCheckout(for: itemGroup)
+                        }
                     }
-
-                    let group = pendingBuybackGroup
-                    self.pendingBuybackGroup = nil
-                    Task {
-                        await startBuybackCheckout(for: group)
-                    }
-                }
-                Button("Back", role: .cancel) {
-                    pendingBuybackGroup = nil
-                }
+                )
+                .presentationDetents([.height(520), .medium])
+                .presentationDragIndicator(.visible)
             }
             .alert(item: $buybackError) { error in
                 Alert(
@@ -208,26 +208,6 @@ struct BuybackView: View {
         } else {
             searchFilters.insert(searchFilter)
         }
-    }
-
-    private var confirmBuybackBinding: Binding<Bool> {
-        Binding(
-            get: { pendingBuybackGroup != nil },
-            set: { isPresented in
-                if !isPresented {
-                    pendingBuybackGroup = nil
-                }
-            }
-        )
-    }
-
-    private var confirmBuybackTitle: String {
-        guard let title = pendingBuybackGroup?.representative.title.trimmingCharacters(in: .whitespacesAndNewlines),
-              !title.isEmpty else {
-            return AppLocalizer.string("Do you want to buyback this item?")
-        }
-
-        return AppLocalizer.format("Do you want to buyback %@?", title)
     }
 
     private func startBuybackCheckout(for itemGroup: GroupedBuybackPledge) async {
@@ -295,6 +275,130 @@ struct BuybackCheckoutContext: Identifiable, Hashable {
 private struct BuybackCheckoutError: Identifiable {
     let id = UUID()
     let message: String
+}
+
+private struct BuybackConfirmationSheet: View {
+    let itemTitle: String
+    let onBack: () -> Void
+    let onOpenBrowser: () -> Void
+
+    private let supportedPaymentMethods = [
+        "Built-in Card Payment",
+        "Apple Pay",
+        "Alipay",
+        "WeChat Pay"
+    ]
+
+    private let unsupportedPaymentMethods = [
+        "Paypal",
+        "Gpay",
+        "Amazon Wallet"
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(AppLocalizer.string("Only one buy-back item can be checked out at a time."))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(spacing: 12) {
+                PaymentMethodSection(
+                    title: AppLocalizer.string("Supported payment methods"),
+                    systemImage: "checkmark.circle.fill",
+                    tint: .green,
+                    methods: supportedPaymentMethods
+                )
+
+                PaymentMethodSection(
+                    title: AppLocalizer.string("Unsupported payment methods"),
+                    systemImage: "xmark.circle.fill",
+                    tint: .red,
+                    methods: unsupportedPaymentMethods
+                )
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 12) {
+                Button(role: .cancel) {
+                    onBack()
+                } label: {
+                    Text(AppLocalizer.string("Back"))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .frame(maxWidth: .infinity)
+
+                Button {
+                    onOpenBrowser()
+                } label: {
+                    Text(AppLocalizer.string("Open Browser"))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(24)
+    }
+
+    private var title: String {
+        let trimmedTitle = itemTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else {
+            return AppLocalizer.string("Do you want to buyback this item?")
+        }
+
+        return AppLocalizer.format("Do you want to buyback %@?", trimmedTitle)
+    }
+}
+
+private struct PaymentMethodSection: View {
+    let title: String
+    let systemImage: String
+    let tint: Color
+    let methods: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+                .foregroundStyle(tint)
+
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+                ForEach(methods, id: \.self) { method in
+                    Text(AppLocalizer.string(method))
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .foregroundStyle(.primary)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(tint.opacity(0.12))
+                        )
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.secondary.opacity(0.08))
+        )
+    }
+
+    private var columns: [GridItem] {
+        [
+            GridItem(.flexible(), spacing: 8),
+            GridItem(.flexible(), spacing: 8)
+        ]
+    }
 }
 
 private extension GroupedBuybackPledge {
