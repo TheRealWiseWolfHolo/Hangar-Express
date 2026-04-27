@@ -273,6 +273,11 @@ struct RSIShipCatalog: Sendable {
         let msrpLabel: String?
         let storeAvailability: String?
         let storeAvailable: Bool?
+        let canonicalName: String?
+        let displayDuplicateOf: String?
+        let hiddenInCatalog: Bool
+        let aliases: [String]
+        let duplicateReason: String?
         let type: String?
         let focus: String?
         let minCrew: Int?
@@ -290,6 +295,11 @@ struct RSIShipCatalog: Sendable {
             msrpLabel: String? = nil,
             storeAvailability: String? = nil,
             storeAvailable: Bool? = nil,
+            canonicalName: String? = nil,
+            displayDuplicateOf: String? = nil,
+            hiddenInCatalog: Bool = false,
+            aliases: [String] = [],
+            duplicateReason: String? = nil,
             type: String? = nil,
             focus: String? = nil,
             minCrew: Int? = nil,
@@ -306,6 +316,11 @@ struct RSIShipCatalog: Sendable {
             self.msrpLabel = msrpLabel
             self.storeAvailability = storeAvailability
             self.storeAvailable = storeAvailable
+            self.canonicalName = canonicalName
+            self.displayDuplicateOf = displayDuplicateOf
+            self.hiddenInCatalog = hiddenInCatalog
+            self.aliases = aliases
+            self.duplicateReason = duplicateReason
             self.type = type
             self.focus = focus
             self.minCrew = minCrew
@@ -453,6 +468,11 @@ struct HostedShipCatalogClient: Sendable {
                     msrpLabel: ship.msrpLabel?.nilIfEmpty,
                     storeAvailability: ship.storeAvailabilityLabel,
                     storeAvailable: ship.storeAvailable ?? ship.purchasable,
+                    canonicalName: ship.canonicalName?.nilIfEmpty,
+                    displayDuplicateOf: ship.displayDuplicateOf?.nilIfEmpty,
+                    hiddenInCatalog: ship.hiddenInCatalog == true,
+                    aliases: ship.aliases?.compactMap { $0.nilIfEmpty } ?? [],
+                    duplicateReason: ship.duplicateReason?.nilIfEmpty,
                     type: ship.type?.nilIfEmpty,
                     focus: ship.focus?.nilIfEmpty,
                     minCrew: ship.minCrew,
@@ -780,6 +800,11 @@ struct RSIShipDetailCatalog: Sendable {
         let pledgeAvailability: String?
         let storeAvailability: String?
         let storeAvailable: Bool?
+        let canonicalName: String?
+        let displayDuplicateOf: String?
+        let hiddenInCatalog: Bool
+        let aliases: [String]
+        let duplicateReason: String?
         let minCrew: Int?
         let maxCrew: Int?
         let description: String?
@@ -955,6 +980,11 @@ struct HostedShipDetailCatalogClient: Sendable {
                     pledgeAvailability: ship.pledgeAvailability?.nilIfEmpty,
                     storeAvailability: ship.storeAvailabilityLabel,
                     storeAvailable: ship.storeAvailable,
+                    canonicalName: ship.canonicalName?.nilIfEmpty,
+                    displayDuplicateOf: ship.displayDuplicateOf?.nilIfEmpty,
+                    hiddenInCatalog: ship.hiddenInCatalog == true,
+                    aliases: ship.aliases?.compactMap { $0.nilIfEmpty } ?? [],
+                    duplicateReason: ship.duplicateReason?.nilIfEmpty,
                     minCrew: ship.minCrew,
                     maxCrew: ship.maxCrew,
                     description: ship.description?.nilIfEmpty,
@@ -1080,6 +1110,11 @@ private struct RemoteHostedShipDetail: Decodable {
     let pledgeAvailability: String?
     let storeAvailability: String?
     let storeAvailable: Bool?
+    let canonicalName: String?
+    let displayDuplicateOf: String?
+    let hiddenInCatalog: Bool?
+    let aliases: [String]?
+    let duplicateReason: String?
     let minCrew: Int?
     let maxCrew: Int?
     let description: String?
@@ -1106,6 +1141,11 @@ private struct RemoteHostedShipDetail: Decodable {
         pledgeAvailability = try container.decodeIfPresent(String.self, forKey: .pledgeAvailability)
         storeAvailability = try container.decodeIfPresent(String.self, forKey: .storeAvailability)
         storeAvailable = try container.decodeIfPresent(Bool.self, forKey: .storeAvailable)
+        canonicalName = try container.decodeIfPresent(String.self, forKey: .canonicalName)
+        displayDuplicateOf = try container.decodeIfPresent(String.self, forKey: .displayDuplicateOf)
+        hiddenInCatalog = try container.decodeIfPresent(Bool.self, forKey: .hiddenInCatalog)
+        aliases = try container.decodeIfPresent([String].self, forKey: .aliases)
+        duplicateReason = try container.decodeIfPresent(String.self, forKey: .duplicateReason)
         minCrew = try container.decodeIfPresent(Int.self, forKey: .minCrew)
         maxCrew = try container.decodeIfPresent(Int.self, forKey: .maxCrew)
         description = try container.decodeIfPresent(String.self, forKey: .description)
@@ -1147,6 +1187,11 @@ private struct RemoteHostedShipDetail: Decodable {
         case pledgeAvailability
         case storeAvailability
         case storeAvailable
+        case canonicalName
+        case displayDuplicateOf
+        case hiddenInCatalog
+        case aliases
+        case duplicateReason
         case minCrew
         case maxCrew
         case description
@@ -1216,6 +1261,11 @@ private struct RemoteHostedShip: Decodable {
     let purchasable: Bool?
     let storeAvailable: Bool?
     let storeAvailability: String?
+    let canonicalName: String?
+    let displayDuplicateOf: String?
+    let hiddenInCatalog: Bool?
+    let aliases: [String]?
+    let duplicateReason: String?
     let type: String?
     let focus: String?
     let minCrew: Int?
@@ -1234,6 +1284,11 @@ private struct RemoteHostedShip: Decodable {
         case purchasable
         case storeAvailable
         case storeAvailability
+        case canonicalName
+        case displayDuplicateOf
+        case hiddenInCatalog
+        case aliases
+        case duplicateReason
         case type
         case focus
         case minCrew
