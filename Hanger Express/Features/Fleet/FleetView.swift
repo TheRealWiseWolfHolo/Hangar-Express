@@ -557,12 +557,11 @@ struct AllShipsBrowserView: View {
         }
 
         let prices = items.compactMap(\.priceDouble)
-        guard let minimumPrice = prices.min(),
-              let maximumPrice = prices.max() else {
+        guard let maximumPrice = prices.max() else {
             return 0 ... 0
         }
 
-        let lowerBound = floor(minimumPrice / 5) * 5
+        let lowerBound = 0.0
         let upperBound = max(lowerBound, ceil(maximumPrice / 5) * 5)
         return lowerBound ... upperBound
     }
@@ -655,12 +654,11 @@ struct AllShipsBrowserView: View {
 
     private static func priceBounds(for items: [AllShipsCatalogItem]) -> ClosedRange<Double>? {
         let prices = items.compactMap(\.priceDouble)
-        guard let minimumPrice = prices.min(),
-              let maximumPrice = prices.max() else {
+        guard let maximumPrice = prices.max() else {
             return nil
         }
 
-        let lowerBound = floor(minimumPrice / 5) * 5
+        let lowerBound = 0.0
         let upperBound = max(lowerBound, ceil(maximumPrice / 5) * 5)
         return lowerBound ... upperBound
     }
@@ -871,6 +869,24 @@ private struct AllShipsQuickFilters: View {
                     bounds: priceBounds
                 )
                 .disabled(priceBounds.lowerBound == priceBounds.upperBound)
+
+                HStack(spacing: 10) {
+                    AllShipsPriceNumberField(
+                        title: AppLocalizer.string("Min"),
+                        value: Binding(
+                            get: { priceRange.lowerBound },
+                            set: { updateLowerPrice($0) }
+                        )
+                    )
+
+                    AllShipsPriceNumberField(
+                        title: AppLocalizer.string("Max"),
+                        value: Binding(
+                            get: { priceRange.upperBound },
+                            set: { updateUpperPrice($0) }
+                        )
+                    )
+                }
             }
             .padding(14)
             .background(
@@ -900,6 +916,20 @@ private struct AllShipsQuickFilters: View {
 
     private var priceRangeSummary: String {
         "\(currencyText(for: priceRange.lowerBound)) - \(currencyText(for: priceRange.upperBound))"
+    }
+
+    private func updateLowerPrice(_ value: Double) {
+        let nextLowerBound = min(clampedPrice(value), priceRange.upperBound)
+        priceRange = nextLowerBound ... priceRange.upperBound
+    }
+
+    private func updateUpperPrice(_ value: Double) {
+        let nextUpperBound = max(clampedPrice(value), priceRange.lowerBound)
+        priceRange = priceRange.lowerBound ... nextUpperBound
+    }
+
+    private func clampedPrice(_ value: Double) -> Double {
+        max(priceBounds.lowerBound, min(priceBounds.upperBound, value.rounded()))
     }
 
     private func filterMenu<Content: View>(
@@ -936,6 +966,76 @@ private struct AllShipsQuickFilters: View {
     }
 }
 
+private struct AllShipsPriceNumberField: View {
+    let title: String
+    @Binding var value: Double
+
+    @State private var text = ""
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title.uppercased())
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 4) {
+                Text("$")
+                    .foregroundStyle(.secondary)
+
+                TextField("0", text: $text)
+                    .keyboardType(.numberPad)
+                    .textInputAutocapitalization(.never)
+                    .focused($isFocused)
+                    .font(.subheadline.weight(.semibold))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color(.tertiarySystemGroupedBackground))
+            )
+        }
+        .onAppear {
+            text = rawText(for: value)
+        }
+        .onChange(of: value) { _, newValue in
+            guard !isFocused else {
+                return
+            }
+
+            text = rawText(for: newValue)
+        }
+        .onChange(of: text) { _, newText in
+            guard isFocused else {
+                return
+            }
+
+            let sanitizedText = newText.filter(\.isNumber)
+            if sanitizedText != newText {
+                text = sanitizedText
+                return
+            }
+
+            guard !sanitizedText.isEmpty,
+                  let parsedValue = Double(sanitizedText) else {
+                return
+            }
+
+            value = parsedValue
+        }
+        .onChange(of: isFocused) { _, focused in
+            if !focused {
+                text = rawText(for: value)
+            }
+        }
+    }
+
+    private func rawText(for value: Double) -> String {
+        String(Int(value.rounded()))
+    }
+}
+
 private struct AllShipsPriceRangeSlider: View {
     @Binding var range: ClosedRange<Double>
     let bounds: ClosedRange<Double>
@@ -953,7 +1053,7 @@ private struct AllShipsPriceRangeSlider: View {
             ZStack(alignment: .leading) {
                 Capsule(style: .continuous)
                     .fill(Color.secondary.opacity(0.18))
-                    .frame(height: 6)
+                    .frame(width: width, height: 6)
                     .offset(x: handleDiameter / 2)
 
                 Capsule(style: .continuous)
