@@ -519,26 +519,28 @@ final class LiveHangarRepository: HangarRepository {
     }
 
     func fetchAuthorizedDevices(
-        for session: UserSession
+        for session: UserSession,
+        password: String?
     ) async throws -> [AuthorizedDevice] {
         if session.authMode == .developerPreview {
-            return try await previewRepository.fetchAuthorizedDevices(for: session)
+            return try await previewRepository.fetchAuthorizedDevices(for: session, password: password)
         }
 
         try validate(session: session)
-        return try await browser.fetchAuthorizedDevices(using: session.cookies)
+        return try await browser.fetchAuthorizedDevices(using: session.cookies, password: password)
     }
 
     func removeAuthorizedDevice(
         for session: UserSession,
-        device: AuthorizedDevice
+        device: AuthorizedDevice,
+        password: String?
     ) async throws {
         if session.authMode == .developerPreview {
-            return try await previewRepository.removeAuthorizedDevice(for: session, device: device)
+            return try await previewRepository.removeAuthorizedDevice(for: session, device: device, password: password)
         }
 
         try validate(session: session)
-        try await browser.removeAuthorizedDevice(using: session.cookies, device: device)
+        try await browser.removeAuthorizedDevice(using: session.cookies, device: device, password: password)
     }
 
     private func validate(session: UserSession) throws {
@@ -3318,13 +3320,20 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     fileprivate func fetchAuthorizedDevices(
-        using cookies: [SessionCookie]
+        using cookies: [SessionCookie],
+        password: String?
     ) async throws -> [AuthorizedDevice] {
         let url = try storefrontURL(path: "/en/account/security/devices")
         try await prepareWebView(with: cookies)
         try await load(url: url)
 
-        let result = try await evaluate(script: Self.authorizedDevicesExtractionScript, as: RemoteAuthorizedDevicesLookup.self)
+        let result = try await evaluate(
+            script: Self.authorizedDevicesExtractionScript,
+            arguments: [
+                "currentPassword": password ?? ""
+            ],
+            as: RemoteAuthorizedDevicesLookup.self
+        )
 
         if result.accessDenied {
             throw LiveHangarRepositoryError.sessionExpired
@@ -3345,7 +3354,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     fileprivate func removeAuthorizedDevice(
         using cookies: [SessionCookie],
-        device: AuthorizedDevice
+        device: AuthorizedDevice,
+        password: String?
     ) async throws {
         let url = try storefrontURL(path: "/en/account/security/devices")
         try await prepareWebView(with: cookies)
@@ -3355,7 +3365,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             script: Self.removeAuthorizedDeviceScript,
             arguments: [
                 "deviceID": device.id,
-                "deviceName": device.displayName
+                "deviceName": device.displayName,
+                "currentPassword": password ?? ""
             ],
             as: RemoteAuthorizedDeviceRemoval.self
         )
@@ -6450,13 +6461,24 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     private static let authorizedDevicesExtractionScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
     const cookieValue = (name) => {
       const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
       const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
       return match ? decodeURIComponent(match[1]) : '';
     };
+    const isPasswordConfirmationRequired = (payload, responseText) => {
+      const raw = normalizeText([
+        payload?.code,
+        payload?.msg,
+        payload?.message,
+        responseText
+      ].filter(Boolean).join(' ')).toLowerCase();
+      return raw.includes('errpassword-confirmationrequired') ||
+        raw.includes('password confirmation required');
+    };
     const deviceContainer = document.querySelector('.js-devices');
-    const currentDeviceID = normalizeText(
+    let currentDeviceID = normalizeText(
       deviceContainer?.dataset?.current ||
       deviceContainer?.getAttribute('data-current') ||
       ''
@@ -6494,6 +6516,77 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       requestHeaders['x-rsi-device'] = rsiDevice;
     }
 
+    const confirmPassword = async () => {
+      if (!currentPasswordValue) {
+        return {
+          ok: false,
+          failureMessage: 'RSI requires password confirmation before showing logged-in devices. Sign in again with saved credentials, then try again.',
+          debugSummary: 'passwordConfirmationRequired=yes, passwordPresent=no'
+        };
+      }
+
+      const formBody = new URLSearchParams();
+      formBody.set('password', currentPasswordValue);
+      const confirmHeaders = {
+        'Accept': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest'
+      };
+      if (rsiToken) {
+        confirmHeaders['x-rsi-token'] = rsiToken;
+      }
+
+      const response = await fetch('/api/account/validatePassword', {
+        method: 'POST',
+        credentials: 'include',
+        headers: confirmHeaders,
+        body: formBody.toString()
+      });
+      const responseText = await response.text();
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        payload = null;
+      }
+      const successValue = Number(payload?.success ?? 0);
+      if (!response.ok || successValue !== 1) {
+        return {
+          ok: false,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseText || 'RSI rejected password confirmation for logged-in devices.'),
+          debugSummary: `passwordConfirmation: httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}`
+        };
+      }
+
+      return {
+        ok: true,
+        failureMessage: null,
+        debugSummary: `passwordConfirmation: httpStatus=${response.status}`
+      };
+    };
+
+    const refreshCurrentDeviceID = async () => {
+      const response = await fetch(window.location.pathname, {
+        method: 'GET',
+        credentials: 'include',
+        headers: {
+          'Accept': 'text/html'
+        }
+      });
+      if (!response.ok) {
+        return;
+      }
+
+      const html = await response.text();
+      const parsed = new DOMParser().parseFromString(html, 'text/html');
+      const refreshedContainer = parsed.querySelector('.js-devices');
+      currentDeviceID = normalizeText(
+        refreshedContainer?.dataset?.current ||
+        refreshedContainer?.getAttribute('data-current') ||
+        currentDeviceID
+      );
+    };
+
     const fetchPage = async (page) => {
       const response = await fetch('/api/account/getDevices', {
         method: 'POST',
@@ -6517,6 +6610,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     let pageCount = 1;
     let firstResponseStatus = 0;
     let lastResponsePreview = '';
+    let didConfirmPassword = false;
+    let passwordConfirmationDebug = '';
 
     while (page <= pageCount && page <= 50) {
       const { response, responseText, payload } = await fetchPage(page);
@@ -6537,12 +6632,29 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
       const successValue = Number(payload?.success ?? 0);
       if (!response.ok || successValue !== 1) {
+        if (isPasswordConfirmationRequired(payload, responseText) && !didConfirmPassword) {
+          const confirmation = await confirmPassword();
+          didConfirmPassword = true;
+          passwordConfirmationDebug = confirmation.debugSummary || '';
+          if (!confirmation.ok) {
+            return {
+              accessDenied: false,
+              status: 'password-confirmation-required',
+              devices: [],
+              failureMessage: confirmation.failureMessage,
+              debugSummary: `httpStatus=${response.status}, responsePreview=${lastResponsePreview || 'n/a'}, ${passwordConfirmationDebug}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+            };
+          }
+          await refreshCurrentDeviceID();
+          continue;
+        }
+
         return {
           accessDenied: false,
           status: 'failed',
           devices: [],
           failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI returned HTTP ${response.status} while loading authorized devices.`),
-          debugSummary: `httpStatus=${response.status}, responsePreview=${lastResponsePreview || 'n/a'}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+          debugSummary: `httpStatus=${response.status}, responsePreview=${lastResponsePreview || 'n/a'}, ${passwordConfirmationDebug}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
         };
       }
 
@@ -6576,16 +6688,27 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       status: 'ok',
       devices,
       failureMessage: null,
-      debugSummary: `deviceCount=${devices.length}, currentDeviceID=${currentDeviceID || 'unknown'}, firstHttpStatus=${firstResponseStatus || 'n/a'}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+      debugSummary: `deviceCount=${devices.length}, currentDeviceID=${currentDeviceID || 'unknown'}, firstHttpStatus=${firstResponseStatus || 'n/a'}, passwordConfirmed=${didConfirmPassword ? 'yes' : 'no'}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
     };
     """
 
     private static let removeAuthorizedDeviceScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
     const cookieValue = (name) => {
       const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
       const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
       return match ? decodeURIComponent(match[1]) : '';
+    };
+    const isPasswordConfirmationRequired = (payload, responseText) => {
+      const raw = normalizeText([
+        payload?.code,
+        payload?.msg,
+        payload?.message,
+        responseText
+      ].filter(Boolean).join(' ')).toLowerCase();
+      return raw.includes('errpassword-confirmationrequired') ||
+        raw.includes('password confirmation required');
     };
     const targetDeviceID = normalizeText(deviceID);
     const targetDeviceName = normalizeText(deviceName);
@@ -6630,22 +6753,78 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       requestHeaders['x-rsi-device'] = rsiDevice;
     }
 
-    const response = await fetch('/api/account/removeDevice', {
-      method: 'POST',
-      credentials: 'include',
-      headers: requestHeaders,
-      body: JSON.stringify({
-        id: targetDeviceID,
-        name: targetDeviceName
-      })
-    });
-    const responseText = await response.text();
-    let payload = null;
-    try {
-      payload = responseText ? JSON.parse(responseText) : null;
-    } catch {
-      payload = null;
-    }
+    const confirmPassword = async () => {
+      if (!currentPasswordValue) {
+        return {
+          ok: false,
+          failureMessage: 'RSI requires password confirmation before removing logged-in devices. Sign in again with saved credentials, then try again.',
+          debugSummary: 'passwordConfirmationRequired=yes, passwordPresent=no'
+        };
+      }
+
+      const formBody = new URLSearchParams();
+      formBody.set('password', currentPasswordValue);
+      const confirmHeaders = {
+        'Accept': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest'
+      };
+      if (rsiToken) {
+        confirmHeaders['x-rsi-token'] = rsiToken;
+      }
+
+      const response = await fetch('/api/account/validatePassword', {
+        method: 'POST',
+        credentials: 'include',
+        headers: confirmHeaders,
+        body: formBody.toString()
+      });
+      const responseText = await response.text();
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        payload = null;
+      }
+      const successValue = Number(payload?.success ?? 0);
+      if (!response.ok || successValue !== 1) {
+        return {
+          ok: false,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseText || 'RSI rejected password confirmation for logged-in devices.'),
+          debugSummary: `passwordConfirmation: httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}`
+        };
+      }
+
+      return {
+        ok: true,
+        failureMessage: null,
+        debugSummary: `passwordConfirmation: httpStatus=${response.status}`
+      };
+    };
+
+    const postRemoval = async () => {
+      const response = await fetch('/api/account/removeDevice', {
+        method: 'POST',
+        credentials: 'include',
+        headers: requestHeaders,
+        body: JSON.stringify({
+          id: targetDeviceID,
+          name: targetDeviceName
+        })
+      });
+      const responseText = await response.text();
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        payload = null;
+      }
+      return { response, responseText, payload };
+    };
+
+    let { response, responseText, payload } = await postRemoval();
+    let didConfirmPassword = false;
+    let passwordConfirmationDebug = '';
 
     if (response.status === 401 || response.status === 403) {
       return {
@@ -6658,11 +6837,38 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     const successValue = Number(payload?.success ?? 0);
     if (!response.ok || successValue !== 1) {
+      if (isPasswordConfirmationRequired(payload, responseText)) {
+        const confirmation = await confirmPassword();
+        didConfirmPassword = true;
+        passwordConfirmationDebug = confirmation.debugSummary || '';
+        if (!confirmation.ok) {
+          return {
+            accessDenied: false,
+            status: 'password-confirmation-required',
+            failureMessage: confirmation.failureMessage,
+            debugSummary: `httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}, ${passwordConfirmationDebug}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+          };
+        }
+
+        ({ response, responseText, payload } = await postRemoval());
+        if (response.status === 401 || response.status === 403) {
+          return {
+            accessDenied: true,
+            status: 'access-denied',
+            failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI rejected removal for authorized device ${targetDeviceID}.`),
+            debugSummary: `httpStatus=${response.status}, ${passwordConfirmationDebug}`
+          };
+        }
+      }
+    }
+
+    const retrySuccessValue = Number(payload?.success ?? 0);
+    if (!response.ok || retrySuccessValue !== 1) {
       return {
         accessDenied: false,
         status: 'failed',
         failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI returned HTTP ${response.status} while removing authorized device ${targetDeviceID}.`),
-        debugSummary: `httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+        debugSummary: `httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}, ${passwordConfirmationDebug}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
       };
     }
 
@@ -6670,7 +6876,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       accessDenied: false,
       status: 'ok',
       failureMessage: null,
-      debugSummary: `deviceID=${targetDeviceID}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+      debugSummary: `deviceID=${targetDeviceID}, passwordConfirmed=${didConfirmPassword ? 'yes' : 'no'}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
     };
     """
 

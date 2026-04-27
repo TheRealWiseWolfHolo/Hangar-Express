@@ -372,12 +372,14 @@ protocol HangarRepository: Sendable {
     ) async throws -> BuybackCheckoutPreparation
 
     func fetchAuthorizedDevices(
-        for session: UserSession
+        for session: UserSession,
+        password: String?
     ) async throws -> [AuthorizedDevice]
 
     func removeAuthorizedDevice(
         for session: UserSession,
-        device: AuthorizedDevice
+        device: AuthorizedDevice,
+        password: String?
     ) async throws
 }
 

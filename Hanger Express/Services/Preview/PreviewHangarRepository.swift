@@ -255,7 +255,8 @@ struct PreviewHangarRepository: HangarRepository {
     }
 
     func fetchAuthorizedDevices(
-        for _: UserSession
+        for _: UserSession,
+        password _: String?
     ) async throws -> [AuthorizedDevice] {
         [
             AuthorizedDevice(
@@ -278,7 +279,8 @@ struct PreviewHangarRepository: HangarRepository {
 
     func removeAuthorizedDevice(
         for _: UserSession,
-        device _: AuthorizedDevice
+        device _: AuthorizedDevice,
+        password _: String?
     ) async throws {}
 
     static let sampleSnapshot = HangarSnapshot(
