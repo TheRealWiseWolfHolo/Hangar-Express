@@ -789,7 +789,7 @@ private struct AllShipsCatalogItem: Identifiable, Hashable {
                 ),
                 priceUSD: ship.msrpUSD,
                 priceLabel: ship.msrpLabel,
-                storeAvailability: detail?.pledgeAvailability,
+                storeAvailability: ship.storeAvailability ?? detail?.storeAvailability ?? detail?.pledgeAvailability,
                 inGameStatus: detail?.inGameStatus,
                 imageURL: ship.imageURL
             )
@@ -808,7 +808,7 @@ private struct AllShipsCatalogItem: Identifiable, Hashable {
                 manufacturer: manufacturerName(catalogManufacturer: nil, detailManufacturer: detail.manufacturer),
                 priceUSD: nil,
                 priceLabel: nil,
-                storeAvailability: detail.pledgeAvailability,
+                storeAvailability: detail.storeAvailability ?? detail.pledgeAvailability,
                 inGameStatus: detail.inGameStatus,
                 imageURL: nil
             )
