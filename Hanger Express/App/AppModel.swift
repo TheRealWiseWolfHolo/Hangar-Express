@@ -179,6 +179,7 @@ final class AppModel {
     private static let upgradeRequestTimeoutSeconds = 20
     private static let upgradeTargetLookupTimeoutSeconds = 20
     private static let buybackCheckoutPreparationTimeoutSeconds = 30
+    private static let authorizedDevicesRequestTimeoutSeconds = 20
     private static let actionCompletionBannerDurationNanoseconds: UInt64 = 2_000_000_000
 
     init(environment: AppEnvironment) {
@@ -884,6 +885,154 @@ final class AppModel {
             throw error
         } catch {
             throw HangarAccountActionError.buybackCheckoutRejected(message: error.localizedDescription)
+        }
+    }
+
+    func fetchAuthorizedDevices() async throws -> [AuthorizedDevice] {
+        guard let session else {
+            throw HangarAccountActionError.missingSession
+        }
+
+        let timeoutSeconds = Self.authorizedDevicesRequestTimeoutSeconds
+        do {
+            return try await withTimeout(seconds: timeoutSeconds) { [self] in
+                try await self.hangarRepository.fetchAuthorizedDevices(for: session)
+            } onTimeout: {
+                HangarAccountActionError.authorizedDevicesUnavailable(
+                    message: AppLocalizer.format(
+                        "RSI did not return the authorized-device list within %lld seconds.",
+                        timeoutSeconds
+                    )
+                )
+            }
+        } catch let error as HangarAccountActionError {
+            throw error
+        } catch {
+            if await handleReauthenticationIfNeeded(
+                for: error,
+                session: session,
+                existingSnapshot: snapshot
+            ) {
+                throw HangarAccountActionError.authorizedDevicesUnavailable(
+                    message: AppLocalizer.string("Your saved RSI session expired. Sign in again before managing authorized devices.")
+                )
+            }
+
+            throw HangarAccountActionError.authorizedDevicesUnavailable(message: error.localizedDescription)
+        }
+    }
+
+    func removeAuthorizedDevice(_ device: AuthorizedDevice) async throws {
+        guard let session else {
+            throw HangarAccountActionError.missingSession
+        }
+
+        guard !device.shouldProtectFromBulkRemoval else {
+            throw HangarAccountActionError.authorizedDeviceRemovalRejected(
+                message: AppLocalizer.string("Hangar Express will not remove the authorized device currently used by this app.")
+            )
+        }
+
+        try await sensitiveActionAuthorizer.authorize(
+            reason: AppLocalizer.format("Confirm removing %@ from your authorized RSI devices.", device.displayName)
+        )
+
+        let timeoutSeconds = Self.authorizedDevicesRequestTimeoutSeconds
+        do {
+            try await withTimeout(seconds: timeoutSeconds) { [self] in
+                try await self.hangarRepository.removeAuthorizedDevice(for: session, device: device)
+            } onTimeout: {
+                HangarAccountActionError.authorizedDeviceRemovalRejected(
+                    message: AppLocalizer.format(
+                        "RSI did not remove %@ within %lld seconds.",
+                        device.displayName,
+                        timeoutSeconds
+                    )
+                )
+            }
+        } catch let error as HangarAccountActionError {
+            throw error
+        } catch {
+            if await handleReauthenticationIfNeeded(
+                for: error,
+                session: session,
+                existingSnapshot: snapshot
+            ) {
+                throw HangarAccountActionError.authorizedDeviceRemovalRejected(
+                    message: AppLocalizer.string("Your saved RSI session expired. Sign in again before managing authorized devices.")
+                )
+            }
+
+            throw HangarAccountActionError.authorizedDeviceRemovalRejected(message: error.localizedDescription)
+        }
+    }
+
+    func removeAuthorizedDevicesExceptCurrent(_ devices: [AuthorizedDevice]) async throws {
+        let hasCurrentDeviceMarker = devices.contains(where: \.isCurrent)
+        let hasHangarExpressFallback = devices.contains(where: \.matchesHangarExpressDeviceName)
+        guard hasCurrentDeviceMarker || hasHangarExpressFallback else {
+            throw HangarAccountActionError.authorizedDeviceRemovalRejected(
+                message: AppLocalizer.string("Hangar Express could not identify this app's current RSI device, so it did not remove all devices.")
+            )
+        }
+
+        let removableDevices = devices.filter { device in
+            if hasCurrentDeviceMarker {
+                return !device.isCurrent
+            }
+
+            // The RSI current-device marker should normally be present. If it is not,
+            // keep Hangar Express-named sessions so the bulk action cannot sign out this app.
+            return !device.matchesHangarExpressDeviceName
+        }
+        guard !removableDevices.isEmpty else {
+            return
+        }
+
+        try await sensitiveActionAuthorizer.authorize(
+            reason: AppLocalizer.format(
+                "Confirm removing %lld authorized RSI devices except this app.",
+                removableDevices.count
+            )
+        )
+
+        for device in removableDevices {
+            try await removeAuthorizedDeviceWithoutPrompt(device)
+        }
+    }
+
+    private func removeAuthorizedDeviceWithoutPrompt(_ device: AuthorizedDevice) async throws {
+        guard let session else {
+            throw HangarAccountActionError.missingSession
+        }
+
+        let timeoutSeconds = Self.authorizedDevicesRequestTimeoutSeconds
+        do {
+            try await withTimeout(seconds: timeoutSeconds) { [self] in
+                try await self.hangarRepository.removeAuthorizedDevice(for: session, device: device)
+            } onTimeout: {
+                HangarAccountActionError.authorizedDeviceRemovalRejected(
+                    message: AppLocalizer.format(
+                        "RSI did not remove %@ within %lld seconds.",
+                        device.displayName,
+                        timeoutSeconds
+                    )
+                )
+            }
+        } catch let error as HangarAccountActionError {
+            throw error
+        } catch {
+            if await handleReauthenticationIfNeeded(
+                for: error,
+                session: session,
+                existingSnapshot: snapshot
+            ) {
+                throw HangarAccountActionError.authorizedDeviceRemovalRejected(
+                    message: AppLocalizer.string("Your saved RSI session expired. Sign in again before managing authorized devices.")
+                )
+            }
+
+            throw HangarAccountActionError.authorizedDeviceRemovalRejected(message: error.localizedDescription)
         }
     }
 

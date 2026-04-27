@@ -254,6 +254,33 @@ struct PreviewHangarRepository: HangarRepository {
         )
     }
 
+    func fetchAuthorizedDevices(
+        for _: UserSession
+    ) async throws -> [AuthorizedDevice] {
+        [
+            AuthorizedDevice(
+                id: "preview-current",
+                name: AuthorizedDevice.hangarExpressDeviceName,
+                type: "mobile",
+                createdAtLabel: "Apr 27, 2026",
+                duration: "year",
+                isCurrent: true
+            ),
+            AuthorizedDevice(
+                id: "preview-browser",
+                name: "Safari on Mac",
+                type: "desktop",
+                createdAtLabel: "Apr 12, 2026",
+                duration: "month"
+            )
+        ]
+    }
+
+    func removeAuthorizedDevice(
+        for _: UserSession,
+        device _: AuthorizedDevice
+    ) async throws {}
+
     static let sampleSnapshot = HangarSnapshot(
         accountHandle: UserSession.preview.handle,
         lastSyncedAt: referenceDate(year: 2026, month: 4, day: 17),

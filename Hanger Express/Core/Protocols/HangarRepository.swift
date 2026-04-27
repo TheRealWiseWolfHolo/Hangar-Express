@@ -226,6 +226,82 @@ nonisolated struct BuybackCheckoutPreparation: Hashable, Sendable {
     let updatedCookies: [SessionCookie]
 }
 
+nonisolated struct AuthorizedDevice: Identifiable, Hashable, Sendable {
+    static let hangarExpressDeviceName = "Hangar Express"
+
+    let id: String
+    let name: String
+    let type: String?
+    let createdAtLabel: String?
+    let duration: String?
+    let isCurrent: Bool
+
+    init(
+        id: String,
+        name: String,
+        type: String? = nil,
+        createdAtLabel: String? = nil,
+        duration: String? = nil,
+        isCurrent: Bool = false
+    ) {
+        self.id = id
+        self.name = name
+        self.type = type
+        self.createdAtLabel = createdAtLabel
+        self.duration = duration
+        self.isCurrent = isCurrent
+    }
+
+    var displayName: String {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedName.isEmpty ? AppLocalizer.string("Unnamed Device") : trimmedName
+    }
+
+    var displayType: String {
+        let normalizedType = type?.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase ?? ""
+
+        switch normalizedType {
+        case "mobile":
+            return AppLocalizer.string("Mobile")
+        case "tablet":
+            return AppLocalizer.string("Tablet")
+        case "desktop":
+            return AppLocalizer.string("Desktop")
+        case "browser":
+            return AppLocalizer.string("Browser")
+        default:
+            return normalizedType.isEmpty ? AppLocalizer.string("Device") : normalizedType.capitalized
+        }
+    }
+
+    var durationLabel: String {
+        let normalizedDuration = duration?.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase ?? ""
+
+        switch normalizedDuration {
+        case "session":
+            return AppLocalizer.string("This session")
+        case "day":
+            return AppLocalizer.string("1 day")
+        case "week":
+            return AppLocalizer.string("1 week")
+        case "month":
+            return AppLocalizer.string("1 month")
+        case "year":
+            return AppLocalizer.string("1 year")
+        default:
+            return normalizedDuration.isEmpty ? AppLocalizer.string("Unknown") : normalizedDuration.capitalized
+        }
+    }
+
+    var matchesHangarExpressDeviceName: Bool {
+        displayName.localizedCaseInsensitiveCompare(Self.hangarExpressDeviceName) == .orderedSame
+    }
+
+    var shouldProtectFromBulkRemoval: Bool {
+        isCurrent
+    }
+}
+
 protocol HangarRepository: Sendable {
     func fetchSnapshot(
         for session: UserSession,
@@ -294,6 +370,15 @@ protocol HangarRepository: Sendable {
         for session: UserSession,
         pledge: BuybackPledge
     ) async throws -> BuybackCheckoutPreparation
+
+    func fetchAuthorizedDevices(
+        for session: UserSession
+    ) async throws -> [AuthorizedDevice]
+
+    func removeAuthorizedDevice(
+        for session: UserSession,
+        device: AuthorizedDevice
+    ) async throws
 }
 
 extension HangarRepository {

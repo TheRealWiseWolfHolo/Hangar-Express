@@ -20,6 +20,8 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
     case upgradeRejected(message: String)
     case invalidBuybackItem
     case buybackCheckoutRejected(message: String)
+    case authorizedDevicesUnavailable(message: String)
+    case authorizedDeviceRemovalRejected(message: String)
 
     var errorDescription: String? {
         switch self {
@@ -80,6 +82,10 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
             return AppLocalizer.string("Choose a valid buy-back pledge before Hangar Express can prepare checkout.")
         case let .buybackCheckoutRejected(message):
             return AppLocalizer.format("RSI did not add the selected buy-back pledge to the cart.\n\n%@", message)
+        case let .authorizedDevicesUnavailable(message):
+            return AppLocalizer.format("Hangar Express could not load authorized RSI devices.\n\n%@", message)
+        case let .authorizedDeviceRemovalRejected(message):
+            return AppLocalizer.format("Hangar Express could not remove the authorized RSI device.\n\n%@", message)
         }
     }
 }
