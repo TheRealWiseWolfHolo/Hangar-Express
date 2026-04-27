@@ -303,6 +303,8 @@
 "Loading all ships" = "正在加载全部舰船";
 "Loading the hosted ship catalog." = "正在加载托管舰船目录。";
 "Price Range" = "价格范围";
+"Min" = "最低";
+"Max" = "最高";
 "Any Price" = "任意价格";
 "$0-$100" = "$0-$100";
 "$100-$250" = "$100-$250";
