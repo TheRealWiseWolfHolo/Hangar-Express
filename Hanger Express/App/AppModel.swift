@@ -894,9 +894,10 @@ final class AppModel {
         }
 
         let timeoutSeconds = Self.authorizedDevicesRequestTimeoutSeconds
+        let password = session.credentials?.password
         do {
             return try await withTimeout(seconds: timeoutSeconds) { [self] in
-                try await self.hangarRepository.fetchAuthorizedDevices(for: session)
+                try await self.hangarRepository.fetchAuthorizedDevices(for: session, password: password)
             } onTimeout: {
                 HangarAccountActionError.authorizedDevicesUnavailable(
                     message: AppLocalizer.format(
@@ -938,9 +939,10 @@ final class AppModel {
         )
 
         let timeoutSeconds = Self.authorizedDevicesRequestTimeoutSeconds
+        let password = session.credentials?.password
         do {
             try await withTimeout(seconds: timeoutSeconds) { [self] in
-                try await self.hangarRepository.removeAuthorizedDevice(for: session, device: device)
+                try await self.hangarRepository.removeAuthorizedDevice(for: session, device: device, password: password)
             } onTimeout: {
                 HangarAccountActionError.authorizedDeviceRemovalRejected(
                     message: AppLocalizer.format(
@@ -1007,9 +1009,10 @@ final class AppModel {
         }
 
         let timeoutSeconds = Self.authorizedDevicesRequestTimeoutSeconds
+        let password = session.credentials?.password
         do {
             try await withTimeout(seconds: timeoutSeconds) { [self] in
-                try await self.hangarRepository.removeAuthorizedDevice(for: session, device: device)
+                try await self.hangarRepository.removeAuthorizedDevice(for: session, device: device, password: password)
             } onTimeout: {
                 HangarAccountActionError.authorizedDeviceRemovalRejected(
                     message: AppLocalizer.format(

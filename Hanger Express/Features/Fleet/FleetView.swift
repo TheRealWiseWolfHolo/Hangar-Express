@@ -419,7 +419,7 @@ enum FleetTool: String, CaseIterable, Identifiable {
         case .allShips:
             return AppLocalizer.string("All Ships")
         case .authorizedDevices:
-            return AppLocalizer.string("See All Authorized Devices")
+            return AppLocalizer.string("View Logged In Devices")
         case .ccuChainCalculator:
             return AppLocalizer.string("CCU Chain Calculator")
         case .resetCharacter:
@@ -432,7 +432,7 @@ enum FleetTool: String, CaseIterable, Identifiable {
         case .allShips:
             return AppLocalizer.string("Browse the hosted ship catalog")
         case .authorizedDevices:
-            return AppLocalizer.string("Review and remove trusted RSI devices")
+            return AppLocalizer.string("Review and remove logged-in RSI devices")
         case .ccuChainCalculator, .resetCharacter:
             return AppLocalizer.string("To be implemented")
         }
@@ -443,7 +443,7 @@ enum FleetTool: String, CaseIterable, Identifiable {
         case .allShips:
             return "airplane.circle"
         case .authorizedDevices:
-            return "desktopcomputer.and.iphone"
+            return "iphone"
         case .ccuChainCalculator:
             return "link.circle"
         case .resetCharacter:

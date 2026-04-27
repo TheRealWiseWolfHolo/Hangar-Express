@@ -1044,7 +1044,7 @@ private struct AuthorizedDevicesView: View {
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
-                            Text("Authorized devices are trusted RSI sign-in sessions. Removing a device signs that session out.")
+                            Text("Logged-in devices are trusted RSI sign-in sessions. Removing a device signs that session out.")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                                 .padding(.horizontal, 4)
@@ -1068,7 +1068,7 @@ private struct AuthorizedDevicesView: View {
                 }
             }
             .id(appLanguageRawValue)
-            .navigationTitle(AppLocalizer.string("Authorized Devices"))
+            .navigationTitle(AppLocalizer.string("Logged In Devices"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -1308,7 +1308,7 @@ private struct AuthorizedDeviceRow: View {
         case "desktop":
             return "desktopcomputer"
         default:
-            return "desktopcomputer.and.iphone"
+            return "iphone"
         }
     }
 }
@@ -1328,9 +1328,9 @@ private struct AuthorizedDevicesLoadingView: View {
 private struct AuthorizedDevicesEmptyView: View {
     var body: some View {
         ContentUnavailableView(
-            AppLocalizer.string("No Authorized Devices"),
-            systemImage: "desktopcomputer.and.iphone",
-            description: Text("No authorized devices were returned by RSI.")
+            AppLocalizer.string("No Logged In Devices"),
+            systemImage: "iphone",
+            description: Text("No logged-in devices were returned by RSI.")
         )
     }
 }

@@ -434,9 +434,13 @@
 "RSI did not add the selected buy-back pledge to the cart.\n\n%@" = "RSI 未能将所选回购项目加入购物车。\n\n%@";
 "RSI did not prepare the buy-back cart within %lld seconds." = "RSI 未在 %lld 秒内准备好回购购物车。";
 "See All Authorized Devices" = "查看所有授权设备";
+"View Logged In Devices" = "查看已登录设备";
 "Review and remove trusted RSI devices" = "查看并移除已信任的 RSI 设备";
+"Review and remove logged-in RSI devices" = "查看并移除已登录的 RSI 设备";
 "Authorized Devices" = "授权设备";
+"Logged In Devices" = "已登录设备";
 "Authorized devices are trusted RSI sign-in sessions. Removing a device signs that session out." = "授权设备是已信任的 RSI 登录会话。移除设备会让该会话退出登录。";
+"Logged-in devices are trusted RSI sign-in sessions. Removing a device signs that session out." = "已登录设备是受信任的 RSI 登录会话。移除设备会让该会话退出登录。";
 "Remove All Other Devices" = "移除其他所有设备";
 "Remove Device?" = "要移除此设备吗？";
 "Remove %@ from your authorized RSI devices?" = "要从授权 RSI 设备中移除 %@ 吗？";
@@ -447,7 +451,9 @@
 "This App" = "此应用";
 "Loading authorized devices" = "正在加载授权设备";
 "No Authorized Devices" = "没有授权设备";
+"No Logged In Devices" = "没有已登录设备";
 "No authorized devices were returned by RSI." = "RSI 没有返回任何授权设备。";
+"No logged-in devices were returned by RSI." = "RSI 没有返回任何已登录设备。";
 "Unable to Load Devices" = "无法加载设备";
 "Try Again" = "重试";
 "Unnamed Device" = "未命名设备";
@@ -463,5 +469,8 @@
 "Hangar Express will not remove the authorized device currently used by this app." = "Hangar Express 不会移除此应用当前正在使用的授权设备。";
 "Hangar Express could not identify this app's current RSI device, so it did not remove all devices." = "Hangar Express 无法识别此应用当前使用的 RSI 设备，因此没有移除所有设备。";
 "Confirm removing %@ from your authorized RSI devices." = "确认从授权 RSI 设备中移除 %@。";
+"RSI requires password confirmation before showing logged-in devices. Sign in again with saved credentials, then try again." = "RSI 要求先确认密码才能查看已登录设备。请使用已保存凭据重新登录后再试。";
+"RSI requires password confirmation before removing logged-in devices. Sign in again with saved credentials, then try again." = "RSI 要求先确认密码才能移除已登录设备。请使用已保存凭据重新登录后再试。";
+"RSI rejected password confirmation for logged-in devices." = "RSI 拒绝了已登录设备的密码确认。";
 "Confirm removing %lld authorized RSI devices except this app." = "确认移除此应用以外的 %lld 个授权 RSI 设备。";
 "RSI did not remove %@ within %lld seconds." = "RSI 未在 %lld 秒内移除 %@。";
