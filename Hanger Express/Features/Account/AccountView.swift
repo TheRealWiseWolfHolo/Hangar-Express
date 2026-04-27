@@ -1011,6 +1011,7 @@ private struct AuthorizedDevicesView: View {
     @State private var isLoading = false
     @State private var isRemoving = false
     @State private var errorMessage: String?
+    @State private var successMessage: String?
     @State private var pendingRemoval: AuthorizedDevice?
     @State private var isShowingRemoveAllConfirmation = false
 
@@ -1150,6 +1151,18 @@ private struct AuthorizedDevicesView: View {
             } message: {
                 Text(errorMessage ?? "")
             }
+            .alert("Logged In Devices Updated", isPresented: Binding(
+                get: { successMessage != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        successMessage = nil
+                    }
+                }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(successMessage ?? "")
+            }
             .confirmationDialog(
                 AppLocalizer.string("Remove All Other Devices?"),
                 isPresented: $isShowingRemoveAllConfirmation,
@@ -1173,52 +1186,77 @@ private struct AuthorizedDevicesView: View {
         }
     }
 
-    private func loadDevices() async {
+    private func loadDevices(showLoading: Bool = true, reportsErrors: Bool = true) async {
         guard !isRemoving else {
             return
         }
 
-        isLoading = true
-        defer { isLoading = false }
+        if showLoading {
+            isLoading = true
+        }
+        defer {
+            if showLoading {
+                isLoading = false
+            }
+        }
 
         do {
             devices = try await appModel.fetchAuthorizedDevices()
-                .sorted { lhs, rhs in
-                    if lhs.isCurrent != rhs.isCurrent {
-                        return lhs.isCurrent
-                    }
-
-                    return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
-                }
+                .sorted(by: sortAuthorizedDevices)
             errorMessage = nil
         } catch {
-            errorMessage = error.localizedDescription
+            if reportsErrors {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
     private func remove(_ device: AuthorizedDevice) async {
         pendingRemoval = nil
         isRemoving = true
-        defer { isRemoving = false }
 
         do {
             try await appModel.removeAuthorizedDevice(device)
-            await loadDevices()
+            devices.removeAll { $0.id == device.id }
+            successMessage = AppLocalizer.format("Removed %@ from logged-in devices.", device.displayName)
+            isRemoving = false
+            await loadDevices(showLoading: false, reportsErrors: false)
         } catch {
+            isRemoving = false
             errorMessage = error.localizedDescription
         }
     }
 
     private func removeAllOtherDevices() async {
+        let targetDevices = removableDevices
+        guard !targetDevices.isEmpty else {
+            return
+        }
+
         isRemoving = true
-        defer { isRemoving = false }
 
         do {
-            try await appModel.removeAuthorizedDevicesExceptCurrent(devices)
-            await loadDevices()
+            try await appModel.removeAuthorizedDevicesExceptCurrent(targetDevices)
+            let removedDeviceIDs = Set(targetDevices.map(\.id))
+            devices.removeAll { removedDeviceIDs.contains($0.id) }
+            successMessage = AppLocalizer.format(
+                "Removed %lld logged-in device(s).",
+                targetDevices.count
+            )
+            isRemoving = false
+            await loadDevices(showLoading: false, reportsErrors: false)
         } catch {
+            isRemoving = false
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func sortAuthorizedDevices(lhs: AuthorizedDevice, rhs: AuthorizedDevice) -> Bool {
+        if lhs.isCurrent != rhs.isCurrent {
+            return lhs.isCurrent
+        }
+
+        return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
     }
 }
 

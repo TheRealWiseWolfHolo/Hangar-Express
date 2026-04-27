@@ -381,6 +381,12 @@ protocol HangarRepository: Sendable {
         device: AuthorizedDevice,
         password: String?
     ) async throws
+
+    func removeAuthorizedDevices(
+        for session: UserSession,
+        devices: [AuthorizedDevice],
+        password: String?
+    ) async throws
 }
 
 extension HangarRepository {

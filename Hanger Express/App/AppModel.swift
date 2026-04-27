@@ -998,26 +998,20 @@ final class AppModel {
             )
         )
 
-        for device in removableDevices {
-            try await removeAuthorizedDeviceWithoutPrompt(device)
-        }
-    }
-
-    private func removeAuthorizedDeviceWithoutPrompt(_ device: AuthorizedDevice) async throws {
         guard let session else {
             throw HangarAccountActionError.missingSession
         }
 
-        let timeoutSeconds = Self.authorizedDevicesRequestTimeoutSeconds
+        let timeoutSeconds = max(Self.authorizedDevicesRequestTimeoutSeconds, removableDevices.count * 8)
         let password = session.credentials?.password
         do {
             try await withTimeout(seconds: timeoutSeconds) { [self] in
-                try await self.hangarRepository.removeAuthorizedDevice(for: session, device: device, password: password)
+                try await self.hangarRepository.removeAuthorizedDevices(for: session, devices: removableDevices, password: password)
             } onTimeout: {
                 HangarAccountActionError.authorizedDeviceRemovalRejected(
                     message: AppLocalizer.format(
-                        "RSI did not remove %@ within %lld seconds.",
-                        device.displayName,
+                        "RSI did not remove %lld logged-in devices within %lld seconds.",
+                        removableDevices.count,
                         timeoutSeconds
                     )
                 )

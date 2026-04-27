@@ -543,6 +543,19 @@ final class LiveHangarRepository: HangarRepository {
         try await browser.removeAuthorizedDevice(using: session.cookies, device: device, password: password)
     }
 
+    func removeAuthorizedDevices(
+        for session: UserSession,
+        devices: [AuthorizedDevice],
+        password: String?
+    ) async throws {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.removeAuthorizedDevices(for: session, devices: devices, password: password)
+        }
+
+        try validate(session: session)
+        try await browser.removeAuthorizedDevices(using: session.cookies, devices: devices, password: password)
+    }
+
     private func validate(session: UserSession) throws {
         guard !session.cookies.isEmpty else {
             throw LiveHangarRepositoryError.sessionUnavailable
@@ -3032,6 +3045,15 @@ private struct RemoteAuthorizedDeviceRemoval: Decodable {
     let debugSummary: String?
 }
 
+private struct RemoteAuthorizedDeviceBulkRemoval: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let completedDeviceIDs: [String]
+    let failedDeviceID: String?
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
 @MainActor
 final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     private let webView: WKWebView
@@ -3382,6 +3404,49 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
                 }
                 .joined(separator: "\n\n")
                 .nilIfEmpty ?? "RSI did not remove the selected authorized device."
+            throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
+        }
+    }
+
+    fileprivate func removeAuthorizedDevices(
+        using cookies: [SessionCookie],
+        devices: [AuthorizedDevice],
+        password: String?
+    ) async throws {
+        guard !devices.isEmpty else {
+            return
+        }
+
+        let url = try storefrontURL(path: "/en/account/security/devices")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let devicePayload = devices.map { device in
+            [
+                "id": device.id,
+                "name": device.displayName
+            ]
+        }
+        let result = try await evaluate(
+            script: Self.removeAuthorizedDevicesScript,
+            arguments: [
+                "devicesToRemove": devicePayload,
+                "currentPassword": password ?? ""
+            ],
+            as: RemoteAuthorizedDeviceBulkRemoval.self
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        guard result.status == "ok" else {
+            let failureMessage = [result.failureMessage, result.debugSummary]
+                .compactMap { value in
+                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                }
+                .joined(separator: "\n\n")
+                .nilIfEmpty ?? "RSI did not remove the selected authorized devices."
             throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
         }
     }
@@ -6877,6 +6942,217 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       status: 'ok',
       failureMessage: null,
       debugSummary: `deviceID=${targetDeviceID}, passwordConfirmed=${didConfirmPassword ? 'yes' : 'no'}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+    };
+    """
+
+    private static let removeAuthorizedDevicesScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const isPasswordConfirmationRequired = (payload, responseText) => {
+      const raw = normalizeText([
+        payload?.code,
+        payload?.msg,
+        payload?.message,
+        responseText
+      ].filter(Boolean).join(' ')).toLowerCase();
+      return raw.includes('errpassword-confirmationrequired') ||
+        raw.includes('password confirmation required');
+    };
+    const targetDevices = Array.isArray(devicesToRemove)
+      ? devicesToRemove
+          .map((device) => ({
+            id: normalizeText(device?.id),
+            name: normalizeText(device?.name)
+          }))
+          .filter((device) => device.id)
+      : [];
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        completedDeviceIDs: [],
+        failedDeviceID: null,
+        failureMessage: 'The RSI security page reported access denied before the authorized-device removal request started.',
+        debugSummary: null
+      };
+    }
+
+    if (targetDevices.length === 0) {
+      return {
+        accessDenied: false,
+        status: 'invalid-device',
+        completedDeviceIDs: [],
+        failedDeviceID: null,
+        failureMessage: 'Hangar Express could not determine which authorized devices to remove.',
+        debugSummary: `deviceCount=${Array.isArray(devicesToRemove) ? devicesToRemove.length : 0}`
+      };
+    }
+
+    const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
+    const rsiDevice = cookieValue('_rsi_device');
+    const requestHeaders = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Accept': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+
+    if (csrfToken) {
+      requestHeaders['x-csrf-token'] = csrfToken;
+    }
+    if (rsiToken) {
+      requestHeaders['x-rsi-token'] = rsiToken;
+    }
+    if (rsiDevice) {
+      requestHeaders['x-rsi-device'] = rsiDevice;
+    }
+
+    const confirmPassword = async () => {
+      if (!currentPasswordValue) {
+        return {
+          ok: false,
+          failureMessage: 'RSI requires password confirmation before removing logged-in devices. Sign in again with saved credentials, then try again.',
+          debugSummary: 'passwordConfirmationRequired=yes, passwordPresent=no'
+        };
+      }
+
+      const formBody = new URLSearchParams();
+      formBody.set('password', currentPasswordValue);
+      const confirmHeaders = {
+        'Accept': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest'
+      };
+      if (rsiToken) {
+        confirmHeaders['x-rsi-token'] = rsiToken;
+      }
+
+      const response = await fetch('/api/account/validatePassword', {
+        method: 'POST',
+        credentials: 'include',
+        headers: confirmHeaders,
+        body: formBody.toString()
+      });
+      const responseText = await response.text();
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        payload = null;
+      }
+      const successValue = Number(payload?.success ?? 0);
+      if (!response.ok || successValue !== 1) {
+        return {
+          ok: false,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseText || 'RSI rejected password confirmation for logged-in devices.'),
+          debugSummary: `passwordConfirmation: httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}`
+        };
+      }
+
+      return {
+        ok: true,
+        failureMessage: null,
+        debugSummary: `passwordConfirmation: httpStatus=${response.status}`
+      };
+    };
+
+    const postRemoval = async (device) => {
+      const response = await fetch('/api/account/removeDevice', {
+        method: 'POST',
+        credentials: 'include',
+        headers: requestHeaders,
+        body: JSON.stringify({
+          id: device.id,
+          name: device.name
+        })
+      });
+      const responseText = await response.text();
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        payload = null;
+      }
+      return { response, responseText, payload };
+    };
+
+    const completedDeviceIDs = [];
+    let didConfirmPassword = false;
+    let passwordConfirmationDebug = '';
+
+    for (const device of targetDevices) {
+      let { response, responseText, payload } = await postRemoval(device);
+      if (response.status === 401 || response.status === 403) {
+        return {
+          accessDenied: true,
+          status: 'access-denied',
+          completedDeviceIDs,
+          failedDeviceID: device.id,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI rejected removal for authorized device ${device.id}.`),
+          debugSummary: `httpStatus=${response.status}, completed=${completedDeviceIDs.length}`
+        };
+      }
+
+      let successValue = Number(payload?.success ?? 0);
+      if ((!response.ok || successValue !== 1) && isPasswordConfirmationRequired(payload, responseText) && !didConfirmPassword) {
+        const confirmation = await confirmPassword();
+        didConfirmPassword = true;
+        passwordConfirmationDebug = confirmation.debugSummary || '';
+        if (!confirmation.ok) {
+          return {
+            accessDenied: false,
+            status: completedDeviceIDs.length > 0 ? 'partial-failure' : 'password-confirmation-required',
+            completedDeviceIDs,
+            failedDeviceID: device.id,
+            failureMessage: confirmation.failureMessage,
+            debugSummary: `httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}, completed=${completedDeviceIDs.length}, ${passwordConfirmationDebug}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+          };
+        }
+
+        ({ response, responseText, payload } = await postRemoval(device));
+        if (response.status === 401 || response.status === 403) {
+          return {
+            accessDenied: true,
+            status: 'access-denied',
+            completedDeviceIDs,
+            failedDeviceID: device.id,
+            failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI rejected removal for authorized device ${device.id}.`),
+            debugSummary: `httpStatus=${response.status}, completed=${completedDeviceIDs.length}, ${passwordConfirmationDebug}`
+          };
+        }
+      }
+
+      successValue = Number(payload?.success ?? 0);
+      if (!response.ok || successValue !== 1) {
+        return {
+          accessDenied: false,
+          status: completedDeviceIDs.length > 0 ? 'partial-failure' : 'failed',
+          completedDeviceIDs,
+          failedDeviceID: device.id,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI returned HTTP ${response.status} while removing authorized device ${device.id}.`),
+          debugSummary: `httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}, completed=${completedDeviceIDs.length}, ${passwordConfirmationDebug}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+        };
+      }
+
+      completedDeviceIDs.push(device.id);
+    }
+
+    return {
+      accessDenied: false,
+      status: 'ok',
+      completedDeviceIDs,
+      failedDeviceID: null,
+      failureMessage: null,
+      debugSummary: `requested=${targetDevices.length}, completed=${completedDeviceIDs.length}, passwordConfirmed=${didConfirmPassword ? 'yes' : 'no'}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
     };
     """
 
