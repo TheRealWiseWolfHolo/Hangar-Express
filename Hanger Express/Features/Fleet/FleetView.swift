@@ -710,6 +710,7 @@ private struct AllShipsCatalogItem: Identifiable, Hashable {
     let storeAvailability: String?
     let inGameStatus: String?
     let imageURL: URL?
+    let aliases: [String]
 
     var priceText: String {
         if let priceUSD {
@@ -759,7 +760,8 @@ private struct AllShipsCatalogItem: Identifiable, Hashable {
             manufacturer,
             priceText,
             storeAvailability,
-            inGameStatus
+            inGameStatus,
+            aliases.joined(separator: " ")
         ]
         .compactMap { $0?.nilIfBlank }
         .joined(separator: " ")
@@ -774,11 +776,23 @@ private struct AllShipsCatalogItem: Identifiable, Hashable {
         return range.contains(priceDouble)
     }
 
+    private static func isDisplayableCatalogEntry(hiddenInCatalog: Bool, displayDuplicateOf: String?) -> Bool {
+        let duplicateTarget = displayDuplicateOf?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !hiddenInCatalog && (duplicateTarget?.isEmpty ?? true)
+    }
+
     static func makeItems(
         shipCatalog: RSIShipCatalog,
         detailCatalog: RSIShipDetailCatalog
     ) -> [AllShipsCatalogItem] {
-        let catalogItems = shipCatalog.ships.map { ship in
+        let catalogItems = shipCatalog.ships.compactMap { ship -> AllShipsCatalogItem? in
+            guard isDisplayableCatalogEntry(
+                hiddenInCatalog: ship.hiddenInCatalog,
+                displayDuplicateOf: ship.displayDuplicateOf
+            ) else {
+                return nil
+            }
+
             let detail = detailCatalog.matchShip(named: ship.name)
             return AllShipsCatalogItem(
                 id: "catalog-\(ship.id)",
@@ -791,12 +805,20 @@ private struct AllShipsCatalogItem: Identifiable, Hashable {
                 priceLabel: ship.msrpLabel,
                 storeAvailability: ship.storeAvailability ?? detail?.storeAvailability ?? detail?.pledgeAvailability,
                 inGameStatus: detail?.inGameStatus,
-                imageURL: ship.imageURL
+                imageURL: ship.imageURL,
+                aliases: ship.aliases
             )
         }
 
         let catalogKeys = Set(shipCatalog.ships.map { UpgradeTitleParser.normalizedShipKey($0.name) })
         let detailOnlyItems = detailCatalog.ships.compactMap { detail -> AllShipsCatalogItem? in
+            guard isDisplayableCatalogEntry(
+                hiddenInCatalog: detail.hiddenInCatalog,
+                displayDuplicateOf: detail.displayDuplicateOf
+            ) else {
+                return nil
+            }
+
             let detailKey = UpgradeTitleParser.normalizedShipKey(detail.name)
             guard !catalogKeys.contains(detailKey) else {
                 return nil
@@ -810,7 +832,8 @@ private struct AllShipsCatalogItem: Identifiable, Hashable {
                 priceLabel: nil,
                 storeAvailability: detail.storeAvailability ?? detail.pledgeAvailability,
                 inGameStatus: detail.inGameStatus,
-                imageURL: nil
+                imageURL: nil,
+                aliases: detail.aliases
             )
         }
 
