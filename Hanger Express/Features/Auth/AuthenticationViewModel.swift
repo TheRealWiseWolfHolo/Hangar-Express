@@ -1,6 +1,5 @@
 import Foundation
 import Observation
-import UIKit
 import WebKit
 
 @MainActor
@@ -23,7 +22,7 @@ final class AuthenticationViewModel {
     var password = ""
     var rememberMe = true
     var verificationCode = ""
-    var deviceName = UIDevice.current.name
+    var deviceName = AuthorizedDevice.hangarExpressDeviceName
     var trustDuration: TrustedDeviceDuration = .year
     var noticeMessage: String?
     var errorMessage: String?

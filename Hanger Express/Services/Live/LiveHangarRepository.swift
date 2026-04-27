@@ -518,6 +518,29 @@ final class LiveHangarRepository: HangarRepository {
         )
     }
 
+    func fetchAuthorizedDevices(
+        for session: UserSession
+    ) async throws -> [AuthorizedDevice] {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.fetchAuthorizedDevices(for: session)
+        }
+
+        try validate(session: session)
+        return try await browser.fetchAuthorizedDevices(using: session.cookies)
+    }
+
+    func removeAuthorizedDevice(
+        for session: UserSession,
+        device: AuthorizedDevice
+    ) async throws {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.removeAuthorizedDevice(for: session, device: device)
+        }
+
+        try validate(session: session)
+        try await browser.removeAuthorizedDevice(using: session.cookies, device: device)
+    }
+
     private func validate(session: UserSession) throws {
         guard !session.cookies.isEmpty else {
             throw LiveHangarRepositoryError.sessionUnavailable
@@ -2972,6 +2995,41 @@ private struct RemoteApplyUpgradeExecution: Decodable {
     let debugSummary: String?
 }
 
+private struct RemoteAuthorizedDevicesLookup: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let devices: [RemoteAuthorizedDevice]
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
+private struct RemoteAuthorizedDevice: Decodable {
+    let id: String
+    let name: String
+    let type: String?
+    let createdAtLabel: String?
+    let duration: String?
+    let isCurrent: Bool
+
+    var domainModel: AuthorizedDevice {
+        AuthorizedDevice(
+            id: id,
+            name: name,
+            type: type,
+            createdAtLabel: createdAtLabel,
+            duration: duration,
+            isCurrent: isCurrent
+        )
+    }
+}
+
+private struct RemoteAuthorizedDeviceRemoval: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
 @MainActor
 final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     private let webView: WKWebView
@@ -3257,6 +3315,64 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             checkoutURL: checkoutURL,
             updatedCookies: await currentRSICookies()
         )
+    }
+
+    fileprivate func fetchAuthorizedDevices(
+        using cookies: [SessionCookie]
+    ) async throws -> [AuthorizedDevice] {
+        let url = try storefrontURL(path: "/en/account/security/devices")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let result = try await evaluate(script: Self.authorizedDevicesExtractionScript, as: RemoteAuthorizedDevicesLookup.self)
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        guard result.status == "ok" else {
+            let failureMessage = [result.failureMessage, result.debugSummary]
+                .compactMap { value in
+                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                }
+                .joined(separator: "\n\n")
+                .nilIfEmpty ?? "RSI did not return the authorized device list."
+            throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
+        }
+
+        return result.devices.map(\.domainModel)
+    }
+
+    fileprivate func removeAuthorizedDevice(
+        using cookies: [SessionCookie],
+        device: AuthorizedDevice
+    ) async throws {
+        let url = try storefrontURL(path: "/en/account/security/devices")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let result = try await evaluate(
+            script: Self.removeAuthorizedDeviceScript,
+            arguments: [
+                "deviceID": device.id,
+                "deviceName": device.displayName
+            ],
+            as: RemoteAuthorizedDeviceRemoval.self
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        guard result.status == "ok" else {
+            let failureMessage = [result.failureMessage, result.debugSummary]
+                .compactMap { value in
+                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                }
+                .joined(separator: "\n\n")
+                .nilIfEmpty ?? "RSI did not remove the selected authorized device."
+            throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
+        }
     }
 
     fileprivate func currentRSICookies() async -> [SessionCookie] {
@@ -6329,6 +6445,232 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       candidates,
       failureMessage: null,
       debugSummary: `upgradeItemPledgeID=${parsedUpgradeItemPledgeID}, candidateCount=${candidates.length}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+    };
+    """
+
+    private static let authorizedDevicesExtractionScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const deviceContainer = document.querySelector('.js-devices');
+    const currentDeviceID = normalizeText(
+      deviceContainer?.dataset?.current ||
+      deviceContainer?.getAttribute('data-current') ||
+      ''
+    );
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        devices: [],
+        failureMessage: 'The RSI security page reported access denied before the authorized-device request started.',
+        debugSummary: null
+      };
+    }
+
+    const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
+    const rsiDevice = cookieValue('_rsi_device');
+    const requestHeaders = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Accept': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+
+    if (csrfToken) {
+      requestHeaders['x-csrf-token'] = csrfToken;
+    }
+    if (rsiToken) {
+      requestHeaders['x-rsi-token'] = rsiToken;
+    }
+    if (rsiDevice) {
+      requestHeaders['x-rsi-device'] = rsiDevice;
+    }
+
+    const fetchPage = async (page) => {
+      const response = await fetch('/api/account/getDevices', {
+        method: 'POST',
+        credentials: 'include',
+        headers: requestHeaders,
+        body: JSON.stringify({ page: String(page) })
+      });
+      const responseText = await response.text();
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        payload = null;
+      }
+      return { response, responseText, payload };
+    };
+
+    const devices = [];
+    const seenDeviceIDs = new Set();
+    let page = 1;
+    let pageCount = 1;
+    let firstResponseStatus = 0;
+    let lastResponsePreview = '';
+
+    while (page <= pageCount && page <= 50) {
+      const { response, responseText, payload } = await fetchPage(page);
+      if (page === 1) {
+        firstResponseStatus = response.status;
+      }
+      lastResponsePreview = normalizeText(responseText).slice(0, 280);
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          accessDenied: true,
+          status: 'access-denied',
+          devices: [],
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseText || 'RSI rejected the authorized-device request.'),
+          debugSummary: `httpStatus=${response.status}`
+        };
+      }
+
+      const successValue = Number(payload?.success ?? 0);
+      if (!response.ok || successValue !== 1) {
+        return {
+          accessDenied: false,
+          status: 'failed',
+          devices: [],
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI returned HTTP ${response.status} while loading authorized devices.`),
+          debugSummary: `httpStatus=${response.status}, responsePreview=${lastResponsePreview || 'n/a'}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+        };
+      }
+
+      const data = payload?.data || {};
+      const resultset = Array.isArray(data.resultset) ? data.resultset : [];
+      for (const item of resultset) {
+        const id = normalizeText(item?.id);
+        if (!id || seenDeviceIDs.has(id)) {
+          continue;
+        }
+
+        seenDeviceIDs.add(id);
+        devices.push({
+          id,
+          name: normalizeText(item?.name),
+          type: normalizeText(item?.type) || null,
+          createdAtLabel: normalizeText(item?.time_created)?.replace(' - ', ' ') || null,
+          duration: normalizeText(item?.duration) || null,
+          isCurrent: currentDeviceID ? id === currentDeviceID : false
+        });
+      }
+
+      const parsedPage = Number.parseInt(data.page || page, 10);
+      const parsedPageCount = Number.parseInt(data.pagecount || data.page_count || pageCount, 10);
+      page = Number.isFinite(parsedPage) ? parsedPage + 1 : page + 1;
+      pageCount = Number.isFinite(parsedPageCount) && parsedPageCount > 0 ? parsedPageCount : pageCount;
+    }
+
+    return {
+      accessDenied: false,
+      status: 'ok',
+      devices,
+      failureMessage: null,
+      debugSummary: `deviceCount=${devices.length}, currentDeviceID=${currentDeviceID || 'unknown'}, firstHttpStatus=${firstResponseStatus || 'n/a'}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+    };
+    """
+
+    private static let removeAuthorizedDeviceScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const targetDeviceID = normalizeText(deviceID);
+    const targetDeviceName = normalizeText(deviceName);
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        failureMessage: 'The RSI security page reported access denied before the authorized-device removal request started.',
+        debugSummary: null
+      };
+    }
+
+    if (!targetDeviceID) {
+      return {
+        accessDenied: false,
+        status: 'invalid-device',
+        failureMessage: 'Hangar Express could not determine which authorized device to remove.',
+        debugSummary: `deviceID=${String(deviceID || '')}`
+      };
+    }
+
+    const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
+    const rsiDevice = cookieValue('_rsi_device');
+    const requestHeaders = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Accept': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+
+    if (csrfToken) {
+      requestHeaders['x-csrf-token'] = csrfToken;
+    }
+    if (rsiToken) {
+      requestHeaders['x-rsi-token'] = rsiToken;
+    }
+    if (rsiDevice) {
+      requestHeaders['x-rsi-device'] = rsiDevice;
+    }
+
+    const response = await fetch('/api/account/removeDevice', {
+      method: 'POST',
+      credentials: 'include',
+      headers: requestHeaders,
+      body: JSON.stringify({
+        id: targetDeviceID,
+        name: targetDeviceName
+      })
+    });
+    const responseText = await response.text();
+    let payload = null;
+    try {
+      payload = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      payload = null;
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI rejected removal for authorized device ${targetDeviceID}.`),
+        debugSummary: `httpStatus=${response.status}`
+      };
+    }
+
+    const successValue = Number(payload?.success ?? 0);
+    if (!response.ok || successValue !== 1) {
+      return {
+        accessDenied: false,
+        status: 'failed',
+        failureMessage: normalizeText(payload?.msg || payload?.code || responseText || `RSI returned HTTP ${response.status} while removing authorized device ${targetDeviceID}.`),
+        debugSummary: `httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+      };
+    }
+
+    return {
+      accessDenied: false,
+      status: 'ok',
+      failureMessage: null,
+      debugSummary: `deviceID=${targetDeviceID}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
     };
     """
 

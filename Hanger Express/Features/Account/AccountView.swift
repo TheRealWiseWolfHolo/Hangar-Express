@@ -170,6 +170,8 @@ struct AccountView: View {
                 switch tool {
                 case .allShips:
                     AllShipsBrowserView(reloadToken: appModel.hangarFleetImageReloadToken)
+                case .authorizedDevices:
+                    AuthorizedDevicesView(appModel: appModel)
                 case .ccuChainCalculator, .resetCharacter:
                     EmptyView()
                 }
@@ -996,6 +998,355 @@ private enum ProfileBackgroundSelectionPersistence {
             UserDefaults.standard.set(selectionKey, forKey: storageKey)
         } else {
             UserDefaults.standard.removeObject(forKey: storageKey)
+        }
+    }
+}
+
+private struct AuthorizedDevicesView: View {
+    let appModel: AppModel
+
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
+    @State private var devices: [AuthorizedDevice] = []
+    @State private var isLoading = false
+    @State private var isRemoving = false
+    @State private var errorMessage: String?
+    @State private var pendingRemoval: AuthorizedDevice?
+    @State private var isShowingRemoveAllConfirmation = false
+
+    private var removableDevices: [AuthorizedDevice] {
+        let hasCurrentDeviceMarker = devices.contains(where: \.isCurrent)
+        let hasHangarExpressFallback = devices.contains(where: \.matchesHangarExpressDeviceName)
+        guard hasCurrentDeviceMarker || hasHangarExpressFallback else {
+            return []
+        }
+
+        return devices.filter { device in
+            hasCurrentDeviceMarker
+                ? !device.isCurrent
+                : !device.matchesHangarExpressDeviceName
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if isLoading && devices.isEmpty {
+                    AuthorizedDevicesLoadingView()
+                } else if let errorMessage, devices.isEmpty {
+                    AuthorizedDevicesErrorView(message: errorMessage) {
+                        Task {
+                            await loadDevices()
+                        }
+                    }
+                } else if devices.isEmpty {
+                    AuthorizedDevicesEmptyView()
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 12) {
+                            Text("Authorized devices are trusted RSI sign-in sessions. Removing a device signs that session out.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 4)
+
+                            ForEach(devices) { device in
+                                AuthorizedDeviceRow(
+                                    device: device,
+                                    isRemoving: isRemoving
+                                ) {
+                                    pendingRemoval = device
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                        .padding(.bottom, removableDevices.isEmpty ? 24 : 112)
+                    }
+                    .refreshable {
+                        await loadDevices()
+                    }
+                }
+            }
+            .id(appLanguageRawValue)
+            .navigationTitle(AppLocalizer.string("Authorized Devices"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Refresh") {
+                        Task {
+                            await loadDevices()
+                        }
+                    }
+                    .disabled(isLoading || isRemoving)
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if !removableDevices.isEmpty {
+                    Button(role: .destructive) {
+                        isShowingRemoveAllConfirmation = true
+                    } label: {
+                        HStack {
+                            if isRemoving {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+
+                            Text("Remove All Other Devices")
+                                .font(.headline)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .disabled(isLoading || isRemoving)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(.regularMaterial)
+                }
+            }
+            .task {
+                await loadDevices()
+            }
+            .alert(
+                AppLocalizer.string("Remove Device?"),
+                isPresented: Binding(
+                    get: { pendingRemoval != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            pendingRemoval = nil
+                        }
+                    }
+                ),
+                presenting: pendingRemoval
+            ) { device in
+                Button("Cancel", role: .cancel) {
+                    pendingRemoval = nil
+                }
+
+                Button("Remove", role: .destructive) {
+                    Task {
+                        await remove(device)
+                    }
+                }
+            } message: { device in
+                Text(AppLocalizer.format("Remove %@ from your authorized RSI devices?", device.displayName))
+            }
+            .alert("Unable to Manage Devices", isPresented: Binding(
+                get: { errorMessage != nil && !devices.isEmpty },
+                set: { isPresented in
+                    if !isPresented {
+                        errorMessage = nil
+                    }
+                }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(errorMessage ?? "")
+            }
+            .confirmationDialog(
+                AppLocalizer.string("Remove All Other Devices?"),
+                isPresented: $isShowingRemoveAllConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Remove All Other Devices", role: .destructive) {
+                    Task {
+                        await removeAllOtherDevices()
+                    }
+                }
+
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(
+                    AppLocalizer.format(
+                        "Remove %lld authorized RSI devices and keep the current Hangar Express session?",
+                        removableDevices.count
+                    )
+                )
+            }
+        }
+    }
+
+    private func loadDevices() async {
+        guard !isRemoving else {
+            return
+        }
+
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            devices = try await appModel.fetchAuthorizedDevices()
+                .sorted { lhs, rhs in
+                    if lhs.isCurrent != rhs.isCurrent {
+                        return lhs.isCurrent
+                    }
+
+                    return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+                }
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func remove(_ device: AuthorizedDevice) async {
+        pendingRemoval = nil
+        isRemoving = true
+        defer { isRemoving = false }
+
+        do {
+            try await appModel.removeAuthorizedDevice(device)
+            await loadDevices()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func removeAllOtherDevices() async {
+        isRemoving = true
+        defer { isRemoving = false }
+
+        do {
+            try await appModel.removeAuthorizedDevicesExceptCurrent(devices)
+            await loadDevices()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+private struct AuthorizedDeviceRow: View {
+    let device: AuthorizedDevice
+    let isRemoving: Bool
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: iconName)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(device.isCurrent ? Color.accentColor : .secondary)
+                .frame(width: 42, height: 42)
+                .background(
+                    Circle()
+                        .fill((device.isCurrent ? Color.accentColor : Color.secondary).opacity(0.13))
+                )
+
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(device.displayName)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+
+                    if device.isCurrent {
+                        Text("This App")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(Color.accentColor)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule()
+                                    .fill(Color.accentColor.opacity(0.14))
+                            )
+                    }
+                }
+
+                Text(device.displayType)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    if let createdAtLabel = device.createdAtLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !createdAtLabel.isEmpty {
+                        Label(createdAtLabel, systemImage: "calendar")
+                    }
+
+                    Label(device.durationLabel, systemImage: "timer")
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 8)
+
+            if device.shouldProtectFromBulkRemoval {
+                Image(systemName: "lock.fill")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+            } else {
+                Button(role: .destructive, action: onRemove) {
+                    Image(systemName: "trash")
+                        .font(.headline)
+                }
+                .buttonStyle(.borderless)
+                .disabled(isRemoving)
+                .padding(.top, 2)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        )
+    }
+
+    private var iconName: String {
+        switch device.type?.localizedLowercase {
+        case "mobile":
+            return "iphone"
+        case "tablet":
+            return "ipad"
+        case "desktop":
+            return "desktopcomputer"
+        default:
+            return "desktopcomputer.and.iphone"
+        }
+    }
+}
+
+private struct AuthorizedDevicesLoadingView: View {
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+            Text("Loading authorized devices")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct AuthorizedDevicesEmptyView: View {
+    var body: some View {
+        ContentUnavailableView(
+            AppLocalizer.string("No Authorized Devices"),
+            systemImage: "desktopcomputer.and.iphone",
+            description: Text("No authorized devices were returned by RSI.")
+        )
+    }
+}
+
+private struct AuthorizedDevicesErrorView: View {
+    let message: String
+    let retry: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Unable to Load Devices", systemImage: "exclamationmark.triangle")
+        } description: {
+            Text(message)
+        } actions: {
+            Button("Try Again", action: retry)
+                .buttonStyle(.borderedProminent)
         }
     }
 }
