@@ -271,6 +271,8 @@ struct RSIShipCatalog: Sendable {
         let manufacturerLogoURL: URL?
         let msrpUSD: Decimal?
         let msrpLabel: String?
+        let storeAvailability: String?
+        let storeAvailable: Bool?
         let type: String?
         let focus: String?
         let minCrew: Int?
@@ -286,6 +288,8 @@ struct RSIShipCatalog: Sendable {
             manufacturerLogoURL: URL? = nil,
             msrpUSD: Decimal?,
             msrpLabel: String? = nil,
+            storeAvailability: String? = nil,
+            storeAvailable: Bool? = nil,
             type: String? = nil,
             focus: String? = nil,
             minCrew: Int? = nil,
@@ -300,6 +304,8 @@ struct RSIShipCatalog: Sendable {
             self.manufacturerLogoURL = manufacturerLogoURL
             self.msrpUSD = msrpUSD
             self.msrpLabel = msrpLabel
+            self.storeAvailability = storeAvailability
+            self.storeAvailable = storeAvailable
             self.type = type
             self.focus = focus
             self.minCrew = minCrew
@@ -445,6 +451,8 @@ struct HostedShipCatalogClient: Sendable {
                     ),
                     msrpUSD: ship.msrpUSD,
                     msrpLabel: ship.msrpLabel?.nilIfEmpty,
+                    storeAvailability: ship.storeAvailabilityLabel,
+                    storeAvailable: ship.storeAvailable ?? ship.purchasable,
                     type: ship.type?.nilIfEmpty,
                     focus: ship.focus?.nilIfEmpty,
                     minCrew: ship.minCrew,
@@ -770,6 +778,8 @@ struct RSIShipDetailCatalog: Sendable {
         let size: String?
         let inGameStatus: String?
         let pledgeAvailability: String?
+        let storeAvailability: String?
+        let storeAvailable: Bool?
         let minCrew: Int?
         let maxCrew: Int?
         let description: String?
@@ -943,6 +953,8 @@ struct HostedShipDetailCatalogClient: Sendable {
                     size: ship.size?.nilIfEmpty,
                     inGameStatus: ship.inGameStatus?.nilIfEmpty,
                     pledgeAvailability: ship.pledgeAvailability?.nilIfEmpty,
+                    storeAvailability: ship.storeAvailabilityLabel,
+                    storeAvailable: ship.storeAvailable,
                     minCrew: ship.minCrew,
                     maxCrew: ship.maxCrew,
                     description: ship.description?.nilIfEmpty,
@@ -1066,6 +1078,8 @@ private struct RemoteHostedShipDetail: Decodable {
     let size: String?
     let inGameStatus: String?
     let pledgeAvailability: String?
+    let storeAvailability: String?
+    let storeAvailable: Bool?
     let minCrew: Int?
     let maxCrew: Int?
     let description: String?
@@ -1090,6 +1104,8 @@ private struct RemoteHostedShipDetail: Decodable {
         size = try container.decodeIfPresent(String.self, forKey: .size)
         inGameStatus = try container.decodeIfPresent(String.self, forKey: .inGameStatus)
         pledgeAvailability = try container.decodeIfPresent(String.self, forKey: .pledgeAvailability)
+        storeAvailability = try container.decodeIfPresent(String.self, forKey: .storeAvailability)
+        storeAvailable = try container.decodeIfPresent(Bool.self, forKey: .storeAvailable)
         minCrew = try container.decodeIfPresent(Int.self, forKey: .minCrew)
         maxCrew = try container.decodeIfPresent(Int.self, forKey: .maxCrew)
         description = try container.decodeIfPresent(String.self, forKey: .description)
@@ -1129,6 +1145,8 @@ private struct RemoteHostedShipDetail: Decodable {
         case size
         case inGameStatus
         case pledgeAvailability
+        case storeAvailability
+        case storeAvailable
         case minCrew
         case maxCrew
         case description
@@ -1142,6 +1160,18 @@ private struct RemoteHostedShipDetail: Decodable {
         case pageURL = "pageUrl"
         case spviewerPageURL = "spviewerPageUrl"
         case unavailableReason
+    }
+
+    var storeAvailabilityLabel: String? {
+        if let storeAvailability = storeAvailability?.nilIfEmpty {
+            return storeAvailability
+        }
+
+        guard let storeAvailable else {
+            return nil
+        }
+
+        return storeAvailable ? "Available" : "Unavailable"
     }
 }
 
@@ -1183,6 +1213,9 @@ private struct RemoteHostedShip: Decodable {
     let manufacturerSlug: String?
     let msrpUSD: Decimal?
     let msrpLabel: String?
+    let purchasable: Bool?
+    let storeAvailable: Bool?
+    let storeAvailability: String?
     let type: String?
     let focus: String?
     let minCrew: Int?
@@ -1198,6 +1231,9 @@ private struct RemoteHostedShip: Decodable {
         case manufacturerSlug
         case msrpUSD = "msrpUsd"
         case msrpLabel
+        case purchasable
+        case storeAvailable
+        case storeAvailability
         case type
         case focus
         case minCrew
@@ -1208,6 +1244,18 @@ private struct RemoteHostedShip: Decodable {
 
     var numericID: Int? {
         Int(id)
+    }
+
+    var storeAvailabilityLabel: String? {
+        if let storeAvailability = storeAvailability?.nilIfEmpty {
+            return storeAvailability
+        }
+
+        guard let available = storeAvailable ?? purchasable else {
+            return nil
+        }
+
+        return available ? "Available" : "Unavailable"
     }
 }
 
