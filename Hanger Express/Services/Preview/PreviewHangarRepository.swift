@@ -283,6 +283,12 @@ struct PreviewHangarRepository: HangarRepository {
         password _: String?
     ) async throws {}
 
+    func removeAuthorizedDevices(
+        for _: UserSession,
+        devices _: [AuthorizedDevice],
+        password _: String?
+    ) async throws {}
+
     static let sampleSnapshot = HangarSnapshot(
         accountHandle: UserSession.preview.handle,
         lastSyncedAt: referenceDate(year: 2026, month: 4, day: 17),
