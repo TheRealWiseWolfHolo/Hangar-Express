@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		D11D05FF2FA13AF4006EC273 /* StoreKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D11D05FE2FA13AF3006EC273 /* StoreKit.framework */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		D11D01EA2F932528006EC273 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -27,6 +31,7 @@
 		D11D01DA2F932526006EC273 /* Hangar Express.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Hangar Express.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		D11D01E92F932528006EC273 /* Hanger ExpressTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Hanger ExpressTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		D11D01F32F932528006EC273 /* Hanger ExpressUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Hanger ExpressUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		D11D05FE2FA13AF3006EC273 /* StoreKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = StoreKit.framework; path = System/Library/Frameworks/StoreKit.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -52,6 +57,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D11D05FF2FA13AF4006EC273 /* StoreKit.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -78,6 +84,7 @@
 				D11D01DC2F932526006EC273 /* Hanger Express */,
 				D11D01EC2F932528006EC273 /* Hanger ExpressTests */,
 				D11D01F62F932528006EC273 /* Hanger ExpressUITests */,
+				D11D05FD2FA13AF3006EC273 /* Frameworks */,
 				D11D01DB2F932526006EC273 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -90,6 +97,14 @@
 				D11D01F32F932528006EC273 /* Hanger ExpressUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		D11D05FD2FA13AF3006EC273 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				D11D05FE2FA13AF3006EC273 /* StoreKit.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -175,6 +190,11 @@
 				TargetAttributes = {
 					D11D01D92F932526006EC273 = {
 						CreatedOnToolsVersion = 26.3;
+						SystemCapabilities = {
+							com.apple.InAppPurchase = {
+								enabled = 1;
+							};
+						};
 					};
 					D11D01E82F932528006EC273 = {
 						CreatedOnToolsVersion = 26.3;
@@ -397,7 +417,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 23;
+				CURRENT_PROJECT_VERSION = 29;
 				DEVELOPMENT_TEAM = 9RK34X2QQ4;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -416,7 +436,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.8.4;
+				MARKETING_VERSION = 0.8.8;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.wisewolfholo.Hanger-Express";
 				PRODUCT_MODULE_NAME = Hanger_Express;
 				PRODUCT_NAME = "Hangar Express";
@@ -439,7 +459,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 23;
+				CURRENT_PROJECT_VERSION = 29;
 				DEVELOPMENT_TEAM = 9RK34X2QQ4;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -458,7 +478,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.8.4;
+				MARKETING_VERSION = 0.8.8;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.wisewolfholo.Hanger-Express";
 				PRODUCT_MODULE_NAME = Hanger_Express;
 				PRODUCT_NAME = "Hangar Express";

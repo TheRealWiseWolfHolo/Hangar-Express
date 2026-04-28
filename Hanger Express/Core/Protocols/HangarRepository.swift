@@ -80,11 +80,15 @@ nonisolated enum HangarLogFetchMode: Hashable, Sendable {
     case expanded
 
     var entryLimit: Int {
+        entryLimit(isPro: ProSubscriptionConfiguration.storedIsPro)
+    }
+
+    func entryLimit(isPro: Bool) -> Int {
         switch self {
         case .initial:
-            return 10
+            return ProSubscriptionConfiguration.standardHangarLogEntryLimit
         case .expanded:
-            return 500
+            return ProSubscriptionConfiguration.hangarLogEntryLimit(isPro: isPro)
         }
     }
 }

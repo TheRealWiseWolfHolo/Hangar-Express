@@ -9,6 +9,9 @@ struct ContentView: View {
             .task {
                 await appModel.bootstrap()
             }
+            .task {
+                await appModel.prepareSubscriptions()
+            }
             .onChange(of: scenePhase) { _, newPhase in
                 guard newPhase == .active else {
                     return

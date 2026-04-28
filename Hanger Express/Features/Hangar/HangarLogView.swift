@@ -1,8 +1,6 @@
 import SwiftUI
 
 struct HangarLogView: View {
-    private let entryBatchSize = HangarLogFetchMode.initial.entryLimit
-
     private enum TimeFilter: CaseIterable, Identifiable {
         case all
         case last30Days
@@ -67,8 +65,12 @@ struct HangarLogView: View {
         appModel.snapshot?.hangarLogs ?? []
     }
 
+    private var planLimitedHangarLogs: [HangarLogEntry] {
+        Array(hangarLogs.prefix(appModel.hangarLogEntryLimit))
+    }
+
     private var filteredHangarLogs: [HangarLogEntry] {
-        hangarLogs.filter { entry in
+        planLimitedHangarLogs.filter { entry in
             matchesTimeFilter(entry) && matchesActionFilter(entry) && matchesSearch(entry)
         }
     }
@@ -79,6 +81,10 @@ struct HangarLogView: View {
 
     private var hasHiddenResults: Bool {
         filteredHangarLogs.count > displayedHangarLogs.count
+    }
+
+    private var entryBatchSize: Int {
+        appModel.isPro ? 50 : appModel.hangarLogEntryLimit
     }
 
     var body: some View {
@@ -174,6 +180,24 @@ struct HangarLogView: View {
                             .padding(.vertical, 6)
                         }
                     }
+
+                    if shouldShowProLogLimitMessage {
+                        Section {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("Standard shows the latest 5 hangar log entries. Pro unlocks up to 500.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+
+                                Button("Upgrade to Pro") {
+                                    Task {
+                                        await appModel.subscriptionStore.purchasePro()
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                            .padding(.vertical, 6)
+                        }
+                    }
                 }
             }
             .listStyle(.insetGrouped)
@@ -228,7 +252,14 @@ struct HangarLogView: View {
                     self.lastRemoteExpansionBaselineCount = nil
                 }
             }
+            .onChange(of: appModel.isPro) { _, _ in
+                resetVisibleEntryCount()
+            }
         }
+    }
+
+    private var shouldShowProLogLimitMessage: Bool {
+        !appModel.isPro && hangarLogs.count >= appModel.hangarLogEntryLimit
     }
 
     private var emptyStateDescription: String {
@@ -317,12 +348,13 @@ struct HangarLogView: View {
         guard searchText.isEmpty,
               timeFilter == .all,
               actionFilter == .all,
+              appModel.isPro,
               !appModel.isRefreshing(.hangarLog),
               !isRequestingOlderEntries,
               displayedHangarLogs.last?.id == currentEntry.id,
-              displayedHangarLogs.count == hangarLogs.count,
+              displayedHangarLogs.count == planLimitedHangarLogs.count,
               hangarLogs.count >= HangarLogFetchMode.initial.entryLimit,
-              hangarLogs.count < HangarLogFetchMode.expanded.entryLimit,
+              hangarLogs.count < appModel.hangarLogEntryLimit,
               lastRemoteExpansionBaselineCount != hangarLogs.count else {
             return
         }

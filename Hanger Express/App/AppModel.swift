@@ -3,10 +3,21 @@ import Observation
 
 enum SyncPreferences {
     static let workerCountKey = "sync.workerCount"
-    static let defaultWorkerCount = 4
+    static let defaultWorkerCount = ProSubscriptionConfiguration.standardRefreshWorkerLimit
     static let minWorkerCount = 1
-    static let maxWorkerCount = 10
+    static let maxWorkerCount = ProSubscriptionConfiguration.proRefreshWorkerLimit
     static let automaticRefreshInterval: TimeInterval = 48 * 60 * 60
+
+    static func maxWorkerCount(isPro: Bool) -> Int {
+        ProSubscriptionConfiguration.refreshWorkerLimit(isPro: isPro)
+    }
+
+    static func constrainedWorkerCount(_ count: Int, isPro: Bool) -> Int {
+        min(
+            max(count, minWorkerCount),
+            maxWorkerCount(isPro: isPro)
+        )
+    }
 }
 
 enum DisplayPreferences {
@@ -162,6 +173,7 @@ final class AppModel {
     let recaptchaBroker: RecaptchaBroker
     let authDiagnostics: AuthenticationDiagnosticsStore
     let refreshDiagnostics: RefreshDiagnosticsStore
+    let subscriptionStore: SubscriptionStore
 
     private let sessionStore: any SessionStore
     private let snapshotStore: any SnapshotStore
@@ -193,6 +205,7 @@ final class AppModel {
         recaptchaBroker = environment.recaptchaBroker
         authDiagnostics = environment.authDiagnostics
         refreshDiagnostics = environment.refreshDiagnostics
+        subscriptionStore = environment.subscriptionStore
         userDefaults = .standard
     }
 
@@ -206,6 +219,22 @@ final class AppModel {
 
     var isRefreshing: Bool {
         activeRefreshScope != nil
+    }
+
+    var isPro: Bool {
+        subscriptionStore.isPro
+    }
+
+    var refreshWorkerLimit: Int {
+        SyncPreferences.maxWorkerCount(isPro: isPro)
+    }
+
+    var hangarLogEntryLimit: Int {
+        ProSubscriptionConfiguration.hangarLogEntryLimit(isPro: isPro)
+    }
+
+    var allowsMultiAccountSwitching: Bool {
+        isPro
     }
 
     var compositeUpgradeThumbnailsEnabled: Bool {
@@ -231,7 +260,16 @@ final class AppModel {
     }
 
     var quickLoginSessions: [UserSession] {
-        savedSessions.filter { $0.authMode != .developerPreview }
+        let liveSessions = savedSessions.filter { $0.authMode != .developerPreview }
+        guard allowsMultiAccountSwitching else {
+            return Array(liveSessions.prefix(1))
+        }
+
+        return liveSessions
+    }
+
+    func prepareSubscriptions() async {
+        await subscriptionStore.start()
     }
 
     func bootstrap() async {
@@ -300,6 +338,12 @@ final class AppModel {
     }
 
     func beginAddingAccount() async {
+        let savedLiveSessionCount = savedSessions.filter { $0.authMode != .developerPreview }.count
+        guard allowsMultiAccountSwitching || savedLiveSessionCount == 0 else {
+            await subscriptionStore.purchasePro()
+            return
+        }
+
         await authService.cancelPendingAuthentication()
         authDiagnostics.record(
             stage: "auth.add-account",
@@ -319,6 +363,11 @@ final class AppModel {
 
     func switchAccount(to id: UserSession.ID) async {
         guard session?.id != id else {
+            return
+        }
+
+        guard allowsMultiAccountSwitching || savedSessions.first?.id == id else {
+            await subscriptionStore.purchasePro()
             return
         }
 
@@ -367,6 +416,13 @@ final class AppModel {
 
     func openSavedAccount(id: UserSession.ID) async {
         guard let savedSession = savedSessions.first(where: { $0.id == id }) else {
+            return
+        }
+
+        if !allowsMultiAccountSwitching,
+           session?.id != id,
+           savedSessions.first?.id != id {
+            await subscriptionStore.purchasePro()
             return
         }
 
@@ -505,6 +561,8 @@ final class AppModel {
     }
 
     func handleAppDidBecomeActive() async {
+        await subscriptionStore.refreshPurchasedProducts()
+
         guard hasBootstrapped else {
             await bootstrap()
             return
@@ -1579,7 +1637,8 @@ final class AppModel {
     func loadMoreHangarLogEntries() async {
         guard let session,
               let existingSnapshot = snapshot,
-              !isRefreshing else {
+              !isRefreshing,
+              isPro else {
             return
         }
 

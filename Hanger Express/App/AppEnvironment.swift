@@ -1,5 +1,6 @@
 import Foundation
 
+@MainActor
 struct AppEnvironment {
     let sessionStore: any SessionStore
     let snapshotStore: any SnapshotStore
@@ -10,17 +11,19 @@ struct AppEnvironment {
     let recaptchaBroker: RecaptchaBroker
     let authDiagnostics: AuthenticationDiagnosticsStore
     let refreshDiagnostics: RefreshDiagnosticsStore
+    let subscriptionStore: SubscriptionStore
 
     init(
         sessionStore: any SessionStore,
         snapshotStore: any SnapshotStore,
-        imageCache: any RemoteImageCaching = URLCachedImageStore.shared,
+        imageCache: any RemoteImageCaching,
         hangarRepository: any HangarRepository,
         sensitiveActionAuthorizer: any SensitiveActionAuthorizing,
         authService: any AuthenticationServicing,
         recaptchaBroker: RecaptchaBroker,
         authDiagnostics: AuthenticationDiagnosticsStore,
-        refreshDiagnostics: RefreshDiagnosticsStore
+        refreshDiagnostics: RefreshDiagnosticsStore,
+        subscriptionStore: SubscriptionStore
     ) {
         self.sessionStore = sessionStore
         self.snapshotStore = snapshotStore
@@ -31,6 +34,7 @@ struct AppEnvironment {
         self.recaptchaBroker = recaptchaBroker
         self.authDiagnostics = authDiagnostics
         self.refreshDiagnostics = refreshDiagnostics
+        self.subscriptionStore = subscriptionStore
     }
 
     static var preview: AppEnvironment {
@@ -40,12 +44,14 @@ struct AppEnvironment {
         return AppEnvironment(
             sessionStore: PreviewSessionStore(),
             snapshotStore: PreviewSnapshotStore(),
+            imageCache: URLCachedImageStore.shared,
             hangarRepository: PreviewHangarRepository(),
             sensitiveActionAuthorizer: PreviewSensitiveActionAuthorizer(),
             authService: PreviewAuthenticationService(diagnostics: diagnostics),
             recaptchaBroker: broker,
             authDiagnostics: diagnostics,
-            refreshDiagnostics: refreshDiagnostics
+            refreshDiagnostics: refreshDiagnostics,
+            subscriptionStore: SubscriptionStore(storeKitEnabled: false)
         )
     }
 
@@ -56,12 +62,14 @@ struct AppEnvironment {
         return AppEnvironment(
             sessionStore: KeychainSessionStore(),
             snapshotStore: FileSnapshotStore(),
+            imageCache: URLCachedImageStore.shared,
             hangarRepository: LiveHangarRepository(diagnostics: refreshDiagnostics),
             sensitiveActionAuthorizer: DeviceOwnerSensitiveActionAuthorizer(),
             authService: RSIAuthService(recaptchaBroker: broker, diagnostics: diagnostics),
             recaptchaBroker: broker,
             authDiagnostics: diagnostics,
-            refreshDiagnostics: refreshDiagnostics
+            refreshDiagnostics: refreshDiagnostics,
+            subscriptionStore: SubscriptionStore()
         )
     }
 }

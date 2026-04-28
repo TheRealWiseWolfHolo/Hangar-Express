@@ -50,6 +50,20 @@ struct Hanger_ExpressTests {
         #expect(rebuiltCookie.isHTTPOnly)
     }
 
+    @Test func subscriptionEntitlementsClampRefreshWorkersByPlan() async throws {
+        #expect(SyncPreferences.constrainedWorkerCount(10, isPro: false) == 2)
+        #expect(SyncPreferences.constrainedWorkerCount(0, isPro: false) == 1)
+        #expect(SyncPreferences.constrainedWorkerCount(10, isPro: true) == 10)
+        #expect(SyncPreferences.constrainedWorkerCount(11, isPro: true) == 10)
+    }
+
+    @Test func hangarLogFetchModesRespectSubscriptionLimits() async throws {
+        #expect(HangarLogFetchMode.initial.entryLimit(isPro: false) == 5)
+        #expect(HangarLogFetchMode.initial.entryLimit(isPro: true) == 5)
+        #expect(HangarLogFetchMode.expanded.entryLimit(isPro: false) == 5)
+        #expect(HangarLogFetchMode.expanded.entryLimit(isPro: true) == 500)
+    }
+
     @Test func fileSnapshotStorePersistsSnapshotsByAccountKey() async throws {
         let tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -3389,7 +3403,8 @@ private func makeTestAppEnvironment(
         authService: PreviewAuthenticationService(diagnostics: diagnostics),
         recaptchaBroker: recaptchaBroker,
         authDiagnostics: diagnostics,
-        refreshDiagnostics: refreshDiagnostics
+        refreshDiagnostics: refreshDiagnostics,
+        subscriptionStore: SubscriptionStore(storeKitEnabled: false)
     )
 }
 
@@ -3862,6 +3877,36 @@ private actor FakeHangarRepository: HangarRepository {
             updatedCookies: session.cookies
         )
     }
+
+    func prepareBuybackCheckout(
+        for session: UserSession,
+        pledge: BuybackPledge
+    ) async throws -> BuybackCheckoutPreparation {
+        BuybackCheckoutPreparation(
+            buybackPledgeID: pledge.id,
+            checkoutURL: URL(string: "https://example.com/checkout")!,
+            updatedCookies: session.cookies
+        )
+    }
+
+    func fetchAuthorizedDevices(
+        for _: UserSession,
+        password _: String?
+    ) async throws -> [AuthorizedDevice] {
+        []
+    }
+
+    func removeAuthorizedDevice(
+        for _: UserSession,
+        device _: AuthorizedDevice,
+        password _: String?
+    ) async throws {}
+
+    func removeAuthorizedDevices(
+        for _: UserSession,
+        devices _: [AuthorizedDevice],
+        password _: String?
+    ) async throws {}
 
     func invocationLog() -> [String] {
         invokedScopes

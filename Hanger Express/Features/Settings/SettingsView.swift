@@ -23,6 +23,8 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             List {
+                ProSubscriptionSection(subscriptionStore: appModel.subscriptionStore)
+
                 Section {
                     Picker("Language", selection: $appLanguageRawValue) {
                         ForEach(AppLanguage.allCases) { language in
@@ -54,10 +56,16 @@ struct SettingsView: View {
                             SavedAccountRow(
                                 session: savedSession,
                                 isActive: savedSession.id == appModel.session?.id,
+                                canSwitch: appModel.allowsMultiAccountSwitching,
                                 onSwitch: {
                                     dismiss()
                                     Task {
                                         await appModel.openSavedAccount(id: savedSession.id)
+                                    }
+                                },
+                                onUpgrade: {
+                                    Task {
+                                        await appModel.subscriptionStore.purchasePro()
                                     }
                                 }
                             )
@@ -76,15 +84,26 @@ struct SettingsView: View {
                     }
 
                     Button {
-                        dismiss()
                         Task {
-                            await appModel.beginAddingAccount()
+                            if appModel.allowsMultiAccountSwitching {
+                                dismiss()
+                                await appModel.beginAddingAccount()
+                            } else {
+                                await appModel.subscriptionStore.purchasePro()
+                            }
                         }
                     } label: {
-                        Label("Add Another Account", systemImage: "plus.circle")
+                        Label(
+                            appModel.allowsMultiAccountSwitching ? "Add Another Account" : "Upgrade to Add Another Account",
+                            systemImage: appModel.allowsMultiAccountSwitching ? "plus.circle" : "lock"
+                        )
                     }
                 } header: {
                     Text("Accounts")
+                } footer: {
+                    if !appModel.allowsMultiAccountSwitching {
+                        Text("Standard keeps your current saved account. Pro unlocks switching between multiple saved accounts.")
+                    }
                 }
 
                 Section {
@@ -97,15 +116,15 @@ struct SettingsView: View {
                         }
 
                         Slider(
-                            value: $syncWorkerCount,
-                            in: Double(SyncPreferences.minWorkerCount) ... Double(SyncPreferences.maxWorkerCount),
+                            value: syncWorkerCountBinding,
+                            in: Double(SyncPreferences.minWorkerCount) ... Double(appModel.refreshWorkerLimit),
                             step: 1
                         )
                     }
                 } header: {
                     Text("Sync")
                 } footer: {
-                    Text("Controls how many pages refresh in parallel.")
+                    Text(appModel.isPro ? "Pro can refresh up to 10 pages in parallel." : "Standard refreshes up to 2 pages in parallel. Pro unlocks up to 10.")
                 }
 
                 Section {
@@ -190,6 +209,12 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .onAppear {
+                clampStoredWorkerCount()
+            }
+            .onChange(of: appModel.isPro) { _, _ in
+                clampStoredWorkerCount()
+            }
             .alert("Clear Local Cache?", isPresented: $isShowingClearCacheAlert) {
                 Button("Cancel", role: .cancel) {}
                 Button("Clear and Reload", role: .destructive) {
@@ -205,17 +230,143 @@ struct SettingsView: View {
     }
 
     private var resolvedWorkerCount: Int {
-        min(
-            max(Int(syncWorkerCount.rounded()), SyncPreferences.minWorkerCount),
-            SyncPreferences.maxWorkerCount
+        SyncPreferences.constrainedWorkerCount(
+            Int(syncWorkerCount.rounded()),
+            isPro: appModel.isPro
         )
+    }
+
+    private var syncWorkerCountBinding: Binding<Double> {
+        Binding(
+            get: {
+                Double(resolvedWorkerCount)
+            },
+            set: { newValue in
+                syncWorkerCount = Double(
+                    SyncPreferences.constrainedWorkerCount(
+                        Int(newValue.rounded()),
+                        isPro: appModel.isPro
+                    )
+                )
+            }
+        )
+    }
+
+    private func clampStoredWorkerCount() {
+        syncWorkerCount = Double(resolvedWorkerCount)
+    }
+}
+
+private struct ProSubscriptionSection: View {
+    let subscriptionStore: SubscriptionStore
+
+    var body: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: subscriptionStore.isPro ? "checkmark.seal.fill" : "sparkles")
+                        .font(.title2)
+                        .foregroundStyle(subscriptionStore.isPro ? .green : Color.accentColor)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(subscriptionStore.isPro ? "Hangar Express Pro Active" : "Hangar Express Pro")
+                            .font(.headline)
+
+                        Text("10 refresh workers, 500 hangar log entries, and multi account switching.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let message = statusMessage {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(statusIsError ? .red : .secondary)
+                } else if let productLoadErrorMessage = subscriptionStore.productLoadErrorMessage {
+                    Text(productLoadErrorMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+
+                HStack(spacing: 12) {
+                    if subscriptionStore.isPro {
+                        Button("Restore Purchases") {
+                            Task {
+                                await subscriptionStore.restorePurchases()
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                    } else {
+                        Button(primaryButtonTitle) {
+                            Task {
+                                await subscriptionStore.purchasePro()
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(statusIsBusy || subscriptionStore.isLoadingProducts)
+
+                        Button("Restore") {
+                            Task {
+                                await subscriptionStore.restorePurchases()
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
+            .padding(.vertical, 6)
+        } header: {
+            Text("Pro")
+        } footer: {
+            Text("Purchases are handled by the App Store. Manage or cancel the subscription from your Apple Account settings.")
+        }
+    }
+
+    private var primaryButtonTitle: String {
+        if subscriptionStore.isLoadingProducts {
+            return AppLocalizer.string("Loading...")
+        }
+
+        return AppLocalizer.format("Subscribe %@", subscriptionStore.proPriceLabel)
+    }
+
+    private var statusMessage: String? {
+        switch subscriptionStore.purchaseStatus {
+        case .idle:
+            return nil
+        case .purchasing:
+            return AppLocalizer.string("Opening App Store purchase sheet.")
+        case .restoring:
+            return AppLocalizer.string("Restoring purchases.")
+        case let .success(message), let .failed(message):
+            return message
+        }
+    }
+
+    private var statusIsError: Bool {
+        if case .failed = subscriptionStore.purchaseStatus {
+            return true
+        }
+
+        return false
+    }
+
+    private var statusIsBusy: Bool {
+        switch subscriptionStore.purchaseStatus {
+        case .purchasing, .restoring:
+            return true
+        case .idle, .success, .failed:
+            return false
+        }
     }
 }
 
 private struct SavedAccountRow: View {
     let session: UserSession
     let isActive: Bool
+    let canSwitch: Bool
     let onSwitch: () -> Void
+    let onUpgrade: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -235,9 +386,13 @@ private struct SavedAccountRow: View {
                     Text("Active")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.green)
-                } else {
+                } else if canSwitch {
                     Button("Switch", action: onSwitch)
                         .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                } else {
+                    Button("Pro", action: onUpgrade)
+                        .buttonStyle(.bordered)
                         .controlSize(.small)
                 }
             }
