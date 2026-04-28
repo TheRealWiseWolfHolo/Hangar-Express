@@ -650,11 +650,10 @@ final class LiveHangarRepository: HangarRepository {
             )
         )
 
-        let activeBrowser = activeBrowser ?? browser
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
         let firstPage: RemotePledgePage
         do {
-            firstPage = try await activeBrowser.extractPledges(
-                using: cookies,
+            firstPage = try await directClient.fetchPledgePage(
                 page: 1,
                 pageSize: pledgePageSize
             )
@@ -761,7 +760,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         }
 
-        let warmedCookies = await activeBrowser.currentRSICookies()
+        let warmedCookies = directClient.currentCookies
         let remainingPages = Array(2 ... totalPages)
         let orderedResults: [RemotePledgePage]
         do {
@@ -878,11 +877,10 @@ final class LiveHangarRepository: HangarRepository {
             )
         )
 
-        let activeBrowser = activeBrowser ?? browser
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
         let firstPage: RemotePledgePage
         do {
-            firstPage = try await activeBrowser.extractPledges(
-                using: cookies,
+            firstPage = try await directClient.fetchPledgePage(
                 page: startPage,
                 pageSize: pledgePageSize
             )
@@ -990,7 +988,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         }
 
-        let warmedCookies = await activeBrowser.currentRSICookies()
+        let warmedCookies = directClient.currentCookies
         let remainingPages = Array((startPage + 1) ... totalPages)
         let orderedResults: [RemotePledgePage]
         do {
@@ -1096,11 +1094,10 @@ final class LiveHangarRepository: HangarRepository {
             )
         )
 
-        let activeBrowser = activeBrowser ?? browser
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
         let firstPage: RemoteBuybackPage
         do {
-            firstPage = try await activeBrowser.extractBuybackPledges(
-                using: cookies,
+            firstPage = try await directClient.fetchBuybackPage(
                 page: 1,
                 pageSize: buybackPageSize
             )
@@ -1205,7 +1202,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         }
 
-        let warmedCookies = await activeBrowser.currentRSICookies()
+        let warmedCookies = directClient.currentCookies
         let remainingPages = Array(2 ... totalPages)
         let orderedResults: [RemoteBuybackPage]
         do {
@@ -1284,7 +1281,7 @@ final class LiveHangarRepository: HangarRepository {
         var pledgeTotalPages = knownTotalPages
         var previousSignature = previousPageSignature
         var didReachEndOfPledges = false
-        let activeBrowser = activeBrowser ?? browser
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
 
         for page in startPage ... maxPledgePages {
             progress(
@@ -1306,8 +1303,7 @@ final class LiveHangarRepository: HangarRepository {
                 )
             )
 
-            let result = try await activeBrowser.extractPledges(
-                using: cookies,
+            let result = try await directClient.fetchPledgePage(
                 page: page,
                 pageSize: pledgePageSize
             )
@@ -1393,7 +1389,7 @@ final class LiveHangarRepository: HangarRepository {
         var buybackTotalPages = knownTotalPages
         var previousSignature = previousPageSignature
         var didReachEndOfBuyback = false
-        let activeBrowser = activeBrowser ?? browser
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
 
         for page in startPage ... maxBuybackPages {
             progress(
@@ -1415,8 +1411,7 @@ final class LiveHangarRepository: HangarRepository {
                 )
             )
 
-            let result = try await activeBrowser.extractBuybackPledges(
-                using: cookies,
+            let result = try await directClient.fetchBuybackPage(
                 page: page,
                 pageSize: buybackPageSize
             )
@@ -1502,7 +1497,7 @@ final class LiveHangarRepository: HangarRepository {
         try await withThrowingTaskGroup(of: [(Int, RemotePledgePage)].self) { group in
             for chunk in chunks {
                 group.addTask {
-                    try await RSIAccountPageBrowser.loadPledgeChunk(
+                    try await RSIAccountHTTPPageClient.loadPledgeChunk(
                         using: cookies,
                         pages: chunk,
                         pageSize: pageSize
@@ -1562,7 +1557,7 @@ final class LiveHangarRepository: HangarRepository {
         try await withThrowingTaskGroup(of: [(Int, RemoteBuybackPage)].self) { group in
             for chunk in chunks {
                 group.addTask {
-                    try await RSIAccountPageBrowser.loadBuybackChunk(
+                    try await RSIAccountHTTPPageClient.loadBuybackChunk(
                         using: cookies,
                         pages: chunk,
                         pageSize: pageSize
@@ -1654,6 +1649,7 @@ final class LiveHangarRepository: HangarRepository {
                 path: "/en/account/pledges",
                 page: 1,
                 cookies: cookies,
+                transport: "WKWebView.nonPersistent",
                 extra: ["knownMarkerCount=\(existingLogs.prefix(50).count)"]
             )
         )
@@ -2022,11 +2018,12 @@ final class LiveHangarRepository: HangarRepository {
         pageSize: Int? = nil,
         workerCount: Int? = nil,
         cookies: [SessionCookie],
+        transport: String = "URLSession.directHTML",
         extra: [String] = []
     ) -> String {
         var details: [String] = [
             "path=\(path)",
-            "browserStore=WKWebView.nonPersistent",
+            "transport=\(transport)",
             "cookieCount=\(cookies.count)",
             "cookieNames=\(cookieNamePreview(cookies))",
             "authCookies=\(authCookieSummary(cookies))",
@@ -3052,6 +3049,1090 @@ private struct RemoteAuthorizedDeviceBulkRemoval: Decodable {
     let failedDeviceID: String?
     let failureMessage: String?
     let debugSummary: String?
+}
+
+private final class RSIAccountHTTPPageClient: @unchecked Sendable {
+    private var cookies: [SessionCookie]
+    private let session: URLSession
+    private let timeoutSeconds: TimeInterval = 25
+
+    var currentCookies: [SessionCookie] {
+        cookies
+    }
+
+    init(cookies: [SessionCookie]) {
+        self.cookies = cookies
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = timeoutSeconds
+        configuration.timeoutIntervalForResource = max(timeoutSeconds * 2, 45)
+        session = URLSession(configuration: configuration)
+    }
+
+    func fetchPledgePage(page: Int, pageSize: Int) async throws -> RemotePledgePage {
+        let payload = try await fetchHTML(path: "/en/account/pledges", page: page, pageSize: pageSize)
+        return try RSIAccountHTMLParser.parsePledgePage(
+            html: payload.html,
+            pageURL: payload.finalURL,
+            requestedURL: payload.requestedURL,
+            statusCode: payload.statusCode,
+            cookieCount: cookies.count
+        )
+    }
+
+    func fetchBuybackPage(page: Int, pageSize: Int) async throws -> RemoteBuybackPage {
+        let payload = try await fetchHTML(path: "/en/account/buy-back-pledges", page: page, pageSize: pageSize)
+        return try RSIAccountHTMLParser.parseBuybackPage(
+            html: payload.html,
+            pageURL: payload.finalURL,
+            requestedURL: payload.requestedURL,
+            statusCode: payload.statusCode,
+            cookieCount: cookies.count
+        )
+    }
+
+    static func loadPledgeChunk(
+        using cookies: [SessionCookie],
+        pages: [Int],
+        pageSize: Int,
+        onPageLoaded: @escaping @Sendable (_ page: Int, _ itemCount: Int) async -> Void
+    ) async throws -> [(Int, RemotePledgePage)] {
+        guard !pages.isEmpty else {
+            return []
+        }
+
+        let client = RSIAccountHTTPPageClient(cookies: cookies)
+        var results: [(Int, RemotePledgePage)] = []
+        var previousSignature: String?
+
+        for page in pages {
+            let result = try await client.fetchPledgePage(page: page, pageSize: pageSize)
+
+            if result.accessDenied {
+                throw LiveHangarRepositoryError.sessionExpired
+            }
+
+            if result.items.isEmpty {
+                throw LiveHangarRepositoryError.unexpectedMarkup(
+                    "RSI returned an empty hangar page for page \(page) during direct HTTP sync."
+                )
+            }
+
+            if let previousSignature,
+               previousSignature == result.pageSignature
+            {
+                throw LiveHangarRepositoryError.unexpectedMarkup(
+                    "RSI repeated the same hangar page content while loading page \(page) over direct HTTP."
+                )
+            }
+
+            results.append((page, result))
+            previousSignature = result.pageSignature
+            await onPageLoaded(page, result.items.count)
+        }
+
+        return results
+    }
+
+    static func loadBuybackChunk(
+        using cookies: [SessionCookie],
+        pages: [Int],
+        pageSize: Int,
+        onPageLoaded: @escaping @Sendable (_ page: Int, _ itemCount: Int) async -> Void
+    ) async throws -> [(Int, RemoteBuybackPage)] {
+        guard !pages.isEmpty else {
+            return []
+        }
+
+        let client = RSIAccountHTTPPageClient(cookies: cookies)
+        var results: [(Int, RemoteBuybackPage)] = []
+        var previousSignature: String?
+
+        for page in pages {
+            let result = try await client.fetchBuybackPage(page: page, pageSize: pageSize)
+
+            if result.accessDenied {
+                throw LiveHangarRepositoryError.sessionExpired
+            }
+
+            if result.items.isEmpty {
+                throw LiveHangarRepositoryError.unexpectedMarkup(
+                    "RSI returned an empty buy-back page for page \(page) during direct HTTP sync."
+                )
+            }
+
+            if let previousSignature,
+               previousSignature == result.pageSignature
+            {
+                throw LiveHangarRepositoryError.unexpectedMarkup(
+                    "RSI repeated the same buy-back page content while loading page \(page) over direct HTTP."
+                )
+            }
+
+            results.append((page, result))
+            previousSignature = result.pageSignature
+            await onPageLoaded(page, result.items.count)
+        }
+
+        return results
+    }
+
+    private func fetchHTML(path: String, page: Int, pageSize: Int) async throws -> HTTPPagePayload {
+        let requestedURL = try pageURL(path: path, page: page, pageSize: pageSize)
+        var request = URLRequest(url: requestedURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = timeoutSeconds
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        request.setValue("https://robertsspaceindustries.com/", forHTTPHeaderField: "Referer")
+        request.setValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+            forHTTPHeaderField: "User-Agent"
+        )
+
+        if let cookieHeader = cookieHeader(), !cookieHeader.isEmpty {
+            request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        }
+
+        if let rsiToken = cookieValue(named: "Rsi-Token") ?? cookieValue(named: "rsi-token") {
+            request.setValue(rsiToken, forHTTPHeaderField: "x-rsi-token")
+        }
+
+        if let rsiDevice = cookieValue(named: "_rsi_device") {
+            request.setValue(rsiDevice, forHTTPHeaderField: "x-rsi-device")
+        }
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw LiveHangarRepositoryError.unexpectedMarkup(
+                directHTTPDiagnostics(
+                    summary: "Direct RSI HTTP page load failed.",
+                    requestedURL: requestedURL,
+                    response: nil,
+                    data: nil,
+                    underlyingError: error
+                )
+            )
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LiveHangarRepositoryError.unexpectedMarkup(
+                directHTTPDiagnostics(
+                    summary: "RSI returned a non-HTTP response for the direct page request.",
+                    requestedURL: requestedURL,
+                    response: response,
+                    data: data,
+                    underlyingError: nil
+                )
+            )
+        }
+
+        mergeCookies(from: httpResponse, url: requestedURL)
+
+        guard (200 ..< 300).contains(httpResponse.statusCode) else {
+            throw LiveHangarRepositoryError.unexpectedMarkup(
+                directHTTPDiagnostics(
+                    summary: "RSI returned HTTP \(httpResponse.statusCode) for the direct page request.",
+                    requestedURL: requestedURL,
+                    response: httpResponse,
+                    data: data,
+                    underlyingError: nil
+                )
+            )
+        }
+
+        guard let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1),
+              !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw LiveHangarRepositoryError.unexpectedMarkup(
+                directHTTPDiagnostics(
+                    summary: "RSI returned an empty or non-text page payload.",
+                    requestedURL: requestedURL,
+                    response: httpResponse,
+                    data: data,
+                    underlyingError: nil
+                )
+            )
+        }
+
+        return HTTPPagePayload(
+            html: html,
+            requestedURL: requestedURL,
+            finalURL: httpResponse.url ?? requestedURL,
+            statusCode: httpResponse.statusCode
+        )
+    }
+
+    private func pageURL(path: String, page: Int, pageSize: Int) throws -> URL {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "robertsspaceindustries.com"
+        components.path = path
+        components.queryItems = [
+            URLQueryItem(name: "page", value: String(page)),
+            URLQueryItem(name: "pagesize", value: String(pageSize))
+        ]
+
+        guard let url = components.url else {
+            throw LiveHangarRepositoryError.unexpectedMarkup("Unable to build the RSI direct page URL.")
+        }
+
+        return url
+    }
+
+    private func cookieHeader() -> String? {
+        let now = Date()
+        return cookies
+            .filter { cookie in
+                guard let expiresAt = cookie.expiresAt else {
+                    return true
+                }
+
+                return expiresAt > now
+            }
+            .map { "\($0.name)=\($0.value)" }
+            .joined(separator: "; ")
+            .nilIfEmpty
+    }
+
+    private func cookieValue(named name: String) -> String? {
+        cookies.first {
+            $0.name.caseInsensitiveCompare(name) == .orderedSame
+        }?.value.nilIfEmpty
+    }
+
+    private func mergeCookies(from response: HTTPURLResponse, url: URL) {
+        var headerFields: [String: String] = [:]
+        for (key, value) in response.allHeaderFields {
+            guard let key = key as? String else {
+                continue
+            }
+
+            headerFields[key] = String(describing: value)
+        }
+
+        let receivedCookies = HTTPCookie.cookies(withResponseHeaderFields: headerFields, for: url).map(SessionCookie.init)
+        guard !receivedCookies.isEmpty else {
+            return
+        }
+
+        var merged = Dictionary(uniqueKeysWithValues: cookies.map { (cookieStorageKey($0), $0) })
+        for cookie in receivedCookies {
+            merged[cookieStorageKey(cookie)] = cookie
+        }
+
+        cookies = Array(merged.values)
+    }
+
+    private func cookieStorageKey(_ cookie: SessionCookie) -> String {
+        [
+            cookie.name.lowercased(),
+            cookie.domain.lowercased(),
+            cookie.path
+        ].joined(separator: "|")
+    }
+
+    private func directHTTPDiagnostics(
+        summary: String,
+        requestedURL: URL,
+        response: URLResponse?,
+        data: Data?,
+        underlyingError: Error?
+    ) -> String {
+        let httpResponse = response as? HTTPURLResponse
+        var lines = [
+            summary,
+            "",
+            "Direct HTTP Diagnostics",
+            "transport=URLSession.directHTML",
+            "requestedURL=\(requestedURL.absoluteString)",
+            "finalURL=\(response?.url?.absoluteString ?? "unknown")",
+            "timeoutSeconds=\(Int(timeoutSeconds))",
+            "httpStatus=\(httpResponse.map { String($0.statusCode) } ?? "unknown")",
+            "mimeType=\(response?.mimeType ?? "unknown")",
+            "expectedContentLength=\(response?.expectedContentLength ?? -1)",
+            "responseBytes=\(data?.count ?? 0)",
+            "cookieCount=\(cookies.count)",
+            "cookieNames=\(cookieNamesSummary())",
+            "authCookies=\(authCookieSummary())"
+        ]
+
+        if let underlyingError {
+            let nsError = underlyingError as NSError
+            lines.append("errorType=\(String(reflecting: type(of: underlyingError)))")
+            lines.append("errorDomain=\(nsError.domain)")
+            lines.append("errorCode=\(nsError.code)")
+            lines.append("errorDescription=\(underlyingError.localizedDescription)")
+        }
+
+        if let data,
+           let body = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) {
+            lines.append("bodyPreview=\(RSIAccountHTMLParser.previewText(from: body, limit: 700))")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func cookieNamesSummary() -> String {
+        let names = Array(Set(cookies.map(\.name))).sorted()
+        guard !names.isEmpty else {
+            return "none"
+        }
+
+        let prefix = names.prefix(12).joined(separator: ",")
+        return names.count > 12 ? "\(prefix),..." : prefix
+    }
+
+    private func authCookieSummary() -> String {
+        let authNames = [
+            "Rsi-Token",
+            "_rsi_device",
+            "Rsi-Account-Auth",
+            "Rsi-ShipUpgrades-Context"
+        ]
+        let available = authNames.filter { name in
+            cookieValue(named: name) != nil
+        }
+
+        return available.isEmpty ? "none" : available.joined(separator: ",")
+    }
+
+    private struct HTTPPagePayload {
+        let html: String
+        let requestedURL: URL
+        let finalURL: URL
+        let statusCode: Int
+    }
+}
+
+private nonisolated enum RSIAccountHTMLParser {
+    static func parsePledgePage(
+        html: String,
+        pageURL: URL,
+        requestedURL: URL,
+        statusCode: Int,
+        cookieCount: Int
+    ) throws -> RemotePledgePage {
+        let title = firstText(in: html, selectors: ["title"])
+        let accessDenied = isAccessDenied(html: html, title: title)
+        let currentPage = currentPageNumber(from: pageURL)
+        let totalPages = totalPages(in: html)
+        let hasNextPage = totalPages.map { $0 > currentPage }
+        let listHTML = firstElement(in: html, selector: ".list-items")?.html ?? html
+        let rows = elements(in: listHTML, tag: nil, className: "row")
+
+        guard accessDenied || !rows.isEmpty else {
+            throw LiveHangarRepositoryError.unexpectedMarkup(
+                parserDiagnostics(
+                    summary: "Direct RSI hangar page HTML did not contain pledge rows.",
+                    html: html,
+                    requestedURL: requestedURL,
+                    finalURL: pageURL,
+                    statusCode: statusCode,
+                    cookieCount: cookieCount,
+                    extra: [
+                        "parser=pledges",
+                        "rowCount=0"
+                    ]
+                )
+            )
+        }
+
+        return RemotePledgePage(
+            accessDenied: accessDenied,
+            title: title,
+            totalPages: totalPages,
+            hasNextPage: hasNextPage,
+            items: rows.map { row in
+                parsePledgeRow(row, pageURL: pageURL)
+            }
+        )
+    }
+
+    static func parseBuybackPage(
+        html: String,
+        pageURL: URL,
+        requestedURL: URL,
+        statusCode: Int,
+        cookieCount: Int
+    ) throws -> RemoteBuybackPage {
+        let title = firstText(in: html, selectors: ["title"])
+        let accessDenied = isAccessDenied(html: html, title: title)
+        let currentPage = currentPageNumber(from: pageURL)
+        let totalPages = totalPages(in: html)
+        let hasNextPage = totalPages.map { $0 > currentPage }
+        let articles = elements(in: html, tag: "article", className: "pledge")
+
+        guard accessDenied || !articles.isEmpty || currentPage > 1 else {
+            throw LiveHangarRepositoryError.unexpectedMarkup(
+                parserDiagnostics(
+                    summary: "Direct RSI buy-back page HTML did not contain buy-back pledge articles.",
+                    html: html,
+                    requestedURL: requestedURL,
+                    finalURL: pageURL,
+                    statusCode: statusCode,
+                    cookieCount: cookieCount,
+                    extra: [
+                        "parser=buyback",
+                        "articleCount=0"
+                    ]
+                )
+            )
+        }
+
+        return RemoteBuybackPage(
+            accessDenied: accessDenied,
+            title: title,
+            totalPages: totalPages,
+            hasNextPage: hasNextPage,
+            items: articles.map { article in
+                parseBuybackArticle(article, pageURL: pageURL)
+            }
+        )
+    }
+
+    static func previewText(from html: String, limit: Int) -> String {
+        let text = normalizedText(textContent(html))
+        guard text.count > limit else {
+            return text.nilIfEmpty ?? "none"
+        }
+
+        return "\(text.prefix(limit))..."
+    }
+
+    private static func parsePledgeRow(_ row: HTMLElementFragment, pageURL: URL) -> RemotePledge {
+        let rawStatusValue = firstValue(in: row.html, selectors: [".js-pledge-status"])
+        let titles = elements(in: row.html, tag: nil, className: "title")
+            .map { textContent($0.html) }
+            .map(normalizedText)
+            .filter { !$0.isEmpty }
+        let remoteItems = contentItemFragments(in: row.html).compactMap { item -> RemotePledgeItem? in
+            let title = cleanContentTitle(
+                firstText(in: item.html, selectors: [".title", ".name", "h1", "h2", "h3"])
+            )
+            let normalizedTitle = normalizedText(title).localizedLowercase
+            guard !normalizedTitle.isEmpty,
+                  !shouldSkipContentItemTitle(normalizedTitle) else {
+                return nil
+            }
+
+            return RemotePledgeItem(
+                title: title,
+                kind: firstText(in: item.html, selectors: [".kind", ".type", ".category"]),
+                detail: firstText(in: item.html, selectors: [".liner", ".subtitle"]),
+                imageURL: firstImageURL(in: item.html, baseURL: pageURL)
+            )
+        }
+
+        return RemotePledge(
+            id: intValue(firstValue(in: row.html, selectors: [".js-pledge-id"])),
+            title: firstValue(in: row.html, selectors: [".js-pledge-name"])
+                .nilIfEmpty ?? firstText(in: row.html, selectors: ["h1", "h2", ".title"]),
+            statusText: normalizedText(rawStatusValue)
+                .nilIfEmpty ?? firstText(in: row.html, selectors: [".availability", ".status"]),
+            isUpgradedStatusFlag: isUpgradedStatusFlag(in: row.html, rawStatusValue: rawStatusValue),
+            dateText: firstText(in: row.html, selectors: [".date-col", ".date"]),
+            valueText: firstValue(in: row.html, selectors: [".js-pledge-value"])
+                .nilIfEmpty ?? firstText(in: row.html, selectors: [".value", ".price"]),
+            containsText: firstText(in: row.html, selectors: [".items-col", ".contains"]),
+            thumbnailImageURL: firstImageURL(
+                in: firstElement(in: row.html, selector: ".image-col")?.html ?? row.html,
+                baseURL: pageURL
+            ),
+            alsoContains: titles,
+            canGift: containsClass("js-gift", in: row.html),
+            canReclaim: containsClass("js-reclaim", in: row.html),
+            canUpgrade: containsClass("js-apply-upgrade", in: row.html),
+            upgradeMetadata: parseUpgradeMetadata(in: row.html),
+            items: remoteItems,
+            sourcePage: nil,
+            sourcePageIndex: nil
+        )
+    }
+
+    private static func parseBuybackArticle(_ article: HTMLElementFragment, pageURL: URL) -> RemoteBuybackPledge {
+        let button = firstElement(in: article.html, selector: ".holosmallbtn")
+            ?? firstElementWithAttribute(in: article.html, tag: "a", attribute: "href", containing: "/pledge/buyback/")
+        let href = button.flatMap { attribute("href", in: $0.openingTag) } ?? ""
+        let hrefID = href.split(separator: "/").last.flatMap { Int($0) }
+        let dataID = button.flatMap { intValue(attribute("data-pledgeid", in: $0.openingTag)) }
+        let fromShipID = button.flatMap { intValue(attribute("data-fromshipid", in: $0.openingTag)) }
+        let toShipID = button.flatMap { intValue(attribute("data-toshipid", in: $0.openingTag)) }
+        let toSkuID = button.flatMap { intValue(attribute("data-toskuid", in: $0.openingTag)) }
+        let definitionValues = elements(in: article.html, tag: "dd", className: nil)
+            .map { normalizedText(textContent($0.html)) }
+            .filter { !$0.isEmpty }
+        let informationHTML = firstElement(in: article.html, selector: ".information")?.html ?? article.html
+        let upgradeContext: BuybackUpgradeContext?
+
+        if let fromShipID, fromShipID > 0,
+           let toShipID, toShipID > 0,
+           let toSkuID, toSkuID > 0
+        {
+            upgradeContext = BuybackUpgradeContext(
+                fromShipID: fromShipID,
+                toShipID: toShipID,
+                toSkuID: toSkuID
+            )
+        } else {
+            upgradeContext = nil
+        }
+
+        return RemoteBuybackPledge(
+            id: hrefID ?? dataID,
+            title: firstText(in: informationHTML, selectors: ["h1", "h2"])
+                .nilIfEmpty ?? firstText(in: article.html, selectors: ["h1", "h2"]),
+            dateText: value(at: 0, in: definitionValues) ?? "",
+            containsText: value(at: 2, in: definitionValues)
+                ?? firstText(in: article.html, selectors: [".information .contains", ".contains"]),
+            valueText: firstText(in: article.html, selectors: [".price", ".value", ".cost"]),
+            imageURL: firstImageURL(in: article.html, baseURL: pageURL),
+            upgradeContext: upgradeContext
+        )
+    }
+
+    private static func contentItemFragments(in html: String) -> [HTMLElementFragment] {
+        var seen = Set<String>()
+        var results: [HTMLElementFragment] = []
+
+        for className in ["with-images", "without-images", "items-col", "contains"] {
+            for container in elements(in: html, tag: nil, className: className) {
+                for item in elements(in: container.html, tag: nil, className: "item") {
+                    guard seen.insert(item.html).inserted else {
+                        continue
+                    }
+
+                    results.append(item)
+                }
+            }
+        }
+
+        return results
+    }
+
+    private static func parseUpgradeMetadata(in html: String) -> RemotePledgeUpgradeMetadata? {
+        guard let rawValue = firstValue(in: html, selectors: [".js-upgrade-data"]).nilIfEmpty,
+              let data = rawValue.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        return RemotePledgeUpgradeMetadata(
+            id: intValue(json["id"]),
+            name: stringValue(json["name"])?.nilIfEmpty,
+            upgradeType: stringValue(json["upgrade_type"])?.nilIfEmpty,
+            matchItems: upgradeMatchItems(json["match_items"]),
+            targetItems: upgradeMatchItems(json["target_items"])
+        )
+    }
+
+    private static func upgradeMatchItems(_ value: Any?) -> [RemotePledgeUpgradeMatchItem] {
+        guard let items = value as? [[String: Any]] else {
+            return []
+        }
+
+        return items.compactMap { item in
+            guard let name = stringValue(item["name"])?.nilIfEmpty else {
+                return nil
+            }
+
+            return RemotePledgeUpgradeMatchItem(
+                id: intValue(item["id"]),
+                name: name
+            )
+        }
+    }
+
+    private static func isUpgradedStatusFlag(in html: String, rawStatusValue: String) -> Bool {
+        let statusText = [
+            rawStatusValue,
+            firstText(in: html, selectors: [".availability", ".status"]),
+            textContent(html)
+        ]
+            .map(normalizedText)
+            .joined(separator: " ")
+
+        return statusText.range(
+            of: #"(^|\s)upgraded(\s|$)"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    private static func shouldSkipContentItemTitle(_ normalizedTitle: String) -> Bool {
+        if normalizedTitle == "standard upgrade" || normalizedTitle == "and" {
+            return true
+        }
+
+        return normalizedTitle.range(
+            of: #"^(?:and\s+)?\d+\s+(?:items?|ships?|vehicles?)$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    private static func cleanContentTitle(_ value: String) -> String {
+        normalizedText(value)
+            .replacingOccurrences(
+                of: #"\s+(?:and\s+)?\d+\s+(?:items?|ships?|vehicles?)$"#,
+                with: "",
+                options: [.regularExpression, .caseInsensitive]
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func value(at index: Int, in values: [String]) -> String? {
+        values.indices.contains(index) ? values[index] : nil
+    }
+
+    private static func isAccessDenied(html: String, title: String) -> Bool {
+        let bodyText = textContent(html)
+        return title.localizedCaseInsensitiveContains("access denied")
+            || bodyText.localizedCaseInsensitiveContains("Access denied")
+    }
+
+    private static func currentPageNumber(from url: URL) -> Int {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?
+            .first { $0.name == "page" }?
+            .value
+            .flatMap(Int.init) ?? 1
+    }
+
+    private static func totalPages(in html: String) -> Int? {
+        var pageNumbers: [Int] = []
+        pageNumbers.append(contentsOf: captureIntMatches(in: html, pattern: #"page=(\d+)"#))
+        pageNumbers.append(contentsOf: captureIntMatches(in: html, pattern: #"data-page\s*=\s*['"](\d+)['"]"#))
+        return pageNumbers.max()
+    }
+
+    private static func firstText(in html: String, selectors: [String]) -> String {
+        for selector in selectors {
+            guard let element = firstElement(in: html, selector: selector) else {
+                continue
+            }
+
+            let value = normalizedText(textContent(element.html))
+            if !value.isEmpty {
+                return value
+            }
+        }
+
+        return ""
+    }
+
+    private static func firstValue(in html: String, selectors: [String]) -> String {
+        for selector in selectors {
+            guard let element = firstElement(in: html, selector: selector) else {
+                continue
+            }
+
+            for attributeName in ["value", "content", "data-value"] {
+                if let value = attribute(attributeName, in: element.openingTag)?.nilIfEmpty {
+                    return value
+                }
+            }
+
+            let text = normalizedText(textContent(element.html))
+            if !text.isEmpty {
+                return text
+            }
+        }
+
+        return ""
+    }
+
+    private static func firstImageURL(in html: String, baseURL: URL) -> String? {
+        for image in elements(in: html, tag: "img", className: nil) {
+            let candidates = [
+                attribute("src", in: image.openingTag),
+                attribute("data-src", in: image.openingTag),
+                attribute("data-original", in: image.openingTag),
+                attribute("data-lazy", in: image.openingTag),
+                attribute("srcset", in: image.openingTag)?.components(separatedBy: ",").first?.components(separatedBy: .whitespaces).first
+            ]
+
+            for candidate in candidates.compactMap({ $0?.nilIfEmpty }) {
+                if let url = normalizedURL(candidate, baseURL: baseURL) {
+                    return url.absoluteString
+                }
+            }
+        }
+
+        for openingTag in openingTags(in: html) {
+            guard let style = attribute("style", in: openingTag),
+                  style.localizedCaseInsensitiveContains("background-image"),
+                  let rawURL = firstCapture(in: style, pattern: #"url\((['"]?)(.*?)\1\)"#, group: 2),
+                  let url = normalizedURL(rawURL, baseURL: baseURL) else {
+                continue
+            }
+
+            return url.absoluteString
+        }
+
+        return nil
+    }
+
+    private static func firstElement(in html: String, selector: String) -> HTMLElementFragment? {
+        let parts = selector
+            .split(separator: " ")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        guard !parts.isEmpty else {
+            return nil
+        }
+
+        var scopes = [html]
+        var latest: [HTMLElementFragment] = []
+
+        for part in parts {
+            latest = scopes.flatMap { scope in
+                elements(in: scope, simpleSelector: part)
+            }
+            guard !latest.isEmpty else {
+                return nil
+            }
+
+            scopes = latest.map(\.html)
+        }
+
+        return latest.first
+    }
+
+    private static func firstElementWithAttribute(
+        in html: String,
+        tag: String,
+        attribute attributeName: String,
+        containing value: String
+    ) -> HTMLElementFragment? {
+        elements(in: html, tag: tag, className: nil).first { element in
+            attribute(attributeName, in: element.openingTag)?.contains(value) == true
+        }
+    }
+
+    private static func elements(in html: String, simpleSelector: String) -> [HTMLElementFragment] {
+        if simpleSelector.hasPrefix(".") {
+            return elements(in: html, tag: nil, className: String(simpleSelector.dropFirst()))
+        }
+
+        return elements(in: html, tag: simpleSelector, className: nil)
+    }
+
+    private static func elements(in html: String, tag tagFilter: String?, className: String?) -> [HTMLElementFragment] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"<([A-Za-z][A-Za-z0-9:-]*)(?:\s[^<>]*?)?>"#,
+            options: [.caseInsensitive]
+        ) else {
+            return []
+        }
+
+        let matches = regex.matches(in: html, range: NSRange(html.startIndex..., in: html))
+        var fragments: [HTMLElementFragment] = []
+
+        for match in matches {
+            guard let fullRange = Range(match.range(at: 0), in: html),
+                  let tagRange = Range(match.range(at: 1), in: html) else {
+                continue
+            }
+
+            let openingTag = String(html[fullRange])
+            let tagName = String(html[tagRange]).lowercased()
+
+            if let tagFilter,
+               tagName != tagFilter.lowercased()
+            {
+                continue
+            }
+
+            if let className,
+               !openingTagHasClass(className, openingTag: openingTag)
+            {
+                continue
+            }
+
+            let endIndex = endIndexForElement(
+                in: html,
+                tagName: tagName,
+                openingRange: fullRange,
+                openingTag: openingTag
+            )
+            fragments.append(
+                HTMLElementFragment(
+                    html: String(html[fullRange.lowerBound ..< endIndex]),
+                    openingTag: openingTag
+                )
+            )
+        }
+
+        return fragments
+    }
+
+    private static func openingTags(in html: String) -> [String] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"<[A-Za-z][A-Za-z0-9:-]*(?:\s[^<>]*?)?>"#,
+            options: [.caseInsensitive]
+        ) else {
+            return []
+        }
+
+        return regex.matches(in: html, range: NSRange(html.startIndex..., in: html)).compactMap { match in
+            Range(match.range, in: html).map { String(html[$0]) }
+        }
+    }
+
+    private static func endIndexForElement(
+        in html: String,
+        tagName: String,
+        openingRange: Range<String.Index>,
+        openingTag: String
+    ) -> String.Index {
+        if isVoidTag(tagName) || openingTag.hasSuffix("/>") {
+            return openingRange.upperBound
+        }
+
+        let escapedTag = NSRegularExpression.escapedPattern(for: tagName)
+        guard let regex = try? NSRegularExpression(
+            pattern: #"</?\#(escapedTag)\b[^>]*>"#,
+            options: [.caseInsensitive]
+        ) else {
+            return openingRange.upperBound
+        }
+
+        let searchRange = NSRange(openingRange.upperBound..., in: html)
+        var depth = 1
+
+        for match in regex.matches(in: html, range: searchRange) {
+            guard let range = Range(match.range, in: html) else {
+                continue
+            }
+
+            let token = String(html[range])
+            if token.hasPrefix("</") {
+                depth -= 1
+                if depth == 0 {
+                    return range.upperBound
+                }
+            } else if !token.hasSuffix("/>") && !isVoidTag(tagName) {
+                depth += 1
+            }
+        }
+
+        return openingRange.upperBound
+    }
+
+    private static func isVoidTag(_ tagName: String) -> Bool {
+        ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]
+            .contains(tagName.lowercased())
+    }
+
+    private static func openingTagHasClass(_ className: String, openingTag: String) -> Bool {
+        guard let classAttribute = attribute("class", in: openingTag) else {
+            return false
+        }
+
+        return classAttribute
+            .split(whereSeparator: \.isWhitespace)
+            .contains { $0.caseInsensitiveCompare(className) == .orderedSame }
+    }
+
+    private static func containsClass(_ className: String, in html: String) -> Bool {
+        !elements(in: html, tag: nil, className: className).isEmpty
+    }
+
+    private static func attribute(_ name: String, in openingTag: String) -> String? {
+        let escapedName = NSRegularExpression.escapedPattern(for: name)
+        guard let regex = try? NSRegularExpression(
+            pattern: #"\b\#(escapedName)\s*=\s*(['"])(.*?)\1"#,
+            options: [.caseInsensitive]
+        ) else {
+            return nil
+        }
+
+        let range = NSRange(openingTag.startIndex..., in: openingTag)
+        guard let match = regex.firstMatch(in: openingTag, range: range),
+              let valueRange = Range(match.range(at: 2), in: openingTag) else {
+            return nil
+        }
+
+        return decodeHTMLEntities(String(openingTag[valueRange]))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func textContent(_ html: String) -> String {
+        var text = html
+        text = replacingMatches(in: text, pattern: #"(?is)<script\b[^>]*>.*?</script>"#, with: " ")
+        text = replacingMatches(in: text, pattern: #"(?is)<style\b[^>]*>.*?</style>"#, with: " ")
+        text = replacingMatches(in: text, pattern: #"(?is)<!--.*?-->"#, with: " ")
+        text = replacingMatches(in: text, pattern: #"(?i)<br\s*/?>"#, with: "\n")
+        text = replacingMatches(in: text, pattern: #"(?i)</(?:p|div|li|dd|dt|h1|h2|h3|tr)>"#, with: "\n")
+        text = replacingMatches(in: text, pattern: #"(?is)<[^>]+>"#, with: " ")
+        return decodeHTMLEntities(text)
+    }
+
+    private static func normalizedText(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\u{00a0}", with: " ")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func decodeHTMLEntities(_ value: String) -> String {
+        var result = value
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&apos;", with: "'")
+
+        guard let regex = try? NSRegularExpression(pattern: #"&#(x?[0-9A-Fa-f]+);"#) else {
+            return result
+        }
+
+        let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed()
+        for match in matches {
+            guard let fullRange = Range(match.range(at: 0), in: result),
+                  let valueRange = Range(match.range(at: 1), in: result) else {
+                continue
+            }
+
+            let rawValue = String(result[valueRange])
+            let scalarValue: UInt32?
+            if rawValue.lowercased().hasPrefix("x") {
+                scalarValue = UInt32(rawValue.dropFirst(), radix: 16)
+            } else {
+                scalarValue = UInt32(rawValue, radix: 10)
+            }
+
+            guard let scalarValue,
+                  let scalar = UnicodeScalar(scalarValue) else {
+                continue
+            }
+
+            result.replaceSubrange(fullRange, with: String(Character(scalar)))
+        }
+
+        return result
+    }
+
+    private static func normalizedURL(_ rawValue: String, baseURL: URL) -> URL? {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        if trimmed.hasPrefix("//") {
+            return URL(string: "https:\(trimmed)")
+        }
+
+        return URL(string: trimmed, relativeTo: baseURL)?.absoluteURL
+    }
+
+    private static func parserDiagnostics(
+        summary: String,
+        html: String,
+        requestedURL: URL,
+        finalURL: URL,
+        statusCode: Int,
+        cookieCount: Int,
+        extra: [String]
+    ) -> String {
+        ([
+            summary,
+            "",
+            "Direct HTML Parser Diagnostics",
+            "transport=URLSession.directHTML",
+            "requestedURL=\(requestedURL.absoluteString)",
+            "finalURL=\(finalURL.absoluteString)",
+            "httpStatus=\(statusCode)",
+            "cookieCount=\(cookieCount)",
+            "title=\(firstText(in: html, selectors: ["title"]).nilIfEmpty ?? "none")",
+            "htmlLength=\(html.count)",
+            "bodyPreview=\(previewText(from: html, limit: 700))"
+        ] + extra).joined(separator: "\n")
+    }
+
+    private static func captureIntMatches(in text: String, pattern: String) -> [Int] {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return []
+        }
+
+        return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match in
+            guard let range = Range(match.range(at: 1), in: text) else {
+                return nil
+            }
+
+            return Int(text[range])
+        }
+    }
+
+    private static func firstCapture(in text: String, pattern: String, group: Int = 1) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              match.numberOfRanges > group,
+              let captureRange = Range(match.range(at: group), in: text) else {
+            return nil
+        }
+
+        return String(text[captureRange])
+    }
+
+    private static func replacingMatches(in text: String, pattern: String, with replacement: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return text
+        }
+
+        return regex.stringByReplacingMatches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: replacement
+        )
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let value = value as? Int {
+            return value
+        }
+
+        if let value = value as? Double, value.isFinite {
+            return Int(value)
+        }
+
+        if let value = stringValue(value) {
+            return Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        return nil
+    }
+
+    private static func stringValue(_ value: Any?) -> String? {
+        switch value {
+        case let string as String:
+            return string
+        case let number as NSNumber:
+            return number.stringValue
+        case let value?:
+            return String(describing: value)
+        case nil:
+            return nil
+        }
+    }
+
+    private struct HTMLElementFragment {
+        let html: String
+        let openingTag: String
+    }
 }
 
 @MainActor
