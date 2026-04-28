@@ -13,7 +13,7 @@ struct RefreshProgressCard: View {
 
                 Spacer()
 
-                if let fractionCompleted = progress.fractionCompleted {
+                if let fractionCompleted = progress.displayFractionCompleted {
                     Text(fractionCompleted, format: .percent.precision(.fractionLength(0)))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -37,9 +37,8 @@ struct RefreshProgressCard: View {
 
     @ViewBuilder
     private var progressBar: some View {
-        if let fractionCompleted = progress.fractionCompleted {
-            ProgressView(value: fractionCompleted)
-                .tint(.blue)
+        if let fractionCompleted = progress.displayFractionCompleted {
+            SmoothLinearProgressBar(value: fractionCompleted, compact: compact)
         } else {
             ProgressView()
                 .tint(.blue)
@@ -76,10 +75,8 @@ struct MinimalRefreshProgressView: View {
 
     @ViewBuilder
     private var progressBar: some View {
-        if let fractionCompleted = progress.fractionCompleted {
-            ProgressView(value: fractionCompleted)
-                .tint(.blue)
-                .controlSize(.small)
+        if let fractionCompleted = progress.displayFractionCompleted {
+            SmoothLinearProgressBar(value: fractionCompleted, compact: true)
         } else {
             ProgressView()
                 .tint(.blue)
@@ -143,6 +140,7 @@ private struct ConcurrentRefreshProgressTile: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(compact ? 2 : 3)
                     .fixedSize(horizontal: false, vertical: true)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .leading)))
             } else {
                 progressBar
 
@@ -151,6 +149,7 @@ private struct ConcurrentRefreshProgressTile: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(compact ? 3 : 4)
                     .fixedSize(horizontal: false, vertical: true)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .leading)))
             }
         }
         .padding(compact ? 10 : 14)
@@ -159,6 +158,7 @@ private struct ConcurrentRefreshProgressTile: View {
             .thinMaterial,
             in: RoundedRectangle(cornerRadius: compact ? 16 : 20, style: .continuous)
         )
+        .animation(.smooth(duration: 0.28), value: entry.isComplete)
     }
 
     private var iconName: String {
@@ -175,15 +175,79 @@ private struct ConcurrentRefreshProgressTile: View {
 
     @ViewBuilder
     private var progressBar: some View {
-        if let fractionCompleted = entry.progress.fractionCompleted {
-            ProgressView(value: fractionCompleted)
-                .tint(.blue)
-                .controlSize(compact ? .small : .regular)
+        if let fractionCompleted = entry.progress.displayFractionCompleted {
+            SmoothLinearProgressBar(value: fractionCompleted, compact: compact)
         } else {
             ProgressView()
                 .tint(.blue)
                 .controlSize(compact ? .small : .regular)
         }
+    }
+}
+
+private extension RefreshProgress {
+    var displayFractionCompleted: Double? {
+        guard let baseFraction = fractionCompleted, stepCount > 0 else {
+            return fractionCompleted
+        }
+
+        let boundedStep = min(max(stepNumber, 1), stepCount)
+        let boundedStepFraction = min(max(baseFraction, 0), 1)
+        return (Double(boundedStep - 1) + boundedStepFraction) / Double(stepCount)
+    }
+}
+
+private struct SmoothLinearProgressBar: View {
+    let value: Double
+    let compact: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var displayedValue: Double = 0
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(.secondary.opacity(0.18))
+
+                Capsule(style: .continuous)
+                    .fill(.blue.gradient)
+                    .frame(width: proxy.size.width * displayedValue)
+                    .shadow(color: .blue.opacity(compact ? 0.18 : 0.24), radius: compact ? 2 : 4, y: 1)
+            }
+        }
+        .frame(height: compact ? 4 : 6)
+        .onAppear {
+            guard !reduceMotion else {
+                displayedValue = clampedValue
+                return
+            }
+
+            displayedValue = 0
+            withAnimation(.smooth(duration: animationDuration(from: 0, to: clampedValue))) {
+                displayedValue = clampedValue
+            }
+        }
+        .onChange(of: clampedValue) { oldValue, newValue in
+            let targetValue = max(displayedValue, newValue)
+            guard !reduceMotion else {
+                displayedValue = targetValue
+                return
+            }
+
+            withAnimation(.smooth(duration: animationDuration(from: max(displayedValue, oldValue), to: targetValue))) {
+                displayedValue = targetValue
+            }
+        }
+    }
+
+    private var clampedValue: Double {
+        min(max(value, 0), 1)
+    }
+
+    private func animationDuration(from oldValue: Double, to newValue: Double) -> TimeInterval {
+        let delta = abs(newValue - oldValue)
+        return min(max(0.35, 0.35 + delta * 0.85), 0.95)
     }
 }
 
