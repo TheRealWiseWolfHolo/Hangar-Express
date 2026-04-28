@@ -7,7 +7,6 @@ final class LiveHangarRepository: HangarRepository {
     private let shipCatalogClient = HostedShipCatalogClient()
     private let previewRepository = PreviewHangarRepository()
     private let refreshDiagnostics: RefreshDiagnosticsStore
-    private let maxHangarLogEntries = HangarLogFetchMode.expanded.entryLimit
     private let pledgePageSize = 50
     private let buybackPageSize = 100
     private let maxPledgePages = 200
@@ -20,9 +19,9 @@ final class LiveHangarRepository: HangarRepository {
     private var syncWorkerCount: Int {
         let configuredValue = UserDefaults.standard.integer(forKey: SyncPreferences.workerCountKey)
         let fallbackValue = configuredValue == 0 ? SyncPreferences.defaultWorkerCount : configuredValue
-        return min(
-            max(fallbackValue, SyncPreferences.minWorkerCount),
-            SyncPreferences.maxWorkerCount
+        return SyncPreferences.constrainedWorkerCount(
+            fallbackValue,
+            isPro: ProSubscriptionConfiguration.storedIsPro
         )
     }
 

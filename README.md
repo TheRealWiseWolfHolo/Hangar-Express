@@ -61,3 +61,6 @@ Star Citizen, Squadron 42, Roberts Space Industries, and related names, ships, a
 
 - Fan-project notice and attribution guidance: [DISCLAIMER.md](DISCLAIMER.md)
 - Limited personal-use permission notice: [PERMISSIONS.md](PERMISSIONS.md)
+- Privacy policy for App Store submission: [PRIVACY_POLICY.md](PRIVACY_POLICY.md)
+- Terms of use and subscription terms: [TERMS_OF_USE.md](TERMS_OF_USE.md)
+- User support page: [SUPPORT.md](SUPPORT.md)
