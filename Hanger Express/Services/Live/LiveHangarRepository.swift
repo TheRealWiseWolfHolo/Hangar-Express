@@ -3515,8 +3515,12 @@ private nonisolated enum RSIAccountHTMLParser {
         let totalPages = totalPages(in: html)
         let hasNextPage = totalPages.map { $0 > currentPage }
         let articles = elements(in: html, tag: "article", className: "pledge")
+        let isEmptyBuybackListing = currentPage == 1
+            && articles.isEmpty
+            && isRecognizedBuybackPage(html: html, title: title)
+            && !containsBuybackActionLink(in: html)
 
-        guard accessDenied || !articles.isEmpty || currentPage > 1 else {
+        guard accessDenied || !articles.isEmpty || currentPage > 1 || isEmptyBuybackListing else {
             throw LiveHangarRepositoryError.unexpectedMarkup(
                 parserDiagnostics(
                     summary: "Direct RSI buy-back page HTML did not contain buy-back pledge articles.",
@@ -3542,6 +3546,24 @@ private nonisolated enum RSIAccountHTMLParser {
                 parseBuybackArticle(article, pageURL: pageURL)
             }
         )
+    }
+
+    private static func isRecognizedBuybackPage(html: String, title: String) -> Bool {
+        let normalizedTitle = normalizedText(title).lowercased()
+        if normalizedTitle.contains("buy back pledges") || normalizedTitle.contains("buy-back pledges") {
+            return true
+        }
+
+        let normalizedBody = normalizedText(textContent(html)).lowercased()
+        return normalizedBody.contains("pledge buy back system")
+            || normalizedBody.contains("reacquire your converted pledges")
+            || normalizedBody.contains("buy back pledges")
+            || normalizedBody.contains("buy-back pledges")
+    }
+
+    private static func containsBuybackActionLink(in html: String) -> Bool {
+        html.range(of: "/pledge/buyback/", options: [.caseInsensitive]) != nil
+            || html.range(of: "pledge/buyback/", options: [.caseInsensitive]) != nil
     }
 
     static func previewText(from html: String, limit: Int) -> String {
