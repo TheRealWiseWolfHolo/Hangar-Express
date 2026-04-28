@@ -3059,7 +3059,12 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     private let webView: WKWebView
     private var loadContinuation: CheckedContinuation<Void, Error>?
     private var loadTimeoutTask: Task<Void, Never>?
+    private var activeLoadURL: URL?
+    private var lastNavigationEvents: [String] = []
+    private var lastNavigationFailureDescription: String?
+    private var lastNavigationResponseSummary: String?
     private let loadTimeoutNanoseconds: UInt64 = 30_000_000_000
+    private let maximumNavigationEventCount = 10
 
     override init() {
         let configuration = WKWebViewConfiguration()
@@ -3670,15 +3675,61 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        appendNavigationEvent("didFinish url=\(webView.url?.absoluteString ?? "unknown")")
         finishLoading(with: .success(()))
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        finishLoading(with: .failure(error))
+        lastNavigationFailureDescription = navigationErrorSummary(error)
+        appendNavigationEvent("didFail \(lastNavigationFailureDescription ?? error.localizedDescription)")
+        Task {
+            await finishLoadingAfterNavigationFailure(error, requestedURL: activeLoadURL)
+        }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        finishLoading(with: .failure(error))
+        lastNavigationFailureDescription = navigationErrorSummary(error)
+        appendNavigationEvent("didFailProvisional \(lastNavigationFailureDescription ?? error.localizedDescription)")
+        Task {
+            await finishLoadingAfterNavigationFailure(error, requestedURL: activeLoadURL)
+        }
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        appendNavigationEvent("didStartProvisional url=\(webView.url?.absoluteString ?? "unknown")")
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        appendNavigationEvent("didCommit url=\(webView.url?.absoluteString ?? "unknown")")
+    }
+
+    func webView(_ webView: WKWebView, didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
+        appendNavigationEvent("didReceiveRedirect url=\(webView.url?.absoluteString ?? "unknown")")
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+    ) {
+        if let httpResponse = navigationResponse.response as? HTTPURLResponse {
+            let summary = [
+                "status=\(httpResponse.statusCode)",
+                "url=\(httpResponse.url?.absoluteString ?? "unknown")",
+                "mime=\(httpResponse.mimeType ?? "unknown")"
+            ].joined(separator: ", ")
+            lastNavigationResponseSummary = summary
+            appendNavigationEvent("navigationResponse \(summary)")
+        } else {
+            let summary = [
+                "url=\(navigationResponse.response.url?.absoluteString ?? "unknown")",
+                "mime=\(navigationResponse.response.mimeType ?? "unknown")"
+            ].joined(separator: ", ")
+            lastNavigationResponseSummary = summary
+            appendNavigationEvent("navigationResponse \(summary)")
+        }
+
+        decisionHandler(.allow)
     }
 
     private func prepareWebView(with cookies: [SessionCookie]) async throws {
@@ -3817,26 +3868,64 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             loadContinuation = continuation
+            activeLoadURL = url
+            lastNavigationEvents.removeAll()
+            lastNavigationFailureDescription = nil
+            lastNavigationResponseSummary = nil
+            appendNavigationEvent("loadRequest url=\(url.absoluteString)")
             loadTimeoutTask?.cancel()
             loadTimeoutTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: self?.loadTimeoutNanoseconds ?? 30_000_000_000)
-                await MainActor.run {
-                    guard let self, self.loadContinuation != nil else {
-                        return
-                    }
-
-                    self.webView.stopLoading()
-                    self.finishLoading(
-                        with: .failure(
-                            LiveHangarRepositoryError.unexpectedMarkup(
-                                "RSI page load timed out while opening \(url.absoluteString)."
-                            )
-                        )
-                    )
-                }
+                await self?.finishLoadingAfterTimeout(requestedURL: url)
             }
             webView.load(URLRequest(url: url))
         }
+    }
+
+    private func finishLoadingAfterTimeout(requestedURL: URL) async {
+        guard loadContinuation != nil else {
+            return
+        }
+
+        appendNavigationEvent("timeoutAfter \(loadTimeoutNanoseconds / 1_000_000_000)s")
+        let diagnostics = await pageLoadDiagnostics(
+            requestedURL: requestedURL,
+            reason: "timeout"
+        )
+        webView.stopLoading()
+        finishLoading(
+            with: .failure(
+                LiveHangarRepositoryError.unexpectedMarkup(
+                    """
+                    RSI page load timed out while opening \(requestedURL.absoluteString).
+
+                    \(diagnostics)
+                    """
+                )
+            )
+        )
+    }
+
+    private func finishLoadingAfterNavigationFailure(_ error: Error, requestedURL: URL?) async {
+        guard loadContinuation != nil else {
+            return
+        }
+
+        let diagnostics = await pageLoadDiagnostics(
+            requestedURL: requestedURL ?? webView.url,
+            reason: "navigationFailure"
+        )
+        finishLoading(
+            with: .failure(
+                LiveHangarRepositoryError.unexpectedMarkup(
+                    """
+                    RSI page load failed: \(navigationErrorSummary(error)).
+
+                    \(diagnostics)
+                    """
+                )
+            )
+        )
     }
 
     private func finishLoading(with result: Result<Void, Error>) {
@@ -3848,6 +3937,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         }
 
         self.loadContinuation = nil
+        activeLoadURL = nil
 
         switch result {
         case .success:
@@ -3855,6 +3945,140 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         case let .failure(error):
             loadContinuation.resume(throwing: error)
         }
+    }
+
+    private func pageLoadDiagnostics(requestedURL: URL?, reason: String) async -> String {
+        let currentCookies = await currentRSICookies()
+        let pageTitle = await diagnosticJavaScriptValue("document.title")
+        let readyState = await diagnosticJavaScriptValue("document.readyState")
+        let locationHref = await diagnosticJavaScriptValue("window.location.href")
+        let navigatorOnline = await diagnosticJavaScriptValue("navigator.onLine")
+        let htmlLength = await diagnosticJavaScriptValue("""
+        (() => {
+            try {
+                return String(document.documentElement ? document.documentElement.outerHTML.length : 0);
+            } catch (error) {
+                return 'error=' + String(error && error.message ? error.message : error);
+            }
+        })()
+        """)
+        let performanceSummary = await diagnosticJavaScriptValue("""
+        (() => {
+            try {
+                const nav = performance.getEntriesByType('navigation')[0];
+                if (!nav) {
+                    return 'unavailable';
+                }
+                return [
+                    'type=' + nav.type,
+                    'duration=' + Math.round(nav.duration),
+                    'domInteractive=' + Math.round(nav.domInteractive),
+                    'domContentLoaded=' + Math.round(nav.domContentLoadedEventEnd),
+                    'loadEventEnd=' + Math.round(nav.loadEventEnd),
+                    'transferSize=' + (nav.transferSize || 0)
+                ].join(', ');
+            } catch (error) {
+                return 'error=' + String(error && error.message ? error.message : error);
+            }
+        })()
+        """)
+        let bodyPreview = await diagnosticJavaScriptValue("""
+        (() => {
+            try {
+                const text = document.body ? document.body.innerText : '';
+                return text.replace(/\\s+/g, ' ').trim().slice(0, 700);
+            } catch (error) {
+                return 'error=' + String(error && error.message ? error.message : error);
+            }
+        })()
+        """)
+
+        let cookieNames = Array(Set(currentCookies.map(\.name))).sorted()
+        let cookieDomains = Array(Set(currentCookies.map(\.domain))).sorted()
+        let eventSummary = lastNavigationEvents.isEmpty ? "none" : lastNavigationEvents.joined(separator: " | ")
+
+        return [
+            "Page Load Diagnostics",
+            "reason=\(reason)",
+            "requestedURL=\(requestedURL?.absoluteString ?? "unknown")",
+            "webViewURL=\(webView.url?.absoluteString ?? "unknown")",
+            "locationHref=\(diagnosticValue(locationHref))",
+            "title=\(diagnosticValue(pageTitle))",
+            "readyState=\(diagnosticValue(readyState))",
+            "isLoading=\(webView.isLoading ? "yes" : "no")",
+            "estimatedProgress=\(String(format: "%.2f", webView.estimatedProgress))",
+            "navigatorOnline=\(diagnosticValue(navigatorOnline))",
+            "lastNavigationResponse=\(lastNavigationResponseSummary ?? "none")",
+            "lastNavigationFailure=\(lastNavigationFailureDescription ?? "none")",
+            "rsiCookieCount=\(currentCookies.count)",
+            "rsiCookieNames=\(limitedJoined(cookieNames, limit: 12))",
+            "rsiCookieDomains=\(limitedJoined(cookieDomains, limit: 6))",
+            "performanceNavigation=\(diagnosticValue(performanceSummary))",
+            "htmlLength=\(diagnosticValue(htmlLength))",
+            "navigationEvents=\(eventSummary)",
+            "bodyPreview=\(diagnosticValue(bodyPreview))"
+        ].joined(separator: "\n")
+    }
+
+    private func diagnosticJavaScriptValue(_ script: String) async -> String? {
+        await withCheckedContinuation { continuation in
+            webView.evaluateJavaScript(script) { result, error in
+                if let error {
+                    continuation.resume(returning: "error=\(error.localizedDescription)")
+                    return
+                }
+
+                guard let result else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                continuation.resume(returning: String(describing: result))
+            }
+        }
+    }
+
+    private func diagnosticValue(_ value: String?) -> String {
+        guard let value = value?
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !value.isEmpty else {
+            return "none"
+        }
+
+        return value
+    }
+
+    private func limitedJoined(_ values: [String], limit: Int) -> String {
+        guard !values.isEmpty else {
+            return "none"
+        }
+
+        let prefix = values.prefix(limit).joined(separator: ",")
+        return values.count > limit ? "\(prefix),..." : prefix
+    }
+
+    private func appendNavigationEvent(_ event: String) {
+        let sanitizedEvent = event
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sanitizedEvent.isEmpty else {
+            return
+        }
+
+        lastNavigationEvents.append(sanitizedEvent)
+        if lastNavigationEvents.count > maximumNavigationEventCount {
+            lastNavigationEvents.removeFirst(lastNavigationEvents.count - maximumNavigationEventCount)
+        }
+    }
+
+    private func navigationErrorSummary(_ error: Error) -> String {
+        let nsError = error as NSError
+        return [
+            "domain=\(nsError.domain)",
+            "code=\(nsError.code)",
+            "description=\(error.localizedDescription)"
+        ].joined(separator: ", ")
     }
 
     private func evaluate<Value: Decodable>(script: String, as type: Value.Type) async throws -> Value {
