@@ -540,6 +540,7 @@ struct AllShipsBrowserView: View {
     @State private var selectedPriceRange: ClosedRange<Double>?
     @State private var availabilityFilter: AllShipsAvailabilityFilter = .all
     @State private var loadState: AllShipsLoadState = .idle
+    @State private var isRefreshingCatalog = false
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
 
     private var filteredItems: [AllShipsCatalogItem] {
@@ -577,6 +578,14 @@ struct AllShipsBrowserView: View {
         selectedPriceRange ?? priceBounds
     }
 
+    private var isLoadingCatalog: Bool {
+        if case .loading = loadState {
+            return true
+        }
+
+        return false
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -612,7 +621,7 @@ struct AllShipsBrowserView: View {
                 case let .failed(message):
                     AllShipsErrorView(message: message) {
                         Task {
-                            await loadCatalog(force: true)
+                            await loadCatalog(force: true, showsLoadingState: true)
                         }
                     }
                 }
@@ -625,6 +634,23 @@ struct AllShipsBrowserView: View {
                 prompt: AppLocalizer.string("Search all ships")
             )
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        Task {
+                            await refreshCatalog()
+                        }
+                    } label: {
+                        if isRefreshingCatalog {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text(AppLocalizer.string("Refresh"))
+                        }
+                    }
+                    .disabled(isRefreshingCatalog || isLoadingCatalog)
+                    .accessibilityLabel(AppLocalizer.string("Refresh"))
+                }
+
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(AppLocalizer.string("Done")) {
                         dismiss()
@@ -637,13 +663,33 @@ struct AllShipsBrowserView: View {
         }
     }
 
-    private func loadCatalog(force: Bool) async {
+    private func refreshCatalog() async {
+        guard !isRefreshingCatalog else {
+            return
+        }
+
+        isRefreshingCatalog = true
+        defer {
+            isRefreshingCatalog = false
+        }
+
+        await loadCatalog(force: true, showsLoadingState: false)
+    }
+
+    private func loadCatalog(force: Bool, showsLoadingState: Bool = true) async {
         if !force,
            case .loaded = loadState {
             return
         }
 
-        loadState = .loading
+        if force {
+            await HostedShipCatalogStore.shared.clear()
+            await HostedShipDetailCatalogStore.shared.clear()
+        }
+
+        if showsLoadingState {
+            loadState = .loading
+        }
 
         do {
             async let shipCatalog = HostedShipCatalogStore.shared.catalog(using: HostedShipCatalogClient())
