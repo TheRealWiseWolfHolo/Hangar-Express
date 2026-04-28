@@ -1201,12 +1201,12 @@ private struct AllShipsCard: View {
 
                     Spacer(minLength: 8)
 
-                    AllShipsStatusPill(title: item.statusText)
+                    AllShipsAvailabilityPill(title: item.availabilityText)
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
                     AllShipsMetadataRow(label: AppLocalizer.string("Price"), value: item.priceText)
-                    AllShipsMetadataRow(label: AppLocalizer.string("Availability in RSI Store"), value: item.availabilityText)
+                    AllShipsMetadataRow(label: AppLocalizer.string("In Game Status"), value: item.statusText)
                 }
             }
         }
@@ -1219,7 +1219,7 @@ private struct AllShipsCard: View {
     }
 }
 
-private struct AllShipsStatusPill: View {
+private struct AllShipsAvailabilityPill: View {
     let title: String
 
     var body: some View {
@@ -1232,24 +1232,30 @@ private struct AllShipsStatusPill: View {
             .padding(.vertical, 6)
             .background(
                 Capsule(style: .continuous)
-                    .fill(statusTint)
+                    .fill(availabilityTint)
             )
     }
 
-    private var statusTint: Color {
+    private var availabilityTint: Color {
         let normalizedTitle = title.localizedLowercase
-        if normalizedTitle.contains("flight") {
-            return Color.green.opacity(0.68)
+        if normalizedTitle.contains("unavailable")
+            || normalizedTitle.contains("not available")
+            || normalizedTitle.contains("not for sale")
+            || normalizedTitle.contains("no longer")
+            || normalizedTitle.contains("不可用") {
+            return Color.secondary.opacity(0.55)
         }
 
-        if normalizedTitle.contains("concept")
-            || normalizedTitle.contains("production")
-            || normalizedTitle.contains("development") {
+        if normalizedTitle.contains("limited")
+            || normalizedTitle.contains("sale")
+            || normalizedTitle.contains("限") {
             return Color.orange.opacity(0.72)
         }
 
-        if normalizedTitle.contains("unavailable") {
-            return Color.secondary.opacity(0.55)
+        if normalizedTitle.contains("available")
+            || normalizedTitle.contains("always")
+            || normalizedTitle.contains("可用") {
+            return Color.green.opacity(0.68)
         }
 
         return Color.accentColor.opacity(0.68)
