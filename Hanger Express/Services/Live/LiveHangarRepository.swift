@@ -350,6 +350,14 @@ final class LiveHangarRepository: HangarRepository {
         )
         let packages = remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) }
         let fleet = FleetProjector.project(packages: packages, shipCatalog: shipCatalog)
+        emitFullRefreshCompletion(
+            progress: progress,
+            trackerID: FullRefreshTracker.hangar,
+            trackerTitle: "Hangar",
+            stepNumber: 2,
+            stepCount: 2,
+            detail: AppLocalizer.string("Hangar refresh complete.")
+        )
 
         return FullHangarRefreshPayload(
             packages: packages,
@@ -381,7 +389,16 @@ final class LiveHangarRepository: HangarRepository {
 
         let resolvedRemoteBuyback = try await remoteBuyback
         let resolvedShipCatalog = await shipCatalog
-        return resolvedRemoteBuyback.map { normalize(buyback: $0, shipCatalog: resolvedShipCatalog) }
+        let buyback = resolvedRemoteBuyback.map { normalize(buyback: $0, shipCatalog: resolvedShipCatalog) }
+        emitFullRefreshCompletion(
+            progress: progress,
+            trackerID: FullRefreshTracker.buyback,
+            trackerTitle: "Buy Back",
+            stepNumber: 1,
+            stepCount: 1,
+            detail: AppLocalizer.string("Buy-back refresh complete.")
+        )
+        return buyback
     }
 
     private func fetchFullAccountRefreshPayload(
@@ -398,6 +415,14 @@ final class LiveHangarRepository: HangarRepository {
             trackerID: FullRefreshTracker.account,
             trackerTitle: "Account"
         )
+        emitFullRefreshCompletion(
+            progress: progress,
+            trackerID: FullRefreshTracker.account,
+            trackerTitle: "Account",
+            stepNumber: 1,
+            stepCount: 1,
+            detail: AppLocalizer.string("Account refresh complete.")
+        )
 
         return FullAccountRefreshPayload(
             avatarURL: accountContext.avatarURL,
@@ -407,6 +432,28 @@ final class LiveHangarRepository: HangarRepository {
             totalSpendUSD: accountContext.totalSpendUSD,
             hangarLogs: [],
             referralStats: accountContext.referralStats
+        )
+    }
+
+    private func emitFullRefreshCompletion(
+        progress: @escaping RefreshProgressHandler,
+        trackerID: String,
+        trackerTitle: String,
+        stepNumber: Int,
+        stepCount: Int,
+        detail: String
+    ) {
+        progress(
+            makeProgress(
+                stage: .finalizing,
+                stepNumber: stepNumber,
+                stepCount: stepCount,
+                detail: detail,
+                completedUnitCount: 1,
+                totalUnitCount: 1,
+                trackerID: trackerID,
+                trackerTitle: trackerTitle
+            )
         )
     }
 

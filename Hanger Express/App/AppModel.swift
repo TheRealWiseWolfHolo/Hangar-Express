@@ -80,6 +80,7 @@ final class AppModel {
 
         let area: Area
         let progress: RefreshProgress
+        let isComplete: Bool
 
         var id: Area { area }
     }
@@ -422,8 +423,8 @@ final class AppModel {
 
         activeRefreshScope = resolvedScope
         refreshIndicatorStyle = .standardCard
-        concurrentRefreshEntries = []
-        refreshProgress = initialProgress(for: session, scope: resolvedScope)
+        concurrentRefreshEntries = initialConcurrentRefreshEntries(for: session, scope: resolvedScope)
+        refreshProgress = concurrentRefreshEntries.isEmpty ? initialProgress(for: session, scope: resolvedScope) : nil
         beginRefreshDiagnostics(for: resolvedScope, session: session)
 
         do {
@@ -1560,8 +1561,6 @@ final class AppModel {
         for session: UserSession,
         existingSnapshot: HangarSnapshot?
     ) async throws -> HangarSnapshot {
-        concurrentRefreshEntries = []
-
         let refreshedSnapshot = try await hangarRepository.fetchSnapshot(for: session) { [weak self] progress in
             self?.applyIncomingRefreshProgress(progress)
         }
@@ -1653,31 +1652,32 @@ final class AppModel {
 
         refreshProgress = nil
 
-        if isCompletedConcurrentRefreshProgress(progress) {
-            concurrentRefreshEntries.removeAll { $0.area == area }
+        let isComplete = isCompletedConcurrentRefreshProgress(progress)
+        let entry = ConcurrentRefreshEntry(
+            area: area,
+            progress: progress,
+            isComplete: isComplete || concurrentRefreshEntries.first(where: { $0.area == area })?.isComplete == true
+        )
 
-            if concurrentRefreshEntries.isEmpty {
-                refreshProgress = RefreshProgress(
-                    stage: .finalizing,
-                    stepNumber: max(progress.stepNumber, progress.stepCount),
-                    stepCount: progress.stepCount,
-                    detail: AppLocalizer.string("Saving the refreshed hangar, buy-back, and account snapshot."),
-                    completedUnitCount: 0,
-                    totalUnitCount: nil
-                )
-            }
+        if let existingIndex = concurrentRefreshEntries.firstIndex(where: { $0.area == area }) {
+            concurrentRefreshEntries[existingIndex] = entry
         } else {
-            if let existingIndex = concurrentRefreshEntries.firstIndex(where: { $0.area == area }) {
-                concurrentRefreshEntries[existingIndex] = ConcurrentRefreshEntry(area: area, progress: progress)
-            } else {
-                concurrentRefreshEntries.append(
-                    ConcurrentRefreshEntry(area: area, progress: progress)
-                )
-            }
+            concurrentRefreshEntries.append(entry)
         }
 
         concurrentRefreshEntries.sort { lhs, rhs in
             refreshAreaSortIndex(lhs.area) < refreshAreaSortIndex(rhs.area)
+        }
+
+        if isComplete, concurrentRefreshEntries.allSatisfy(\.isComplete) {
+            refreshProgress = RefreshProgress(
+                stage: .finalizing,
+                stepNumber: max(progress.stepNumber, progress.stepCount),
+                stepCount: progress.stepCount,
+                detail: AppLocalizer.string("Saving the refreshed hangar, buy-back, and account snapshot."),
+                completedUnitCount: 0,
+                totalUnitCount: nil
+            )
         }
     }
 
@@ -1720,6 +1720,32 @@ final class AppModel {
             completedUnitCount: 0,
             totalUnitCount: 1
         )
+    }
+
+    private func initialConcurrentRefreshEntries(
+        for session: UserSession,
+        scope: RefreshScope
+    ) -> [ConcurrentRefreshEntry] {
+        guard scope == .full, session.authMode != .developerPreview else {
+            return []
+        }
+
+        return ConcurrentRefreshEntry.Area.allCases.map { area in
+            ConcurrentRefreshEntry(
+                area: area,
+                progress: RefreshProgress(
+                    stage: .preparingSession,
+                    stepNumber: 1,
+                    stepCount: 1,
+                    detail: AppLocalizer.string("Waiting for refresh to start."),
+                    completedUnitCount: 0,
+                    totalUnitCount: nil,
+                    trackerID: area.rawValue,
+                    trackerTitle: area.title
+                ),
+                isComplete: false
+            )
+        }
     }
 
     private func stepCount(for scope: RefreshScope) -> Int {

@@ -12,6 +12,12 @@
 "Buy Back" = "回购";
 "Account" = "账户";
 "Hangar Log" = "机库日志";
+"Complete" = "已完成";
+"%@ complete." = "%@已完成。";
+"Waiting for refresh to start." = "等待刷新开始。";
+"Hangar refresh complete." = "机库刷新完成。";
+"Buy-back refresh complete." = "回购刷新完成。";
+"Account refresh complete." = "账户刷新完成。";
 "the full account snapshot" = "完整账户快照";
 "the hangar and fleet data" = "机库和舰队数据";
 "the buy-back data" = "回购数据";

@@ -93,11 +93,21 @@ struct ConcurrentRefreshProgressStrip: View {
     var compact = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: compact ? 8 : 12) {
-            ForEach(entries) { entry in
-                ConcurrentRefreshProgressTile(entry: entry, compact: compact)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        if compact {
+            HStack(alignment: .top, spacing: 8) {
+                progressTiles
             }
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                progressTiles
+            }
+        }
+    }
+
+    private var progressTiles: some View {
+        ForEach(entries) { entry in
+            ConcurrentRefreshProgressTile(entry: entry, compact: compact)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
@@ -108,23 +118,40 @@ private struct ConcurrentRefreshProgressTile: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 8 : 10) {
-            Text(entry.area.title)
-                .font(compact ? .caption.weight(.bold) : .headline.weight(.bold))
-                .lineLimit(1)
+            HStack(alignment: .center, spacing: compact ? 8 : 10) {
+                Image(systemName: iconName)
+                    .font(compact ? .caption.weight(.bold) : .title3.weight(.bold))
+                    .foregroundStyle(iconColor)
+                    .symbolRenderingMode(.hierarchical)
 
-            Text(entry.progress.stage.title)
-                .font(compact ? .caption2.weight(.semibold) : .caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.area.title)
+                        .font(compact ? .caption.weight(.bold) : .headline.weight(.bold))
+                        .lineLimit(1)
 
-            progressBar
+                    Text(statusText)
+                        .font(compact ? .caption2.weight(.semibold) : .caption.weight(.semibold))
+                        .foregroundStyle(entry.isComplete ? .green : .secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
 
-            Text(entry.progress.detail)
-                .font(compact ? .caption2 : .caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(compact ? 3 : 4)
-                .fixedSize(horizontal: false, vertical: true)
+            if entry.isComplete {
+                Text(AppLocalizer.format("%@ complete.", entry.area.title))
+                    .font(compact ? .caption2 : .caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(compact ? 2 : 3)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                progressBar
+
+                Text(entry.progress.detail)
+                    .font(compact ? .caption2 : .caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(compact ? 3 : 4)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(compact ? 10 : 14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -132,6 +159,18 @@ private struct ConcurrentRefreshProgressTile: View {
             .thinMaterial,
             in: RoundedRectangle(cornerRadius: compact ? 16 : 20, style: .continuous)
         )
+    }
+
+    private var iconName: String {
+        entry.isComplete ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath"
+    }
+
+    private var iconColor: Color {
+        entry.isComplete ? .green : .blue
+    }
+
+    private var statusText: String {
+        entry.isComplete ? AppLocalizer.string("Complete") : entry.progress.stage.title
     }
 
     @ViewBuilder
