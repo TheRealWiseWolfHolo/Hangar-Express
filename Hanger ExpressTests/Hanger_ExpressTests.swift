@@ -51,6 +51,7 @@ struct Hanger_ExpressTests {
     }
 
     @Test func subscriptionEntitlementsClampRefreshWorkersByPlan() async throws {
+        #expect(ProSubscriptionConfiguration.productIDs == Set(["0001", "0002"]))
         #expect(SyncPreferences.constrainedWorkerCount(10, isPro: false) == 2)
         #expect(SyncPreferences.constrainedWorkerCount(0, isPro: false) == 1)
         #expect(SyncPreferences.constrainedWorkerCount(10, isPro: true) == 10)
@@ -62,6 +63,48 @@ struct Hanger_ExpressTests {
         #expect(HangarLogFetchMode.initial.entryLimit(isPro: true) == 5)
         #expect(HangarLogFetchMode.expanded.entryLimit(isPro: false) == 5)
         #expect(HangarLogFetchMode.expanded.entryLimit(isPro: true) == 500)
+    }
+
+    @Test func hangarLogUpgradeContextInfersShipPathFromCCUTitles() async throws {
+        let context = try #require(
+            HangarLogUpgradeContext.inferred(
+                from: [
+                    "Zeus MR upgrade",
+                    "Upgrade - Cutlass Black to Zeus Mk II MR CCU"
+                ]
+            )
+        )
+
+        #expect(context.sourceShipName == "Cutlass Black")
+        #expect(context.targetShipName == "Zeus Mk II MR")
+        #expect(context.upgradeName == "Cutlass Black to Zeus Mk II MR")
+        #expect(context.summaryText == "Cutlass Black to Zeus Mk II MR")
+    }
+
+    @Test func hangarLogEntryDecodesLegacyCacheWithoutUpgradeContext() async throws {
+        let json = #"""
+        {
+          "id": "legacy-upgrade-1",
+          "occurredAt": "2026-04-18T12:00:00Z",
+          "action": "APPLIED_UPGRADE",
+          "itemName": "Legacy Upgrade",
+          "operatorName": "CIG",
+          "priceUSD": 190,
+          "sourcePledgeID": "1002",
+          "targetPledgeID": "1003",
+          "reason": "Cutlass Black to Zeus Mk II MR CCU",
+          "rawText": "#1003 - Upgrade applied: #1002 Cutlass Black to Zeus Mk II MR CCU, new value: $190.00 USD"
+        }
+        """#
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let entry = try decoder.decode(HangarLogEntry.self, from: Data(json.utf8))
+
+        #expect(entry.action == .appliedUpgrade)
+        #expect(entry.upgradeContext == nil)
+        #expect(entry.targetPledgeID == "1003")
     }
 
     @Test func fileSnapshotStorePersistsSnapshotsByAccountKey() async throws {

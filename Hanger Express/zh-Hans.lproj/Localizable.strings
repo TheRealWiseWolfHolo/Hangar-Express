@@ -13,11 +13,16 @@
 "Account" = "账户";
 "Hangar Log" = "机库日志";
 "Complete" = "已完成";
+"Ready" = "已就绪";
 "%@ complete." = "%@已完成。";
 "Waiting for refresh to start." = "等待刷新开始。";
 "Hangar refresh complete." = "机库刷新完成。";
 "Buy-back refresh complete." = "回购刷新完成。";
 "Account refresh complete." = "账户刷新完成。";
+"Hangar sync is ready." = "机库同步已就绪。";
+"Buyback sync is ready." = "回购同步已就绪。";
+"Account sync is ready." = "账户同步已就绪。";
+"Hangar, buyback, and account syncs are ready." = "机库、回购和账户同步已就绪。";
 "the full account snapshot" = "完整账户快照";
 "the hangar and fleet data" = "机库和舰队数据";
 "the buy-back data" = "回购数据";
@@ -133,7 +138,7 @@
 "Ships %@" = "舰船 %@";
 "Melt %@" = "可溶 %@";
 "Total Spend: %@" = "总消费：%@";
-"Account Current Value = %@\nCombined MSRP of all ships + current value of all upgrades + combined value of the rest of the items in your hangar.\n\nAvailable Credit = %@\n\nAccount Total Value = %@ + %@ = %@" = "账户当前价值 = %@\n所有舰船的合计 MSRP + 所有升级的当前价值 + 机库中其余物品的合计价值。\n\n可用信用点 = %@\n\n账户总价值 = %@ + %@ = %@";
+"Account Current Value = %@\nCombined MSRP of all ships + current value of all upgrades + combined value of the rest of the items in your hangar.\n\nAvailable Credit = %@\n\nAccount Total Value = %@ + %@ = %@" = "账户总价值 = %5$@\n= 账户当前价值 %1$@ + 可用信用点 %2$@\n\n账户当前价值包含：所有舰船的合计 MSRP、所有升级的当前价值，以及机库中其余物品的合计价值。";
 "%lld cookies" = "%lld 个 Cookie";
 "%@ saved, credentials in Keychain" = "已保存 %@，凭据存储于钥匙串";
 "All" = "全部";
@@ -182,6 +187,8 @@
 "Refreshing the preview account overview." = "正在刷新预览账户概览。";
 "Preview account overview ready." = "预览账户概览已就绪。";
 "Organized %lld pledges into the hangar and fleet views." = "已将 %lld 个项目整理到机库和舰队视图中。";
+"Organized %lld buy-back pledges." = "已整理 %lld 个回购项目。";
+"Loaded %lld hangar log entries." = "已加载 %lld 条机库日志记录。";
 "Restoring %lld saved RSI cookies." = "正在恢复 %lld 个已保存的 RSI Cookie。";
 "Refreshing the affected hangar tail beginning with page %lld." = "正在从第 %lld 页开始刷新受影响的机库尾部数据。";
 "Opening RSI's hangar log window and loading the current entries." = "正在打开 RSI 机库日志窗口并加载当前记录。";
@@ -212,7 +219,7 @@
 "Loading %@. %@ already synced." = "正在加载 %@，已同步 %@。";
 "Loading %@." = "正在加载 %@。";
 "Finished %@. %@ synced so far." = "%@ 已完成，目前已同步 %@。";
-"Loaded %lld of %lld pages across %lld workers. %@ synced so far." = "已通过 %lld 个并发任务加载 %lld / %lld 页，目前已同步 %@。";
+"Loaded %lld of %lld pages across %lld workers. %@ synced so far." = "已通过 %3$lld 个并发任务加载 %1$lld / %2$lld 页，目前已同步 %4$@。";
 "%lld pledge" = "%lld 个项目";
 "%lld pledges" = "%lld 个项目";
 "%lld buy-back item" = "%lld 个回购物品";

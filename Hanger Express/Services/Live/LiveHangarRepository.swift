@@ -31,6 +31,12 @@ final class LiveHangarRepository: HangarRepository {
         static let account = "account"
     }
 
+    private enum DisplayProgressRange {
+        static let preparing = (start: 0.0, end: 0.1)
+        static let pages = (start: 0.1, end: 0.9)
+        static let finalizing = (start: 0.9, end: 1.0)
+    }
+
     private struct FullHangarRefreshPayload {
         let packages: [HangarPackage]
         let fleet: [FleetShip]
@@ -135,7 +141,8 @@ final class LiveHangarRepository: HangarRepository {
                     remotePledges.count
                 ),
                 completedUnitCount: 2,
-                totalUnitCount: 2
+                totalUnitCount: 2,
+                displayRange: DisplayProgressRange.finalizing
             )
         )
 
@@ -183,7 +190,7 @@ final class LiveHangarRepository: HangarRepository {
             stepCount: 3
         )
         async let shipCatalog = fetchHostedShipCatalog(
-            progress: progress,
+            progress: { _ in },
             stepNumber: 3,
             stepCount: 3
         )
@@ -212,7 +219,8 @@ final class LiveHangarRepository: HangarRepository {
                 stepCount: 3,
                 detail: "Rebuilt the hangar from cached pages 1-\(partialRefreshStartPage - 1) and refreshed pages \(partialRefreshStartPage)+.",
                 completedUnitCount: 2,
-                totalUnitCount: 2
+                totalUnitCount: 2,
+                displayRange: DisplayProgressRange.finalizing
             )
         )
 
@@ -245,7 +253,7 @@ final class LiveHangarRepository: HangarRepository {
             stepCount: 2
         )
         async let shipCatalog = fetchHostedShipCatalog(
-            progress: progress,
+            progress: { _ in },
             stepNumber: 2,
             stepCount: 2
         )
@@ -253,6 +261,17 @@ final class LiveHangarRepository: HangarRepository {
         let resolvedRemoteBuyback = try await remoteBuyback
         let resolvedShipCatalog = await shipCatalog
         let buyback = resolvedRemoteBuyback.map { normalize(buyback: $0, shipCatalog: resolvedShipCatalog) }
+        progress(
+            makeProgress(
+                stage: .finalizing,
+                stepNumber: 2,
+                stepCount: 2,
+                detail: AppLocalizer.format("Organized %lld buy-back pledges.", buyback.count),
+                completedUnitCount: 1,
+                totalUnitCount: 1,
+                displayRange: DisplayProgressRange.finalizing
+            )
+        )
 
         return snapshot.updatingBuyback(
             buyback: buyback
@@ -284,6 +303,17 @@ final class LiveHangarRepository: HangarRepository {
             progress: progress,
             stepNumber: 2,
             stepCount: 2
+        )
+        progress(
+            makeProgress(
+                stage: .finalizing,
+                stepNumber: 2,
+                stepCount: 2,
+                detail: AppLocalizer.format("Loaded %lld hangar log entries.", hangarLogs.count),
+                completedUnitCount: 1,
+                totalUnitCount: 1,
+                displayRange: DisplayProgressRange.finalizing
+            )
         )
 
         return snapshot.updatingHangarLogs(
@@ -355,7 +385,7 @@ final class LiveHangarRepository: HangarRepository {
             trackerTitle: "Hangar",
             stepNumber: 2,
             stepCount: 2,
-            detail: AppLocalizer.string("Hangar refresh complete.")
+            detail: AppLocalizer.string("Hangar sync is ready.")
         )
 
         return FullHangarRefreshPayload(
@@ -379,7 +409,7 @@ final class LiveHangarRepository: HangarRepository {
             trackerTitle: "Buy Back"
         )
         async let shipCatalog = fetchHostedShipCatalog(
-            progress: progress,
+            progress: { _ in },
             stepNumber: 1,
             stepCount: 1,
             trackerID: FullRefreshTracker.buyback,
@@ -395,7 +425,7 @@ final class LiveHangarRepository: HangarRepository {
             trackerTitle: "Buy Back",
             stepNumber: 1,
             stepCount: 1,
-            detail: AppLocalizer.string("Buy-back refresh complete.")
+            detail: AppLocalizer.string("Buyback sync is ready.")
         )
         return buyback
     }
@@ -420,7 +450,7 @@ final class LiveHangarRepository: HangarRepository {
             trackerTitle: "Account",
             stepNumber: 1,
             stepCount: 1,
-            detail: AppLocalizer.string("Account refresh complete.")
+            detail: AppLocalizer.string("Account sync is ready.")
         )
 
         return FullAccountRefreshPayload(
@@ -451,7 +481,8 @@ final class LiveHangarRepository: HangarRepository {
                 completedUnitCount: 1,
                 totalUnitCount: 1,
                 trackerID: trackerID,
-                trackerTitle: trackerTitle
+                trackerTitle: trackerTitle,
+                displayRange: DisplayProgressRange.finalizing
             )
         )
     }
@@ -653,7 +684,8 @@ final class LiveHangarRepository: HangarRepository {
             stepCount: stepCount,
             detail: AppLocalizer.format("Restoring %lld saved RSI cookies.", session.cookies.count),
             completedUnitCount: 1,
-            totalUnitCount: 1
+            totalUnitCount: 1,
+            displayRange: DisplayProgressRange.preparing
         )
     }
 
@@ -692,7 +724,8 @@ final class LiveHangarRepository: HangarRepository {
                 completedUnitCount: 0,
                 totalUnitCount: nil,
                 trackerID: trackerID,
-                trackerTitle: trackerTitle
+                trackerTitle: trackerTitle,
+                displayRange: DisplayProgressRange.pages
             )
         )
 
@@ -759,7 +792,8 @@ final class LiveHangarRepository: HangarRepository {
                 completedUnitCount: 1,
                 totalUnitCount: inferredTotalPages,
                 trackerID: trackerID,
-                trackerTitle: trackerTitle
+                trackerTitle: trackerTitle,
+                displayRange: DisplayProgressRange.pages
             )
         )
 
@@ -831,7 +865,8 @@ final class LiveHangarRepository: HangarRepository {
                         completedUnitCount: completedPages,
                         totalUnitCount: totalPages,
                         trackerID: trackerID,
-                        trackerTitle: trackerTitle
+                        trackerTitle: trackerTitle,
+                        displayRange: DisplayProgressRange.pages
                     )
                 )
             }
@@ -919,7 +954,8 @@ final class LiveHangarRepository: HangarRepository {
                 completedUnitCount: 0,
                 totalUnitCount: nil,
                 trackerID: trackerID,
-                trackerTitle: trackerTitle
+                trackerTitle: trackerTitle,
+                displayRange: DisplayProgressRange.pages
             )
         )
 
@@ -987,7 +1023,8 @@ final class LiveHangarRepository: HangarRepository {
                 completedUnitCount: 1,
                 totalUnitCount: inferredTotalPages.map { max($0 - startPage + 1, 1) },
                 trackerID: trackerID,
-                trackerTitle: trackerTitle
+                trackerTitle: trackerTitle,
+                displayRange: DisplayProgressRange.pages
             )
         )
 
@@ -1059,7 +1096,8 @@ final class LiveHangarRepository: HangarRepository {
                         completedUnitCount: completedPages,
                         totalUnitCount: max(totalPages - startPage + 1, 1),
                         trackerID: trackerID,
-                        trackerTitle: trackerTitle
+                        trackerTitle: trackerTitle,
+                        displayRange: DisplayProgressRange.pages
                     )
                 )
             }
@@ -1136,7 +1174,8 @@ final class LiveHangarRepository: HangarRepository {
                 completedUnitCount: 0,
                 totalUnitCount: nil,
                 trackerID: trackerID,
-                trackerTitle: trackerTitle
+                trackerTitle: trackerTitle,
+                displayRange: DisplayProgressRange.pages
             )
         )
 
@@ -1201,7 +1240,8 @@ final class LiveHangarRepository: HangarRepository {
                 completedUnitCount: 1,
                 totalUnitCount: inferredTotalPages,
                 trackerID: trackerID,
-                trackerTitle: trackerTitle
+                trackerTitle: trackerTitle,
+                displayRange: DisplayProgressRange.pages
             )
         )
 
@@ -1273,7 +1313,8 @@ final class LiveHangarRepository: HangarRepository {
                         completedUnitCount: completedPages,
                         totalUnitCount: totalPages,
                         trackerID: trackerID,
-                        trackerTitle: trackerTitle
+                        trackerTitle: trackerTitle,
+                        displayRange: DisplayProgressRange.pages
                     )
                 )
             }
@@ -1345,7 +1386,8 @@ final class LiveHangarRepository: HangarRepository {
                     completedUnitCount: max(page - 1, 0),
                     totalUnitCount: pledgeTotalPages,
                     trackerID: trackerID,
-                    trackerTitle: trackerTitle
+                    trackerTitle: trackerTitle,
+                    displayRange: DisplayProgressRange.pages
                 )
             )
 
@@ -1389,7 +1431,8 @@ final class LiveHangarRepository: HangarRepository {
                     completedUnitCount: page,
                     totalUnitCount: pledgeTotalPages,
                     trackerID: trackerID,
-                    trackerTitle: trackerTitle
+                    trackerTitle: trackerTitle,
+                    displayRange: DisplayProgressRange.pages
                 )
             )
 
@@ -1453,7 +1496,8 @@ final class LiveHangarRepository: HangarRepository {
                     completedUnitCount: max(page - 1, 0),
                     totalUnitCount: buybackTotalPages,
                     trackerID: trackerID,
-                    trackerTitle: trackerTitle
+                    trackerTitle: trackerTitle,
+                    displayRange: DisplayProgressRange.pages
                 )
             )
 
@@ -1493,7 +1537,8 @@ final class LiveHangarRepository: HangarRepository {
                     completedUnitCount: page,
                     totalUnitCount: buybackTotalPages,
                     trackerID: trackerID,
-                    trackerTitle: trackerTitle
+                    trackerTitle: trackerTitle,
+                    displayRange: DisplayProgressRange.pages
                 )
             )
 
@@ -1552,7 +1597,7 @@ final class LiveHangarRepository: HangarRepository {
                             completedPages: 1,
                             loadedCount: itemCount
                         )
-                        await MainActor.run {
+                        Task { @MainActor in
                             progress(totals.completedPages, totals.loadedCount)
                         }
                     }
@@ -1612,7 +1657,7 @@ final class LiveHangarRepository: HangarRepository {
                             completedPages: 1,
                             loadedCount: itemCount
                         )
-                        await MainActor.run {
+                        Task { @MainActor in
                             progress(totals.completedPages, totals.loadedCount)
                         }
                     }
@@ -1708,7 +1753,8 @@ final class LiveHangarRepository: HangarRepository {
                 completedUnitCount: 0,
                 totalUnitCount: 1,
                 trackerID: trackerID,
-                trackerTitle: trackerTitle
+                trackerTitle: trackerTitle,
+                displayRange: DisplayProgressRange.pages
             )
         )
 
@@ -1823,7 +1869,8 @@ final class LiveHangarRepository: HangarRepository {
                 completedUnitCount: 1,
                 totalUnitCount: 1,
                 trackerID: trackerID,
-                trackerTitle: trackerTitle
+                trackerTitle: trackerTitle,
+                displayRange: DisplayProgressRange.pages
             )
         )
         recordRefreshDiagnostics(
@@ -1899,7 +1946,8 @@ final class LiveHangarRepository: HangarRepository {
                 completedUnitCount: 0,
                 totalUnitCount: 2,
                 trackerID: trackerID,
-                trackerTitle: trackerTitle
+                trackerTitle: trackerTitle,
+                displayRange: DisplayProgressRange.finalizing
             )
         )
 
@@ -1924,7 +1972,8 @@ final class LiveHangarRepository: HangarRepository {
                 completedUnitCount: 1,
                 totalUnitCount: 2,
                 trackerID: trackerID,
-                trackerTitle: trackerTitle
+                trackerTitle: trackerTitle,
+                displayRange: DisplayProgressRange.finalizing
             )
         )
 
@@ -2139,7 +2188,8 @@ final class LiveHangarRepository: HangarRepository {
         completedUnitCount: Int,
         totalUnitCount: Int?,
         trackerID: String? = nil,
-        trackerTitle: String? = nil
+        trackerTitle: String? = nil,
+        displayRange: (start: Double, end: Double)? = nil
     ) -> RefreshProgress {
         RefreshProgress(
             stage: stage,
@@ -2149,7 +2199,9 @@ final class LiveHangarRepository: HangarRepository {
             completedUnitCount: completedUnitCount,
             totalUnitCount: totalUnitCount,
             trackerID: trackerID,
-            trackerTitle: trackerTitle
+            trackerTitle: trackerTitle,
+            displayStartFraction: displayRange?.start,
+            displayEndFraction: displayRange?.end
         )
     }
 
@@ -9103,6 +9155,7 @@ private nonisolated enum HangarLogParser {
         var targetPledgeID: String?
         var operatorName: String?
         var reason: String?
+        var upgradeContext: HangarLogUpgradeContext?
 
         if let groups = match(createdPattern, in: content) {
             action = .created
@@ -9128,6 +9181,12 @@ private nonisolated enum HangarLogParser {
             reason = groupValue(groups, 2)
             priceUSD = parseMoney(groupValue(groups, 3))
             operatorName = "CIG"
+            upgradeContext = HangarLogUpgradeContext.inferred(
+                from: [
+                    reason,
+                    item.itemName
+                ]
+            )
         } else if let groups = match(buybackPattern, in: content) {
             action = .buyback
             targetPledgeID = groupValue(groups, 0)
@@ -9184,7 +9243,8 @@ private nonisolated enum HangarLogParser {
             targetPledgeID: resolvedTargetID,
             orderCode: orderCode?.nilIfEmpty,
             reason: reason?.nilIfEmpty,
-            rawText: item.fullText.nilIfEmpty ?? content
+            rawText: item.fullText.nilIfEmpty ?? content,
+            upgradeContext: upgradeContext
         )
     }
 

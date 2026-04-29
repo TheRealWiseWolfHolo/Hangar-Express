@@ -3,8 +3,10 @@ import Observation
 import StoreKit
 
 nonisolated enum ProSubscriptionConfiguration {
-    static let productID = "0001"
-    static let productIDs: Set<String> = [productID]
+    static let monthlyProductID = "0001"
+    static let yearlyProductID = "0002"
+    static let productIDs: Set<String> = [monthlyProductID, yearlyProductID]
+    static let productIDOrder = [monthlyProductID, yearlyProductID]
     static let isProDefaultsKey = "subscription.pro.isActive"
     static let standardRefreshWorkerLimit = 2
     static let proRefreshWorkerLimit = 10
@@ -69,15 +71,15 @@ final class SubscriptionStore {
     }
 
     var isPro: Bool {
-        purchasedProductIDs.contains(ProSubscriptionConfiguration.productID)
+        !purchasedProductIDs.isDisjoint(with: productIDs)
     }
 
-    var proProduct: Product? {
-        products.first { $0.id == ProSubscriptionConfiguration.productID }
+    var proProducts: [Product] {
+        products.filter { productIDs.contains($0.id) }
     }
 
     var proPriceLabel: String {
-        proProduct?.displayPrice ?? AppLocalizer.string("Price unavailable")
+        proProducts.first?.displayPrice ?? AppLocalizer.string("Price unavailable")
     }
 
     func start() async {
@@ -110,18 +112,18 @@ final class SubscriptionStore {
 
         do {
             products = try await Product.products(for: Array(productIDs)).sorted { lhs, rhs in
-                lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+                sortIndex(for: lhs.id) < sortIndex(for: rhs.id)
             }
 
             if products.isEmpty {
-                productLoadErrorMessage = AppLocalizer.string("The Pro subscription could not be loaded from the App Store.")
+                productLoadErrorMessage = AppLocalizer.string("The App Store did not return Pro products 0001 or 0002 yet.")
             }
         } catch {
             productLoadErrorMessage = error.localizedDescription
         }
     }
 
-    func purchasePro() async {
+    func purchasePro(productID: String? = nil) async {
         guard storeKitEnabled else {
             return
         }
@@ -129,7 +131,7 @@ final class SubscriptionStore {
         purchaseStatus = .purchasing
 
         do {
-            let product = try await resolvedProProduct()
+            let product = try await resolvedProProduct(productID: productID)
             let result = try await product.purchase()
 
             switch result {
@@ -213,15 +215,23 @@ final class SubscriptionStore {
         }
     }
 
-    private func resolvedProProduct() async throws -> Product {
-        if let proProduct {
-            return proProduct
+    private func resolvedProProduct(productID: String?) async throws -> Product {
+        if let productID, let product = products.first(where: { $0.id == productID }) {
+            return product
+        }
+
+        if productID == nil, let product = proProducts.first {
+            return product
         }
 
         await loadProducts()
 
-        if let proProduct {
-            return proProduct
+        if let productID, let product = products.first(where: { $0.id == productID }) {
+            return product
+        }
+
+        if productID == nil, let product = proProducts.first {
+            return product
         }
 
         throw SubscriptionStoreError.productUnavailable
@@ -240,6 +250,10 @@ final class SubscriptionStore {
             throw SubscriptionStoreError.failedVerification
         }
     }
+
+    private func sortIndex(for productID: String) -> Int {
+        ProSubscriptionConfiguration.productIDOrder.firstIndex(of: productID) ?? Int.max
+    }
 }
 
 private enum SubscriptionStoreError: LocalizedError {
@@ -249,7 +263,7 @@ private enum SubscriptionStoreError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .productUnavailable:
-            return AppLocalizer.string("The Pro subscription is not available yet. Check the product ID in App Store Connect and try again.")
+            return AppLocalizer.string("The App Store did not return Pro products 0001 or 0002 yet. Check both product IDs, prices, localizations, subscription status, Paid Apps agreement, and bundle ID in App Store Connect.")
         case .failedVerification:
             return AppLocalizer.string("The App Store could not verify this purchase.")
         }

@@ -39,47 +39,12 @@ struct DashboardTabView: View {
         }
         .environment(\.locale, appLanguage.locale)
         .safeAreaInset(edge: .top) {
-            if appModel.transientBanner != nil
-                || !appModel.concurrentRefreshEntries.isEmpty
-                || appModel.refreshProgress != nil
-            {
-                VStack(spacing: 8) {
-                    if let banner = appModel.transientBanner {
-                        TransientBannerView(banner: banner)
-                            .padding(.horizontal)
-                            .padding(.top, 8)
-                    }
-
-                    if !appModel.concurrentRefreshEntries.isEmpty {
-                        ConcurrentRefreshProgressStrip(
-                            entries: appModel.concurrentRefreshEntries,
-                            compact: true
-                        )
-                        .padding(.horizontal)
-                    } else if let progress = appModel.refreshProgress {
-                        Group {
-                            if appModel.refreshIndicatorStyle == .compactTopLeading {
-                                HStack {
-                                    MinimalRefreshProgressView(progress: progress)
-                                    Spacer(minLength: 0)
-                                }
-                                .padding(.horizontal, 12)
-                                .padding(.top, 4)
-                            } else {
-                                RefreshProgressCard(progress: progress, compact: true)
-                                    .padding(.horizontal)
-                                    .padding(.top, 8)
-                            }
-                        }
-                    }
-                }
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
+            RefreshPresentationInset(
+                presentation: appModel.refreshPresentation,
+                transientBanner: appModel.transientBanner
+            )
         }
-        .animation(.snappy, value: appModel.refreshProgress)
-        .animation(.snappy, value: appModel.concurrentRefreshEntries)
         .animation(.snappy, value: appModel.transientBanner)
-        .animation(.snappy, value: appModel.refreshIndicatorStyle == .compactTopLeading)
         .overlay {
             if let message = appModel.lastRefreshErrorMessage {
                 RefreshFailureOverlay(

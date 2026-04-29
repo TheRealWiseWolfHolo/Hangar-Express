@@ -60,9 +60,18 @@ struct HangarLogView: View {
     @State private var visibleEntryCount = HangarLogFetchMode.initial.entryLimit
     @State private var isRequestingOlderEntries = false
     @State private var lastRemoteExpansionBaselineCount: Int?
+    @Namespace private var logNavigationNamespace
 
     private var hangarLogs: [HangarLogEntry] {
         appModel.snapshot?.hangarLogs ?? []
+    }
+
+    private var currentPackageGroups: [GroupedHangarPackage] {
+        appModel.snapshot?.packages.groupedForInventoryDisplay ?? []
+    }
+
+    private var currentShipGroups: [GroupedFleetShip] {
+        appModel.snapshot?.fleet.groupedForFleetDisplay ?? []
     }
 
     private var planLimitedHangarLogs: [HangarLogEntry] {
@@ -149,10 +158,7 @@ struct HangarLogView: View {
                 } else {
                     Section {
                         ForEach(displayedHangarLogs) { entry in
-                            HangarLogRow(entry: entry)
-                                .onAppear {
-                                    loadMoreIfNeeded(currentEntry: entry)
-                                }
+                            logRow(for: entry)
                         }
                     }
 
@@ -271,6 +277,275 @@ struct HangarLogView: View {
     }
 
     @ViewBuilder
+    private func logRow(for entry: HangarLogEntry) -> some View {
+        let destination = resolvedDestination(for: entry)
+        let upgradeContext = effectiveUpgradeContext(for: entry, destination: destination)
+
+        switch destination {
+        case let .package(packageGroup, pledgeID):
+            NavigationLink {
+                destinationView(for: .package(packageGroup, pledgeID: pledgeID))
+            } label: {
+                HangarLogRow(
+                    entry: entry,
+                    upgradeContext: upgradeContext,
+                    destinationSummary: destination?.rowSummary
+                )
+            }
+            .onAppear {
+                loadMoreIfNeeded(currentEntry: entry)
+            }
+        case let .ship(shipGroup):
+            NavigationLink {
+                destinationView(for: .ship(shipGroup))
+            } label: {
+                HangarLogRow(
+                    entry: entry,
+                    upgradeContext: upgradeContext,
+                    destinationSummary: destination?.rowSummary
+                )
+            }
+            .matchedTransitionSource(
+                id: shipGroup.id,
+                in: logNavigationNamespace
+            ) { source in
+                source.clipShape(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+            }
+            .onAppear {
+                loadMoreIfNeeded(currentEntry: entry)
+            }
+        case nil:
+            HangarLogRow(
+                entry: entry,
+                upgradeContext: upgradeContext,
+                destinationSummary: nil
+            )
+            .onAppear {
+                loadMoreIfNeeded(currentEntry: entry)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func destinationView(for destination: HangarLogResolvedDestination) -> some View {
+        switch destination {
+        case let .package(packageGroup, _):
+            HangarPackageDetailView(
+                appModel: appModel,
+                packageGroup: packageGroup,
+                reloadToken: appModel.hangarFleetImageReloadToken
+            )
+        case let .ship(shipGroup):
+            FleetShipDetailView(
+                shipGroup: shipGroup,
+                reloadToken: appModel.hangarFleetImageReloadToken,
+                transitionNamespace: logNavigationNamespace
+            )
+        }
+    }
+
+    private func resolvedDestination(for entry: HangarLogEntry) -> HangarLogResolvedDestination? {
+        for pledgeID in navigationPledgeIDs(for: entry) {
+            if let packageGroup = packageGroup(containingPledgeID: pledgeID) {
+                return .package(packageGroup, pledgeID: pledgeID)
+            }
+
+            if let shipGroup = shipGroup(sourcePackageID: pledgeID) {
+                return .ship(shipGroup)
+            }
+        }
+
+        if let packageGroup = packageGroup(matchingTitle: entry.itemName) {
+            return .package(packageGroup, pledgeID: nil)
+        }
+
+        if let shipGroup = shipGroup(matchingName: entry.itemName) {
+            return .ship(shipGroup)
+        }
+
+        return nil
+    }
+
+    private func navigationPledgeIDs(for entry: HangarLogEntry) -> [Int] {
+        let rawIDs: [String?]
+
+        switch entry.action {
+        case .consumed:
+            rawIDs = [entry.sourcePledgeID, entry.targetPledgeID]
+        case .appliedUpgrade:
+            rawIDs = [entry.targetPledgeID, entry.sourcePledgeID]
+        case .created,
+             .reclaimed,
+             .buyback,
+             .gift,
+             .giftClaimed,
+             .giftCancelled,
+             .nameChange,
+             .nameChangeReclaimed,
+             .giveaway,
+             .unknown:
+            rawIDs = [entry.targetPledgeID, entry.sourcePledgeID]
+        }
+
+        var resolvedIDs: [Int] = []
+        for rawID in rawIDs {
+            guard let rawID,
+                  let pledgeID = Int(rawID.trimmingCharacters(in: .whitespacesAndNewlines)),
+                  pledgeID > 0,
+                  !resolvedIDs.contains(pledgeID) else {
+                continue
+            }
+
+            resolvedIDs.append(pledgeID)
+        }
+
+        return resolvedIDs
+    }
+
+    private func effectiveUpgradeContext(
+        for entry: HangarLogEntry,
+        destination: HangarLogResolvedDestination?
+    ) -> HangarLogUpgradeContext? {
+        guard entry.action == .appliedUpgrade else {
+            return nil
+        }
+
+        let fallbackContext = currentUpgradeContext(for: entry, destination: destination)
+            ?? HangarLogUpgradeContext.inferred(from: [entry.reason, entry.itemName])
+
+        if let upgradeContext = entry.upgradeContext {
+            let mergedContext = upgradeContext.merging(with: fallbackContext)
+            return mergedContext.hasDisplayableContext ? mergedContext : nil
+        }
+
+        return fallbackContext?.hasDisplayableContext == true ? fallbackContext : nil
+    }
+
+    private func currentUpgradeContext(
+        for entry: HangarLogEntry,
+        destination: HangarLogResolvedDestination?
+    ) -> HangarLogUpgradeContext? {
+        if case let .ship(shipGroup)? = destination {
+            return HangarLogUpgradeContext(
+                sourceShipName: entry.upgradeContext?.sourceShipName,
+                targetShipName: shipGroup.representative.displayName,
+                upgradeName: entry.reason
+            )
+        }
+
+        guard let package = resolvedPackage(for: entry, destination: destination) else {
+            return nil
+        }
+
+        if let pricing = package.contents.compactMap(\.upgradePricing).first {
+            return HangarLogUpgradeContext(
+                sourceShipName: pricing.sourceShipName,
+                targetShipName: pricing.targetShipName,
+                upgradeName: entry.reason
+            )
+        }
+
+        return HangarLogUpgradeContext(
+            sourceShipName: entry.upgradeContext?.sourceShipName,
+            targetShipName: package.upgradedShipDisplayTitle ?? package.contents.first(where: \.isShipLike)?.title,
+            upgradeName: entry.reason
+        )
+    }
+
+    private func resolvedPackage(
+        for entry: HangarLogEntry,
+        destination: HangarLogResolvedDestination?
+    ) -> HangarPackage? {
+        if case let .package(packageGroup, pledgeID)? = destination {
+            if let pledgeID,
+               let package = packageGroup.packages.first(where: { $0.id == pledgeID }) {
+                return package
+            }
+
+            return packageGroup.representative
+        }
+
+        for pledgeID in navigationPledgeIDs(for: entry) {
+            if let package = currentPackageGroups
+                .flatMap(\.packages)
+                .first(where: { $0.id == pledgeID }) {
+                return package
+            }
+        }
+
+        return nil
+    }
+
+    private func packageGroup(containingPledgeID pledgeID: Int) -> GroupedHangarPackage? {
+        currentPackageGroups.first { packageGroup in
+            packageGroup.packages.contains { package in
+                package.id == pledgeID
+            }
+        }
+    }
+
+    private func shipGroup(sourcePackageID pledgeID: Int) -> GroupedFleetShip? {
+        currentShipGroups.first { shipGroup in
+            shipGroup.ships.contains { ship in
+                ship.sourcePackageID == pledgeID
+            }
+        }
+    }
+
+    private func packageGroup(matchingTitle rawTitle: String) -> GroupedHangarPackage? {
+        let normalizedTitle = normalizedLookupText(rawTitle)
+        guard !normalizedTitle.isEmpty else {
+            return nil
+        }
+
+        return currentPackageGroups.first { packageGroup in
+            packageGroup.packages.contains { package in
+                normalizedLookupText(package.title) == normalizedTitle
+                    || package.contents.contains { item in
+                        normalizedLookupText(item.title) == normalizedTitle
+                    }
+            }
+        }
+    }
+
+    private func shipGroup(matchingName rawName: String) -> GroupedFleetShip? {
+        let normalizedName = normalizedLookupText(rawName)
+        guard !normalizedName.isEmpty else {
+            return nil
+        }
+
+        return currentShipGroups.first { shipGroup in
+            shipGroup.ships.contains { ship in
+                let shipName = normalizedLookupText(ship.displayName)
+                return lookupTextsMatch(shipName, normalizedName)
+            }
+        }
+    }
+
+    private func lookupTextsMatch(_ lhs: String, _ rhs: String) -> Bool {
+        guard !lhs.isEmpty, !rhs.isEmpty else {
+            return false
+        }
+
+        if lhs == rhs {
+            return true
+        }
+
+        let shorterText = lhs.count <= rhs.count ? lhs : rhs
+        let longerText = lhs.count > rhs.count ? lhs : rhs
+        return shorterText.count > 3 && longerText.contains(shorterText)
+    }
+
+    private func normalizedLookupText(_ value: String) -> String {
+        value
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .localizedLowercase
+    }
+
+    @ViewBuilder
     private func filterChip(title: String, systemImage: String) -> some View {
         Label(title, systemImage: systemImage)
             .font(.subheadline.weight(.medium))
@@ -288,7 +563,30 @@ struct HangarLogView: View {
             return true
         }
 
-        return entry.searchableText.localizedLowercase.contains(searchText.localizedLowercase)
+        let normalizedSearchText = searchText.localizedLowercase
+
+        if entry.searchableText.localizedLowercase.contains(normalizedSearchText) {
+            return true
+        }
+
+        return enrichedSearchableText(for: entry).localizedLowercase.contains(normalizedSearchText)
+    }
+
+    private func enrichedSearchableText(for entry: HangarLogEntry) -> String {
+        let destination = resolvedDestination(for: entry)
+        let upgradeContext = effectiveUpgradeContext(for: entry, destination: destination)
+        let components = [
+            upgradeContext?.sourceShipName,
+            upgradeContext?.targetShipName,
+            upgradeContext?.upgradeName,
+            upgradeContext?.summaryText,
+            destination?.searchableText
+        ]
+
+        return components
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private func matchesActionFilter(_ entry: HangarLogEntry) -> Bool {
@@ -371,8 +669,50 @@ struct HangarLogView: View {
     }
 }
 
+private enum HangarLogResolvedDestination {
+    case package(GroupedHangarPackage, pledgeID: Int?)
+    case ship(GroupedFleetShip)
+
+    var rowSummary: String {
+        switch self {
+        case let .package(packageGroup, pledgeID?):
+            if packageGroup.containsMultipleCopies {
+                return AppLocalizer.format("Opens package group with pledge #%lld", pledgeID)
+            }
+
+            return AppLocalizer.format("Opens current pledge #%lld", pledgeID)
+        case .package:
+            return AppLocalizer.string("Opens current package")
+        case let .ship(shipGroup):
+            return AppLocalizer.format("Opens current ship %@", shipGroup.representative.displayName)
+        }
+    }
+
+    var searchableText: String {
+        switch self {
+        case let .package(packageGroup, _):
+            return packageGroup.packages
+                .flatMap { package in
+                    [
+                        package.title,
+                        package.status,
+                        package.searchableInsuranceText,
+                        package.contents.map(\.title).joined(separator: " ")
+                    ]
+                }
+                .joined(separator: " ")
+        case let .ship(shipGroup):
+            return shipGroup.ships
+                .map(\.searchHaystack)
+                .joined(separator: " ")
+        }
+    }
+}
+
 private struct HangarLogRow: View {
     let entry: HangarLogEntry
+    let upgradeContext: HangarLogUpgradeContext?
+    let destinationSummary: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -448,10 +788,14 @@ private struct HangarLogRow: View {
             return joined(parts)
         case .appliedUpgrade:
             var parts: [String] = []
+            if let upgradeSummary = upgradeContext?.summaryText {
+                parts.append(upgradeSummary)
+            }
             if let sourcePledgeID = entry.sourcePledgeID {
                 parts.append("Upgrade from pledge #\(sourcePledgeID)")
             }
-            if let reason = entry.reason {
+            if upgradeContext?.summaryText == nil,
+               let reason = entry.reason {
                 parts.append(reason)
             }
             if let priceUSD = entry.priceUSD {
@@ -502,7 +846,8 @@ private struct HangarLogRow: View {
     private var metadataText: String? {
         let parts = [
             entry.targetPledgeID.map { "Target #\($0)" },
-            entry.sourcePledgeID.map { "Source #\($0)" }
+            entry.sourcePledgeID.map { "Source #\($0)" },
+            destinationSummary
         ]
         .compactMap { $0 }
 

@@ -1820,7 +1820,7 @@ private struct FleetShipCompactCard: View {
     }
 }
 
-private struct FleetShipDetailView: View {
+struct FleetShipDetailView: View {
     let shipGroup: GroupedFleetShip
     let reloadToken: UUID?
     let transitionNamespace: Namespace.ID

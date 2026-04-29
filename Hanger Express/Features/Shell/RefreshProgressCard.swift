@@ -109,6 +109,51 @@ struct ConcurrentRefreshProgressStrip: View {
     }
 }
 
+struct RefreshPresentationInset: View {
+    let presentation: AppModel.RefreshPresentation
+    let transientBanner: AppModel.TransientBanner?
+
+    var body: some View {
+        if transientBanner != nil || presentation.isVisible {
+            VStack(spacing: 8) {
+                if let transientBanner {
+                    TransientBannerView(banner: transientBanner)
+                        .padding(.horizontal)
+                        .padding(.top, 8)
+                }
+
+                if !presentation.concurrentEntries.isEmpty {
+                    ConcurrentRefreshProgressStrip(
+                        entries: presentation.concurrentEntries,
+                        compact: true
+                    )
+                    .padding(.horizontal)
+                } else if let progress = presentation.progress {
+                    Group {
+                        if presentation.indicatorStyle == .compactTopLeading {
+                            HStack {
+                                MinimalRefreshProgressView(progress: progress)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.top, 4)
+                        } else {
+                            RefreshProgressCard(progress: progress, compact: true)
+                                .padding(.horizontal)
+                                .padding(.top, 8)
+                        }
+                    }
+                }
+            }
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .animation(.snappy, value: presentation.progress)
+            .animation(.snappy, value: presentation.concurrentEntries)
+            .animation(.snappy, value: transientBanner)
+            .animation(.snappy, value: presentation.indicatorStyle == .compactTopLeading)
+        }
+    }
+}
+
 private struct ConcurrentRefreshProgressTile: View {
     let entry: AppModel.ConcurrentRefreshEntry
     let compact: Bool
@@ -135,7 +180,7 @@ private struct ConcurrentRefreshProgressTile: View {
             }
 
             if entry.isComplete {
-                Text(AppLocalizer.format("%@ complete.", entry.area.title))
+                Text(entry.area.syncReadyMessage)
                     .font(compact ? .caption2 : .caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(compact ? 2 : 3)
@@ -170,7 +215,7 @@ private struct ConcurrentRefreshProgressTile: View {
     }
 
     private var statusText: String {
-        entry.isComplete ? AppLocalizer.string("Complete") : entry.progress.stage.title
+        entry.isComplete ? AppLocalizer.string("Ready") : entry.progress.stage.title
     }
 
     @ViewBuilder
@@ -182,18 +227,6 @@ private struct ConcurrentRefreshProgressTile: View {
                 .tint(.blue)
                 .controlSize(compact ? .small : .regular)
         }
-    }
-}
-
-private extension RefreshProgress {
-    var displayFractionCompleted: Double? {
-        guard let baseFraction = fractionCompleted, stepCount > 0 else {
-            return fractionCompleted
-        }
-
-        let boundedStep = min(max(stepNumber, 1), stepCount)
-        let boundedStepFraction = min(max(baseFraction, 0), 1)
-        return (Double(boundedStep - 1) + boundedStepFraction) / Double(stepCount)
     }
 }
 
@@ -247,7 +280,11 @@ private struct SmoothLinearProgressBar: View {
 
     private func animationDuration(from oldValue: Double, to newValue: Double) -> TimeInterval {
         let delta = abs(newValue - oldValue)
-        return min(max(0.35, 0.35 + delta * 0.85), 0.95)
+        if newValue >= 0.995 {
+            return min(max(0.12, delta * 0.3), 0.24)
+        }
+
+        return min(max(0.18, 0.18 + delta * 0.45), 0.45)
     }
 }
 

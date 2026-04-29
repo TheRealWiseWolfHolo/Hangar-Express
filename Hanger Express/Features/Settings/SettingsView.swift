@@ -1,3 +1,4 @@
+import StoreKit
 import SwiftUI
 
 struct SettingsView: View {
@@ -288,7 +289,7 @@ private struct ProSubscriptionSection: View {
                         .foregroundStyle(.red)
                 }
 
-                HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 10) {
                     if subscriptionStore.isPro {
                         Button("Restore Purchases") {
                             Task {
@@ -297,13 +298,34 @@ private struct ProSubscriptionSection: View {
                         }
                         .buttonStyle(.bordered)
                     } else {
-                        Button(primaryButtonTitle) {
-                            Task {
-                                await subscriptionStore.purchasePro()
+                        if subscriptionStore.proProducts.isEmpty {
+                            Button(primaryButtonTitle) {
+                                Task {
+                                    await subscriptionStore.purchasePro()
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(statusIsBusy || subscriptionStore.isLoadingProducts)
+                        } else {
+                            ForEach(subscriptionStore.proProducts, id: \.id) { product in
+                                Button {
+                                    Task {
+                                        await subscriptionStore.purchasePro(productID: product.id)
+                                    }
+                                } label: {
+                                    HStack {
+                                        Text(planTitle(for: product))
+
+                                        Spacer(minLength: 12)
+
+                                        Text(product.displayPrice)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(statusIsBusy)
                             }
                         }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(statusIsBusy || subscriptionStore.isLoadingProducts)
 
                         Button("Restore") {
                             Task {
@@ -328,6 +350,17 @@ private struct ProSubscriptionSection: View {
         }
 
         return AppLocalizer.format("Subscribe %@", subscriptionStore.proPriceLabel)
+    }
+
+    private func planTitle(for product: Product) -> String {
+        switch product.id {
+        case ProSubscriptionConfiguration.monthlyProductID:
+            return AppLocalizer.string("Subscribe Monthly")
+        case ProSubscriptionConfiguration.yearlyProductID:
+            return AppLocalizer.string("Subscribe Yearly")
+        default:
+            return AppLocalizer.string("Subscribe")
+        }
     }
 
     private var statusMessage: String? {
