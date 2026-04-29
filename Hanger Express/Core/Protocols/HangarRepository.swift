@@ -38,6 +38,8 @@ nonisolated struct RefreshProgress: Hashable, Sendable {
     let totalUnitCount: Int?
     let trackerID: String?
     let trackerTitle: String?
+    let displayStartFraction: Double?
+    let displayEndFraction: Double?
 
     init(
         stage: RefreshStage,
@@ -47,7 +49,9 @@ nonisolated struct RefreshProgress: Hashable, Sendable {
         completedUnitCount: Int,
         totalUnitCount: Int?,
         trackerID: String? = nil,
-        trackerTitle: String? = nil
+        trackerTitle: String? = nil,
+        displayStartFraction: Double? = nil,
+        displayEndFraction: Double? = nil
     ) {
         self.stage = stage
         self.stepNumber = stepNumber
@@ -57,6 +61,8 @@ nonisolated struct RefreshProgress: Hashable, Sendable {
         self.totalUnitCount = totalUnitCount
         self.trackerID = trackerID
         self.trackerTitle = trackerTitle
+        self.displayStartFraction = displayStartFraction
+        self.displayEndFraction = displayEndFraction
     }
 
     var fractionCompleted: Double? {
@@ -66,6 +72,29 @@ nonisolated struct RefreshProgress: Hashable, Sendable {
 
         let boundedCompletedUnits = min(max(completedUnitCount, 0), totalUnitCount)
         return Double(boundedCompletedUnits) / Double(totalUnitCount)
+    }
+
+    var displayFractionCompleted: Double? {
+        if let displayStartFraction,
+           let displayEndFraction {
+            let startFraction = min(max(displayStartFraction, 0), 1)
+            let endFraction = min(max(displayEndFraction, startFraction), 1)
+
+            guard let baseFraction = fractionCompleted else {
+                return startFraction
+            }
+
+            let boundedBaseFraction = min(max(baseFraction, 0), 1)
+            return startFraction + (endFraction - startFraction) * boundedBaseFraction
+        }
+
+        guard let baseFraction = fractionCompleted, stepCount > 0 else {
+            return fractionCompleted
+        }
+
+        let boundedStep = min(max(stepNumber, 1), stepCount)
+        let boundedStepFraction = min(max(baseFraction, 0), 1)
+        return (Double(boundedStep - 1) + boundedStepFraction) / Double(stepCount)
     }
 
     var stepLabel: String {

@@ -352,8 +352,13 @@ struct PreviewHangarRepository: HangarRepository {
             sourcePledgeID: "1002",
             targetPledgeID: "1003",
             orderCode: nil,
-            reason: "Zeus MR upgrade",
-            rawText: "#1003 - Upgrade applied: #1002 Zeus MR upgrade, new value: $190.00 USD"
+            reason: "Cutlass Black to Zeus Mk II MR CCU",
+            rawText: "#1003 - Upgrade applied: #1002 Cutlass Black to Zeus Mk II MR CCU, new value: $190.00 USD",
+            upgradeContext: HangarLogUpgradeContext(
+                sourceShipName: "Cutlass Black",
+                targetShipName: "Zeus Mk II MR",
+                upgradeName: "Cutlass Black to Zeus Mk II MR"
+            )
         ),
         HangarLogEntry(
             id: "preview-gift-1004",

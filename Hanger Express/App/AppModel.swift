@@ -32,6 +32,110 @@ enum DisplayPreferences {
 }
 
 @MainActor
+private final class RefreshProgressDisplayRelay {
+    private static let displayCadenceNanoseconds: UInt64 = 80_000_000
+    private static let regressionTolerance = 0.0001
+
+    private struct ProgressKey: Hashable {
+        let rawValue: String
+
+        init(_ progress: RefreshProgress) {
+            rawValue = progress.trackerID.map { "tracker:\($0)" } ?? "single"
+        }
+    }
+
+    private let apply: (RefreshProgress) -> Void
+    private var pendingProgress: [ProgressKey: RefreshProgress] = [:]
+    private var pendingProgressKeys: [ProgressKey] = []
+    private var displayedFractions: [ProgressKey: Double] = [:]
+    private var displayTask: Task<Void, Never>?
+    private var isCancelled = false
+
+    init(apply: @escaping (RefreshProgress) -> Void) {
+        self.apply = apply
+    }
+
+    func submit(_ progress: RefreshProgress) {
+        guard !isCancelled else {
+            return
+        }
+
+        let key = ProgressKey(progress)
+        guard shouldAccept(progress, for: key) else {
+            return
+        }
+
+        if pendingProgress[key] == nil {
+            pendingProgressKeys.append(key)
+        }
+        pendingProgress[key] = progress
+
+        guard displayTask == nil else {
+            return
+        }
+
+        displayTask = Task { [weak self] in
+            await self?.drain()
+        }
+    }
+
+    func cancel() {
+        isCancelled = true
+        pendingProgress.removeAll()
+        pendingProgressKeys.removeAll()
+        displayedFractions.removeAll()
+        displayTask?.cancel()
+        displayTask = nil
+    }
+
+    private func drain() async {
+        while !Task.isCancelled {
+            guard !pendingProgress.isEmpty, !isCancelled else {
+                displayTask = nil
+                return
+            }
+
+            let progressBatch = pendingProgressKeys.compactMap { key -> (ProgressKey, RefreshProgress)? in
+                guard let progress = pendingProgress[key] else {
+                    return nil
+                }
+
+                return (key, progress)
+            }
+            pendingProgress.removeAll(keepingCapacity: true)
+            pendingProgressKeys.removeAll(keepingCapacity: true)
+
+            for (key, progress) in progressBatch {
+                if let displayFraction = progress.displayFractionCompleted {
+                    displayedFractions[key] = max(displayedFractions[key] ?? displayFraction, displayFraction)
+                }
+                apply(progress)
+            }
+
+            try? await Task.sleep(nanoseconds: Self.displayCadenceNanoseconds)
+        }
+    }
+
+    private func shouldAccept(_ progress: RefreshProgress, for key: ProgressKey) -> Bool {
+        guard let incomingFraction = progress.displayFractionCompleted else {
+            return true
+        }
+
+        if let pendingFraction = pendingProgress[key]?.displayFractionCompleted,
+           pendingFraction - incomingFraction > Self.regressionTolerance {
+            return false
+        }
+
+        if let displayedFraction = displayedFractions[key],
+           displayedFraction - incomingFraction > Self.regressionTolerance {
+            return false
+        }
+
+        return true
+    }
+}
+
+@MainActor
 @Observable
 final class AppModel {
     struct AuthenticationDraft {
@@ -85,6 +189,17 @@ final class AppModel {
                     return AppLocalizer.string("Buy Back")
                 case .account:
                     return AppLocalizer.string("Account")
+                }
+            }
+
+            var syncReadyMessage: String {
+                switch self {
+                case .hangar:
+                    return AppLocalizer.string("Hangar sync is ready.")
+                case .buyback:
+                    return AppLocalizer.string("Buyback sync is ready.")
+                case .account:
+                    return AppLocalizer.string("Account sync is ready.")
                 }
             }
         }
@@ -149,17 +264,26 @@ final class AppModel {
         case compactTopLeading
     }
 
+    @Observable
+    final class RefreshPresentation {
+        var progress: RefreshProgress?
+        var concurrentEntries: [ConcurrentRefreshEntry] = []
+        var indicatorStyle: RefreshIndicatorStyle = .standardCard
+
+        var isVisible: Bool {
+            progress != nil || !concurrentEntries.isEmpty
+        }
+    }
+
     var selectedTab: Tab = .hangar
     var session: UserSession?
     var savedSessions: [UserSession] = []
     var loadState: LoadState = .idle
     var lastRefreshAt: Date?
-    var refreshProgress: RefreshProgress?
-    var concurrentRefreshEntries: [ConcurrentRefreshEntry] = []
     var lastRefreshErrorMessage: String?
     var lastRefreshErrorScope: RefreshScope?
     var activeRefreshScope: RefreshScope?
-    var refreshIndicatorStyle: RefreshIndicatorStyle = .standardCard
+    let refreshPresentation = RefreshPresentation()
     var hangarFleetImageReloadToken = UUID()
     var buybackImageReloadToken = UUID()
     var accountImageReloadToken = UUID()
@@ -194,6 +318,7 @@ final class AppModel {
     private static let buybackCheckoutPreparationTimeoutSeconds = 30
     private static let authorizedDevicesRequestTimeoutSeconds = 20
     private static let actionCompletionBannerDurationNanoseconds: UInt64 = 2_000_000_000
+    private static let postRefreshImageInvalidationDelayNanoseconds: UInt64 = 250_000_000
 
     init(environment: AppEnvironment) {
         sessionStore = environment.sessionStore
@@ -219,6 +344,21 @@ final class AppModel {
 
     var isRefreshing: Bool {
         activeRefreshScope != nil
+    }
+
+    var refreshProgress: RefreshProgress? {
+        get { refreshPresentation.progress }
+        set { refreshPresentation.progress = newValue }
+    }
+
+    var concurrentRefreshEntries: [ConcurrentRefreshEntry] {
+        get { refreshPresentation.concurrentEntries }
+        set { refreshPresentation.concurrentEntries = newValue }
+    }
+
+    var refreshIndicatorStyle: RefreshIndicatorStyle {
+        get { refreshPresentation.indicatorStyle }
+        set { refreshPresentation.indicatorStyle = newValue }
     }
 
     var isPro: Bool {
@@ -482,6 +622,12 @@ final class AppModel {
         concurrentRefreshEntries = initialConcurrentRefreshEntries(for: session, scope: resolvedScope)
         refreshProgress = concurrentRefreshEntries.isEmpty ? initialProgress(for: session, scope: resolvedScope) : nil
         beginRefreshDiagnostics(for: resolvedScope, session: session)
+        let progressRelay = RefreshProgressDisplayRelay { [weak self] progress in
+            self?.applyIncomingRefreshProgress(progress)
+        }
+        defer {
+            progressRelay.cancel()
+        }
 
         do {
             let snapshot: HangarSnapshot
@@ -489,7 +635,8 @@ final class AppModel {
                 refreshProgress = nil
                 snapshot = try await refreshFullSnapshotConcurrently(
                     for: session,
-                    existingSnapshot: existingSnapshot
+                    existingSnapshot: existingSnapshot,
+                    progressRelay: progressRelay
                 )
             } else {
                 snapshot = try await refreshedSnapshot(
@@ -497,25 +644,23 @@ final class AppModel {
                     existingSnapshot: existingSnapshot,
                     scope: resolvedScope,
                     affectedPledgeIDs: affectedPledgeIDs
-                ) { [weak self] progress in
-                    self?.concurrentRefreshEntries = []
-                    self?.refreshProgress = progress
+                ) { progress in
+                    progressRelay.submit(progress)
                 }
             }
-            await snapshotStore.save(snapshot, for: session)
-            lastRefreshAt = snapshot.lastSyncedAt
-            loadState = .loaded(snapshot)
-            lastRefreshErrorMessage = nil
-            lastRefreshErrorScope = nil
-            refreshDiagnostics.record(
-                stage: "refresh.complete",
-                summary: "\(refreshScopeDisplayName(resolvedScope)) refresh finished successfully."
+
+            completeVisibleRefresh(
+                snapshot,
+                diagnosticsStage: "refresh.complete",
+                diagnosticsSummary: "\(refreshScopeDisplayName(resolvedScope)) refresh finished successfully."
             )
-            await invalidateImageCache(
+            persistSnapshotInBackground(snapshot, for: session)
+            schedulePostRefreshImageInvalidation(
                 for: resolvedScope,
                 previousSnapshot: existingSnapshot,
                 refreshedSnapshot: snapshot
             )
+            return
         } catch {
             if await handleReauthenticationIfNeeded(
                 for: error,
@@ -542,9 +687,51 @@ final class AppModel {
             }
         }
 
+        clearRefreshPresentation()
+    }
+
+    private func completeVisibleRefresh(
+        _ snapshot: HangarSnapshot,
+        diagnosticsStage: String,
+        diagnosticsSummary: String
+    ) {
+        lastRefreshAt = snapshot.lastSyncedAt
+        loadState = .loaded(snapshot)
+        lastRefreshErrorMessage = nil
+        lastRefreshErrorScope = nil
+        clearRefreshPresentation()
+        refreshDiagnostics.record(
+            stage: diagnosticsStage,
+            summary: diagnosticsSummary
+        )
+    }
+
+    private func clearRefreshPresentation() {
         refreshProgress = nil
         concurrentRefreshEntries = []
         activeRefreshScope = nil
+    }
+
+    private func persistSnapshotInBackground(_ snapshot: HangarSnapshot, for session: UserSession) {
+        let snapshotStore = snapshotStore
+        Task.detached(priority: .utility) {
+            await snapshotStore.save(snapshot, for: session)
+        }
+    }
+
+    private func schedulePostRefreshImageInvalidation(
+        for scope: RefreshScope,
+        previousSnapshot: HangarSnapshot?,
+        refreshedSnapshot: HangarSnapshot
+    ) {
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.postRefreshImageInvalidationDelayNanoseconds)
+            await self?.invalidateImageCache(
+                for: scope,
+                previousSnapshot: previousSnapshot,
+                refreshedSnapshot: refreshedSnapshot
+            )
+        }
     }
 
     func dismissRefreshError() {
@@ -1166,10 +1353,7 @@ final class AppModel {
         loadState = .loaded(optimisticSnapshot)
         lastRefreshErrorMessage = nil
         lastRefreshErrorScope = nil
-
-        Task {
-            await snapshotStore.save(optimisticSnapshot, for: session)
-        }
+        persistSnapshotInBackground(optimisticSnapshot, for: session)
     }
 
     private func reconcileSuccessfulHangarAction(
@@ -1233,10 +1417,6 @@ final class AppModel {
             guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
                 return
             }
-            await snapshotStore.save(refreshedSnapshot, for: session)
-            guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
-                return
-            }
             lastRefreshAt = refreshedSnapshot.lastSyncedAt
             loadState = .loaded(refreshedSnapshot)
             lastRefreshErrorMessage = nil
@@ -1245,7 +1425,8 @@ final class AppModel {
                 stage: "refresh.hangar.background-complete",
                 summary: "The background post-action hangar refresh finished successfully."
             )
-            await invalidateImageCache(
+            persistSnapshotInBackground(refreshedSnapshot, for: session)
+            schedulePostRefreshImageInvalidation(
                 for: .hangar,
                 previousSnapshot: displayedSnapshot,
                 refreshedSnapshot: refreshedSnapshot
@@ -1282,6 +1463,12 @@ final class AppModel {
         updatesVisibleProgress: Bool
     ) async -> Bool {
         var logSnapshot = existingSnapshot
+        let progressRelay = RefreshProgressDisplayRelay { [weak self] progress in
+            self?.applyIncomingRefreshProgress(progress)
+        }
+        defer {
+            progressRelay.cancel()
+        }
 
         for attempt in 1 ... 3 {
             guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
@@ -1312,18 +1499,14 @@ final class AppModel {
                     for: session,
                     existingSnapshot: logSnapshot,
                     scope: .hangarLog
-                ) { [weak self] progress in
+                ) { progress in
                     guard updatesVisibleProgress else {
                         return
                     }
 
-                    self?.refreshProgress = progress
+                    progressRelay.submit(progress)
                 }
 
-                guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
-                    return false
-                }
-                await snapshotStore.save(refreshedSnapshot, for: session)
                 guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else {
                     return false
                 }
@@ -1337,6 +1520,7 @@ final class AppModel {
                     detail: "attempt=\(attempt), cachedLogCount=\(refreshedSnapshot.hangarLogs.count)"
                 )
                 logSnapshot = refreshedSnapshot
+                persistSnapshotInBackground(refreshedSnapshot, for: session)
             } catch {
                 if await handleReauthenticationIfNeeded(
                     for: error,
@@ -1617,10 +1801,11 @@ final class AppModel {
 
     private func refreshFullSnapshotConcurrently(
         for session: UserSession,
-        existingSnapshot: HangarSnapshot?
+        existingSnapshot: HangarSnapshot?,
+        progressRelay: RefreshProgressDisplayRelay
     ) async throws -> HangarSnapshot {
-        let refreshedSnapshot = try await hangarRepository.fetchSnapshot(for: session) { [weak self] progress in
-            self?.applyIncomingRefreshProgress(progress)
+        let refreshedSnapshot = try await hangarRepository.fetchSnapshot(for: session) { progress in
+            progressRelay.submit(progress)
         }
 
         guard refreshedSnapshot.hangarLogs.isEmpty,
@@ -1657,8 +1842,12 @@ final class AppModel {
             session: session,
             context: AppLocalizer.string("Loading older hangar log entries from RSI.")
         )
+        let progressRelay = RefreshProgressDisplayRelay { [weak self] progress in
+            self?.applyIncomingRefreshProgress(progress)
+        }
 
         defer {
+            progressRelay.cancel()
             refreshProgress = nil
             concurrentRefreshEntries = []
             activeRefreshScope = nil
@@ -1669,20 +1858,17 @@ final class AppModel {
                 for: session,
                 from: existingSnapshot,
                 mode: .expanded
-            ) { [weak self] progress in
-                self?.concurrentRefreshEntries = []
-                self?.refreshProgress = progress
+            ) { progress in
+                progressRelay.submit(progress)
             }
 
-            await snapshotStore.save(refreshedSnapshot, for: session)
-            lastRefreshAt = refreshedSnapshot.lastSyncedAt
-            loadState = .loaded(refreshedSnapshot)
-            lastRefreshErrorMessage = nil
-            lastRefreshErrorScope = nil
-            refreshDiagnostics.record(
-                stage: "refresh.hangar-log.expanded",
-                summary: "Loaded additional hangar log history from RSI."
+            completeVisibleRefresh(
+                refreshedSnapshot,
+                diagnosticsStage: "refresh.hangar-log.expanded",
+                diagnosticsSummary: "Loaded additional hangar log history from RSI."
             )
+            persistSnapshotInBackground(refreshedSnapshot, for: session)
+            return
         } catch {
             if await handleReauthenticationIfNeeded(
                 for: error,
@@ -1733,7 +1919,7 @@ final class AppModel {
                 stage: .finalizing,
                 stepNumber: max(progress.stepNumber, progress.stepCount),
                 stepCount: progress.stepCount,
-                detail: AppLocalizer.string("Saving the refreshed hangar, buy-back, and account snapshot."),
+                detail: AppLocalizer.string("Hangar, buyback, and account syncs are ready."),
                 completedUnitCount: 0,
                 totalUnitCount: nil
             )

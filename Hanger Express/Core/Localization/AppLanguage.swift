@@ -5,11 +5,11 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     case english
     case simplifiedChinese
 
-    static let storageKey = "app.language"
+    nonisolated static let storageKey = "app.language"
 
     var id: Self { self }
 
-    var locale: Locale {
+    nonisolated var locale: Locale {
         switch self {
         case .system:
             return .autoupdatingCurrent
@@ -20,7 +20,7 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         }
     }
 
-    var bundleLocalizationIdentifier: String? {
+    nonisolated var bundleLocalizationIdentifier: String? {
         switch self {
         case .system:
             return nil
@@ -54,7 +54,7 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         }
     }
 
-    static func resolved(from rawValue: String) -> AppLanguage {
+    nonisolated static func resolved(from rawValue: String) -> AppLanguage {
         AppLanguage(rawValue: rawValue) ?? .system
     }
 }

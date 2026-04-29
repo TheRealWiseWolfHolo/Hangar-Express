@@ -588,7 +588,7 @@ struct HangarSnapshot: Hashable, Sendable, Codable {
     }
 }
 
-enum HangarLogAction: String, Hashable, Sendable, Codable, CaseIterable, Identifiable {
+nonisolated enum HangarLogAction: String, Hashable, Sendable, Codable, CaseIterable, Identifiable {
     case created = "CREATED"
     case reclaimed = "RECLAIMED"
     case consumed = "CONSUMED"
@@ -636,7 +636,133 @@ enum HangarLogAction: String, Hashable, Sendable, Codable, CaseIterable, Identif
     }
 }
 
-struct HangarLogEntry: Hashable, Sendable, Codable, Identifiable {
+nonisolated struct HangarLogUpgradeContext: Hashable, Sendable, Codable {
+    let sourceShipName: String?
+    let targetShipName: String?
+    let upgradeName: String?
+
+    init(
+        sourceShipName: String?,
+        targetShipName: String?,
+        upgradeName: String? = nil
+    ) {
+        self.sourceShipName = Self.trimmedNilIfEmpty(sourceShipName)
+        self.targetShipName = Self.trimmedNilIfEmpty(targetShipName)
+        self.upgradeName = Self.trimmedNilIfEmpty(upgradeName)
+    }
+
+    var hasDisplayableContext: Bool {
+        sourceShipName != nil || targetShipName != nil || upgradeName != nil
+    }
+
+    var summaryText: String? {
+        if let sourceShipName, let targetShipName {
+            return "\(sourceShipName) to \(targetShipName)"
+        }
+
+        if let targetShipName {
+            return AppLocalizer.format("Upgraded to %@", targetShipName)
+        }
+
+        if let sourceShipName {
+            return AppLocalizer.format("Upgraded from %@", sourceShipName)
+        }
+
+        return upgradeName
+    }
+
+    func merging(with fallback: HangarLogUpgradeContext?) -> HangarLogUpgradeContext {
+        HangarLogUpgradeContext(
+            sourceShipName: sourceShipName ?? fallback?.sourceShipName,
+            targetShipName: targetShipName ?? fallback?.targetShipName,
+            upgradeName: upgradeName ?? fallback?.upgradeName
+        )
+    }
+
+    static func inferred(from candidates: [String?]) -> HangarLogUpgradeContext? {
+        var fallbackContext: HangarLogUpgradeContext?
+
+        for candidate in candidates {
+            guard let inferredContext = inferred(from: candidate) else {
+                continue
+            }
+
+            if inferredContext.sourceShipName != nil || inferredContext.targetShipName != nil {
+                return inferredContext
+            }
+
+            fallbackContext = fallbackContext ?? inferredContext
+        }
+
+        return fallbackContext
+    }
+
+    static func inferred(from candidate: String?) -> HangarLogUpgradeContext? {
+        guard let rawCandidate = trimmedNilIfEmpty(candidate) else {
+            return nil
+        }
+
+        let upgradeName = normalizedUpgradeName(from: rawCandidate)
+        guard let path = upgradePath(from: upgradeName) else {
+            return HangarLogUpgradeContext(
+                sourceShipName: nil,
+                targetShipName: nil,
+                upgradeName: upgradeName
+            )
+        }
+
+        return HangarLogUpgradeContext(
+            sourceShipName: path.source,
+            targetShipName: path.target,
+            upgradeName: upgradeName
+        )
+    }
+
+    private static func normalizedUpgradeName(from rawValue: String) -> String {
+        var normalizedValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        normalizedValue = normalizedValue.replacingOccurrences(
+            of: #"(?i)^\s*(?:ship\s+)?upgrade\s*[-:]\s*"#,
+            with: "",
+            options: .regularExpression
+        )
+        normalizedValue = normalizedValue.replacingOccurrences(
+            of: #"(?i)\s+(?:ccu|upgrade)\s*$"#,
+            with: "",
+            options: .regularExpression
+        )
+        return normalizedValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func upgradePath(from rawValue: String) -> (source: String, target: String)? {
+        guard let expression = try? NSRegularExpression(pattern: #"(?i)^(.+?)\s+\bto\b\s+(.+)$"#) else {
+            return nil
+        }
+
+        let range = NSRange(rawValue.startIndex ..< rawValue.endIndex, in: rawValue)
+        guard let match = expression.firstMatch(in: rawValue, options: [], range: range),
+              match.numberOfRanges == 3,
+              let sourceRange = Range(match.range(at: 1), in: rawValue),
+              let targetRange = Range(match.range(at: 2), in: rawValue) else {
+            return nil
+        }
+
+        let source = String(rawValue[sourceRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let target = String(rawValue[targetRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !source.isEmpty, !target.isEmpty else {
+            return nil
+        }
+
+        return (source, target)
+    }
+
+    private static func trimmedNilIfEmpty(_ value: String?) -> String? {
+        let trimmedValue = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedValue.isEmpty ? nil : trimmedValue
+    }
+}
+
+nonisolated struct HangarLogEntry: Hashable, Sendable, Codable, Identifiable {
     let id: String
     let occurredAt: Date
     let action: HangarLogAction
@@ -648,6 +774,35 @@ struct HangarLogEntry: Hashable, Sendable, Codable, Identifiable {
     let orderCode: String?
     let reason: String?
     let rawText: String
+    let upgradeContext: HangarLogUpgradeContext?
+
+    init(
+        id: String,
+        occurredAt: Date,
+        action: HangarLogAction,
+        itemName: String,
+        operatorName: String?,
+        priceUSD: Decimal?,
+        sourcePledgeID: String?,
+        targetPledgeID: String?,
+        orderCode: String?,
+        reason: String?,
+        rawText: String,
+        upgradeContext: HangarLogUpgradeContext? = nil
+    ) {
+        self.id = id
+        self.occurredAt = occurredAt
+        self.action = action
+        self.itemName = itemName
+        self.operatorName = operatorName
+        self.priceUSD = priceUSD
+        self.sourcePledgeID = sourcePledgeID
+        self.targetPledgeID = targetPledgeID
+        self.orderCode = orderCode
+        self.reason = reason
+        self.rawText = rawText
+        self.upgradeContext = upgradeContext?.hasDisplayableContext == true ? upgradeContext : nil
+    }
 
     var actionTitle: String {
         action.title
@@ -663,6 +818,9 @@ struct HangarLogEntry: Hashable, Sendable, Codable, Identifiable {
             sourcePledgeID,
             targetPledgeID,
             reason,
+            upgradeContext?.sourceShipName,
+            upgradeContext?.targetShipName,
+            upgradeContext?.upgradeName,
             rawText,
             occurredAt.formatted(date: .abbreviated, time: .shortened)
         ]
@@ -1512,7 +1670,7 @@ private extension FleetShip {
     }
 }
 
-struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
+nonisolated struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
     let id: Int
     let title: String
     let recoveredValueUSD: Decimal
@@ -1652,7 +1810,7 @@ struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
     }
 }
 
-struct BuybackUpgradeContext: Hashable, Sendable, Codable {
+nonisolated struct BuybackUpgradeContext: Hashable, Sendable, Codable {
     let fromShipID: Int
     let toShipID: Int
     let toSkuID: Int
