@@ -1,0 +1,15 @@
+name: Repo Hygiene
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  repo-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run repository hygiene checks
+        run: ./scripts/check_repo_hygiene.sh

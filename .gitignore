@@ -1,0 +1,36 @@
+.DS_Store
+
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+
+# Build products
+DerivedData/
+.build/
+
+# Distribution/export artifacts
+*.ipa
+*.xcarchive
+*.xcarchive/
+Packaging.log
+DistributionSummary.plist
+ExportOptions.plist
+*.mobileprovision
+embedded.mobileprovision
+
+# Sensitive signing material
+*.p12
+*.p8
+*.pem
+*.key
+*.cer
+*.crt
+
+# Swift Package Manager
+.swiftpm/
+
+# Node / Cloudflare Workers
+node_modules/
+.dev.vars
