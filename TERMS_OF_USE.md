@@ -18,23 +18,25 @@ You are responsible for:
 - keeping your device, Apple Account, RSI account, password, and recovery methods secure;
 - reviewing RSI pages and confirmations before completing account or pledge actions;
 - complying with Apple, RSI, Cloud Imperium, and applicable local requirements; and
-- making sure any information you provide to support does not include passwords, cookies, payment details, or other sensitive secrets.
+- making sure any information you provide to the developer does not include passwords, cookies, payment details, or other sensitive secrets.
 
 ## App Functionality
 
-Hangar Express helps you sign in to RSI, view hangar and fleet data, view buy-back and log information, and perform supported account actions that you request. Some RSI actions may require local device-owner authentication and current RSI password confirmation before the app sends the request.
+Hangar Express helps you sign in to RSI, view hangar and fleet data, view buy-back and log information, and perform available account actions that you request. Some RSI actions may require local device-owner authentication and current RSI password confirmation before the app sends the request.
 
 Hangar Express depends on RSI web services and third-party hosted metadata. Features may stop working, change, or become temporarily unavailable if those services change, block access, are unavailable, or return unexpected data.
 
-## Hangar Express Pro Subscription
+## Optional Early Access
 
-Hangar Express may offer an optional auto-renewable subscription called Hangar Express Pro.
+Hangar Express may offer optional in-app purchases or auto-renewable subscriptions called Early Access and Early Access for Life.
 
-Hangar Express Pro includes:
+When Early Access is active, Hangar Express may enable experimental Lab Features for you to test before public release. You are not purchasing Star Citizen content, RSI items, gameplay access, or any Roberts Space Industries, Cloud Imperium Games, or Cloud Imperium group entitlement through Hangar Express.
 
-- enhanced concurrent refresh workers, up to 10;
-- viewing up to 500 hangar log entries; and
-- multi-account switching.
+Early Access Lab Features may include:
+
+- experimental faster refresh workers, up to 10 pages in parallel;
+- Extended Hangar Log beta access, up to 500 log entries; and
+- multiple account switching beta access, up to 10 saved accounts.
 
 The standard version is limited to:
 
@@ -42,9 +44,11 @@ The standard version is limited to:
 - up to 5 hangar log entries; and
 - no multi-account switching.
 
-Subscription duration, price, free trials, introductory offers, and renewal details are shown in the App Store purchase sheet before you confirm purchase. The currently configured Pro subscription product is a 1-month auto-renewable subscription.
+Lab Features are experimental app tools. They may change, break, be removed, or become available to all users later.
 
-Payment is charged to your Apple Account when you confirm purchase. The subscription renews automatically unless you cancel at least 24 hours before the end of the current billing period. Your Apple Account may be charged for renewal within 24 hours before the end of the current billing period. You can manage or cancel subscriptions in your Apple Account settings. Apple handles billing, payment processing, refunds, cancellation controls, and subscription management.
+Product duration, price, free trials, introductory offers, renewal details, and whether a product is a subscription or one-time purchase are shown in the App Store purchase sheet before you confirm purchase.
+
+For auto-renewable subscriptions, payment is charged to your Apple Account when you confirm purchase. The subscription renews automatically unless you cancel at least 24 hours before the end of the current billing period. Your Apple Account may be charged for renewal within 24 hours before the end of the current billing period. You can manage or cancel subscriptions in your Apple Account settings. Apple handles billing, payment processing, refunds, cancellation controls, and subscription management.
 
 Deleting Hangar Express does not automatically cancel an active App Store subscription. You must cancel the subscription from your Apple Account settings.
 
@@ -78,10 +82,10 @@ To the fullest extent permitted by law, the developer is not responsible for ind
 
 These terms may be updated when Hangar Express changes its features, subscriptions, or legal requirements. The effective date above will be updated when changes are made.
 
-## Support
+## Contact
 
-For support, use:
+For app questions, use:
 
-https://github.com/TheRealWiseWolfHolo/Hanger-Express/issues
+https://github.com/TheRealWiseWolfHolo/Hangar-Express/issues
 
 Do not post passwords, cookies, payment information, or other sensitive personal information in public GitHub issues.

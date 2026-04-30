@@ -29,6 +29,8 @@ enum DisplayPreferences {
     static let hangarGiftedHighlightEnabledByDefault = true
     static let hangarUpgradedHighlightKey = "display.hangarUpgradedHighlight"
     static let hangarUpgradedHighlightEnabledByDefault = true
+    static let earlyAccessBadgeKey = "display.earlyAccessBadge"
+    static let earlyAccessBadgeEnabledByDefault = true
 }
 
 @MainActor

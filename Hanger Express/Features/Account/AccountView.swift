@@ -5,6 +5,7 @@ struct AccountView: View {
     let snapshot: HangarSnapshot
 
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
+    @AppStorage(DisplayPreferences.earlyAccessBadgeKey) private var showsEarlyAccessBadge = DisplayPreferences.earlyAccessBadgeEnabledByDefault
     @State private var isShowingSettings = false
     @State private var isShowingBackgroundPicker = false
     @State private var isShowingAccountTotalValueExplanation = false
@@ -257,6 +258,10 @@ struct AccountView: View {
     }
 
     private var proBadgeKind: AccountProBadgeKind? {
+        guard showsEarlyAccessBadge else {
+            return nil
+        }
+
         if appModel.subscriptionStore.hasLifetimePro {
             return .proPlus
         }
@@ -674,7 +679,7 @@ private struct AccountProfileCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 Spacer(minLength: 52)
 
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(alignment: .bottom, spacing: 8) {
                     Text(displayName)
                         .font(.title2.weight(.bold))
                         .foregroundStyle(.white)
@@ -683,7 +688,7 @@ private struct AccountProfileCard: View {
 
                     if let proBadgeKind {
                         AccountProBadge(kind: proBadgeKind)
-                            .fixedSize(horizontal: true, vertical: false)
+                            .fixedSize(horizontal: true, vertical: true)
                     }
                 }
 
@@ -739,21 +744,12 @@ private enum AccountProBadgeKind {
     case pro
     case proPlus
 
-    var title: String {
-        switch self {
-        case .pro:
-            return "Pro"
-        case .proPlus:
-            return "Pro+"
-        }
-    }
-
     var accessibilityLabel: String {
         switch self {
         case .pro:
-            return AppLocalizer.string("Pro account")
+            return AppLocalizer.string("Early Access account")
         case .proPlus:
-            return AppLocalizer.string("Lifetime Pro account")
+            return AppLocalizer.string("Lifetime Early Access account")
         }
     }
 }
@@ -762,12 +758,23 @@ private struct AccountProBadge: View {
     let kind: AccountProBadgeKind
 
     var body: some View {
-        Text(kind.title)
-            .font(.caption2.weight(.heavy))
-            .foregroundStyle(textColor)
+        HStack(alignment: .center, spacing: 3) {
+            VStack(alignment: .leading, spacing: -1) {
+                Text(verbatim: "Early")
+                Text(verbatim: "Access")
+            }
+            .font(.system(size: 8.5, weight: .heavy, design: .rounded))
             .lineLimit(1)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+
+            if kind == .proPlus {
+                Text("+")
+                    .font(.system(size: 18, weight: .black, design: .rounded))
+                    .baselineOffset(0.5)
+            }
+        }
+        .foregroundStyle(textColor)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
             .background(
                 Capsule(style: .continuous)
                     .fill(backgroundGradient)

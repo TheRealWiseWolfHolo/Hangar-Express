@@ -177,7 +177,7 @@ final class SubscriptionStore {
             }
 
             if products.isEmpty {
-                productLoadErrorMessage = AppLocalizer.string("The App Store did not return Pro products 0001, 0002, or HangarExpLTI yet.")
+                productLoadErrorMessage = AppLocalizer.string("The App Store did not return Early Access products 0001, 0002, or HangarExpLTI yet.")
             }
 
             if !purchasedProductIDs.isEmpty {
@@ -211,7 +211,7 @@ final class SubscriptionStore {
                 let transaction = try checkVerified(verificationResult)
                 await transaction.finish()
                 await refreshPurchasedProducts()
-                purchaseStatus = .success(AppLocalizer.string("Pro is active."))
+                purchaseStatus = .success(AppLocalizer.string("Early Access is active."))
             case .userCancelled:
                 purchaseStatus = .idle
             case .pending:
@@ -235,8 +235,8 @@ final class SubscriptionStore {
             try await AppStore.sync()
             await refreshPurchasedProducts()
             purchaseStatus = isPro
-                ? .success(AppLocalizer.string("Pro purchase restored."))
-                : .failed(AppLocalizer.string("No active Pro purchase was found."))
+                ? .success(AppLocalizer.string("Early Access purchase restored."))
+                : .failed(AppLocalizer.string("No active Early Access purchase was found."))
         } catch {
             purchaseStatus = .failed(error.localizedDescription)
         }
@@ -269,7 +269,7 @@ final class SubscriptionStore {
         }
 
         guard !hasLifetimePro else {
-            purchaseStatus = .failed(AppLocalizer.string("Lifetime Pro is already active. Other Pro purchases are unavailable."))
+            purchaseStatus = .failed(AppLocalizer.string("Early Access for Life is already active. Other Early Access purchases are unavailable."))
             return
         }
 
@@ -285,7 +285,7 @@ final class SubscriptionStore {
             try await AppStore.presentOfferCodeRedeemSheet(in: scene)
             await refreshPurchasedProducts()
             purchaseStatus = !wasPro && isPro
-                ? .success(AppLocalizer.string("Pro code redeemed."))
+                ? .success(AppLocalizer.string("Early Access code redeemed."))
                 : .idle
         } catch {
             purchaseStatus = .failed(error.localizedDescription)
@@ -383,14 +383,14 @@ final class SubscriptionStore {
 
     private func unavailablePurchaseMessage(for productID: String) -> String {
         if hasLifetimePro {
-            return AppLocalizer.string("Lifetime Pro is already active. Other Pro purchases are unavailable.")
+            return AppLocalizer.string("Early Access for Life is already active. Other Early Access purchases are unavailable.")
         }
 
         if ProSubscriptionConfiguration.isLifetimeProductID(productID), hasActiveProSubscription {
-            return AppLocalizer.string("Lifetime Pro can be purchased after your current Pro subscription ends.")
+            return AppLocalizer.string("Early Access for Life can be purchased after your current Early Access subscription ends.")
         }
 
-        return AppLocalizer.string("This Pro plan is already active.")
+        return AppLocalizer.string("This Early Access plan is already active.")
     }
 
     private func refreshProSubscriptionDetails(
@@ -483,13 +483,13 @@ final class SubscriptionStore {
     private func planFallbackName(for productID: String) -> String {
         switch productID {
         case ProSubscriptionConfiguration.monthlyProductID:
-            return AppLocalizer.string("Monthly Pro")
+            return AppLocalizer.string("Monthly Early Access")
         case ProSubscriptionConfiguration.yearlyProductID:
-            return AppLocalizer.string("Yearly Pro")
+            return AppLocalizer.string("Yearly Early Access")
         case ProSubscriptionConfiguration.lifetimeProductID:
-            return AppLocalizer.string("Lifetime Pro")
+            return AppLocalizer.string("Early Access for Life")
         default:
-            return AppLocalizer.string("Hangar Express Pro")
+            return AppLocalizer.string("Hangar Express Early Access")
         }
     }
 
@@ -528,7 +528,7 @@ private enum SubscriptionStoreError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .productUnavailable:
-            return AppLocalizer.string("The App Store did not return Pro products 0001, 0002, or HangarExpLTI yet. Check the product IDs, prices, localizations, product status, Paid Apps agreement, and bundle ID in App Store Connect.")
+            return AppLocalizer.string("The App Store did not return Early Access products 0001, 0002, or HangarExpLTI yet. Check the product IDs, prices, localizations, product status, Paid Apps agreement, and bundle ID in App Store Connect.")
         case .failedVerification:
             return AppLocalizer.string("The App Store could not verify this purchase.")
         }
