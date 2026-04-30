@@ -11,6 +11,7 @@ struct SettingsView: View {
     @AppStorage(DisplayPreferences.hangarUpgradedShipDisplayModeKey) private var showsUpgradedShipInHangar = DisplayPreferences.hangarUpgradedShipDisplayEnabledByDefault
     @AppStorage(DisplayPreferences.hangarGiftedHighlightKey) private var highlightsGiftedHangarRows = DisplayPreferences.hangarGiftedHighlightEnabledByDefault
     @AppStorage(DisplayPreferences.hangarUpgradedHighlightKey) private var highlightsUpgradedHangarRows = DisplayPreferences.hangarUpgradedHighlightEnabledByDefault
+    @AppStorage(DisplayPreferences.earlyAccessBadgeKey) private var showsEarlyAccessBadge = DisplayPreferences.earlyAccessBadgeEnabledByDefault
     @State private var isShowingClearCacheAlert = false
     @State private var isShowingProPlans = false
 
@@ -18,7 +19,9 @@ struct SettingsView: View {
     let snapshot: HangarSnapshot
 
     private let officialRSIURL = URL(string: "https://robertsspaceindustries.com/en/")!
-    private let repositoryURL = URL(string: "https://github.com/TheRealWiseWolfHolo/Hanger-Express")!
+    private let repositoryURL = URL(string: "https://github.com/TheRealWiseWolfHolo/Hangar-Express")!
+    private let privacyPolicyURL = URL(string: "https://github.com/TheRealWiseWolfHolo/Hangar-Express/blob/PreRelease-Polish/PRIVACY_POLICY.md")!
+    private let termsOfUseURL = URL(string: "https://github.com/TheRealWiseWolfHolo/Hangar-Express/blob/PreRelease-Polish/TERMS_OF_USE.md")!
     private let spviewerURL = URL(string: "https://www.spviewer.eu/")!
     private let starCitizenWikiURL = URL(string: "https://starcitizen.tools/")!
     private let anywhereExpURL = URL(string: "https://robertsspaceindustries.com/en/orgs/ANYWHEREXP")!
@@ -28,6 +31,7 @@ struct SettingsView: View {
             List {
                 ProSubscriptionSection(
                     subscriptionStore: appModel.subscriptionStore,
+                    showsEarlyAccessBadge: $showsEarlyAccessBadge,
                     onShowPlans: {
                         isShowingProPlans = true
                     }
@@ -112,9 +116,9 @@ struct SettingsView: View {
                     Text("Accounts")
                 } footer: {
                     if appModel.allowsMultiAccountSwitching {
-                        Text("Pro stores up to 10 saved accounts. Adding an 11th account replaces the oldest saved account.")
+                        Text("Early Access stores up to 10 saved accounts while multiple account switching is in Labs. Adding an 11th account replaces the oldest saved account.")
                     } else {
-                        Text("Standard keeps your current saved account. Pro unlocks switching between multiple saved accounts.")
+                        Text("Standard keeps your current saved account. Early Access unlocks multiple account switching while the feature is in Labs.")
                     }
                 }
 
@@ -138,8 +142,8 @@ struct SettingsView: View {
                 } footer: {
                     Text(
                         appModel.isPro
-                            ? AppLocalizer.string("Pro can refresh up to 10 pages in parallel.")
-                            : AppLocalizer.string("Standard refreshes up to 2 pages in parallel. Pro unlocks up to 10.")
+                            ? AppLocalizer.string("Early Access Labs can refresh up to 10 pages in parallel.")
+                            : AppLocalizer.string("Standard refreshes up to 2 pages in parallel. Early Access unlocks up to 10 while the feature is in Labs.")
                     )
                 }
 
@@ -151,7 +155,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Advanced")
                 } footer: {
-                    Text("When RSI does not provide upgrade artwork, Hangar Express can show a split thumbnail using the source ship on one side and the target ship on the other. Turn this off to keep the original default placeholder instead. You can also choose whether upgraded ship pledges use the original pledge card or the final upgraded ship in the hangar list, and whether gifted or upgraded rows are tinted in the hangar.")
+                    Text("Control hangar artwork and row highlights.")
                 }
 
                 Section {
@@ -204,6 +208,14 @@ struct SettingsView: View {
 
                     Link(destination: officialRSIURL) {
                         Label("Official RSI Website", systemImage: "link")
+                    }
+
+                    Link(destination: privacyPolicyURL) {
+                        Label("Privacy Policy", systemImage: "lock.shield")
+                    }
+
+                    Link(destination: termsOfUseURL) {
+                        Label("Terms of Use", systemImage: "doc.text")
                     }
 
                     Link(destination: repositoryURL) {
@@ -279,6 +291,7 @@ struct SettingsView: View {
 
 private struct ProSubscriptionSection: View {
     let subscriptionStore: SubscriptionStore
+    @Binding var showsEarlyAccessBadge: Bool
     let onShowPlans: () -> Void
 
     var body: some View {
@@ -290,7 +303,7 @@ private struct ProSubscriptionSection: View {
                         .foregroundStyle(subscriptionStore.isPro ? .green : Color.accentColor)
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(subscriptionStore.isPro ? AppLocalizer.string("Hangar Express Pro Active") : AppLocalizer.string("Hangar Express Pro"))
+                        Text(subscriptionStore.isPro ? AppLocalizer.string("Early Access Active") : AppLocalizer.string("Hangar Express Early Access"))
                             .font(.headline)
 
                         Text(statusSummary)
@@ -307,7 +320,7 @@ private struct ProSubscriptionSection: View {
 
                     if subscriptionStore.isPro {
                         LabeledContent("Plan") {
-                            Text(subscriptionStore.proSubscriptionDetails?.displayName ?? AppLocalizer.string("Hangar Express Pro"))
+                            Text(subscriptionStore.proSubscriptionDetails?.displayName ?? AppLocalizer.string("Hangar Express Early Access"))
                                 .foregroundStyle(.secondary)
                         }
 
@@ -354,12 +367,17 @@ private struct ProSubscriptionSection: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+
+                if subscriptionStore.isPro {
+                    Toggle("Show Early Access Badge", isOn: $showsEarlyAccessBadge)
+                        .font(.subheadline)
+                }
             }
             .padding(.vertical, 6)
         } header: {
-            Text("Pro Sub Status")
+            Text("Early Access Status")
         } footer: {
-            Text("Purchases are handled by the App Store. Manage subscriptions from your Apple Account settings.")
+            Text("Developing Hangar Express takes time and money. Show your *optional* support here.")
         }
     }
 
@@ -369,8 +387,8 @@ private struct ProSubscriptionSection: View {
 
     private var statusSummary: String {
         subscriptionStore.isPro
-            ? AppLocalizer.string("Pro features are unlocked for this Apple Account.")
-            : AppLocalizer.string("See plans for faster sync, longer logs, and multiple saved accounts.")
+            ? AppLocalizer.string("Early access to experimental features are enabled.")
+            : AppLocalizer.string("Support development and get early access to experimental Labs features.")
     }
 
     private var nextRenewalLabel: String {
@@ -438,13 +456,14 @@ private struct ProPlansSheet: View {
             ScrollView {
                 VStack(spacing: 16) {
                     ProBenefitsCard(isPro: subscriptionStore.isPro)
+                    EarlyAccessDisclaimerCard()
                     ProFeatureComparisonCard()
                     ProPlanActionsCard(subscriptionStore: subscriptionStore)
                 }
                 .padding()
             }
             .background(Color(uiColor: .systemGroupedBackground))
-            .navigationTitle(subscriptionStore.isPro ? AppLocalizer.string("Manage Pro") : AppLocalizer.string("Hangar Express Pro"))
+            .navigationTitle(subscriptionStore.isPro ? AppLocalizer.string("Manage Early Access") : AppLocalizer.string("Hangar Express Early Access"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -472,10 +491,10 @@ private struct ProBenefitsCard: View {
                     .foregroundStyle(isPro ? .green : Color.accentColor)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(isPro ? AppLocalizer.string("Your Pro plan is active") : AppLocalizer.string("Upgrade to Hangar Express Pro"))
+                    Text(isPro ? AppLocalizer.string("Your Early Access is active") : AppLocalizer.string("Get Hangar Express Early Access"))
                         .font(.headline)
 
-                    Text("Pro is built for larger hangars: faster refreshes, deeper history, and up to 10 saved accounts.")
+                    Text("Early Access supports ongoing development and unlocks experimental Labs features before their public release.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -487,23 +506,55 @@ private struct ProBenefitsCard: View {
     }
 }
 
+private struct EarlyAccessDisclaimerCard: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Early Access Notice", systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+                .foregroundStyle(.orange)
+
+            Text("Early Access is optional support for Hangar Express development. You are not directly purchasing Star Citizen content, RSI items, gameplay access, or any Cloud Imperium Games or Roberts Space Industries entitlement through Hangar Express.")
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+
+            Text("As a supporter benefit, Hangar Express enables experimental Labs features for you to test. These app features may change, break, or become available to all users later.")
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+
+            Text("Hangar Express is an unofficial fan-made companion app and is not affiliated with, endorsed by, or sponsored by Cloud Imperium Games, Roberts Space Industries, or Star Citizen.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.orange.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.orange.opacity(0.28), lineWidth: 1)
+        )
+    }
+}
+
 private struct ProFeatureComparisonCard: View {
     private let rows = [
-        FeatureComparisonRow(feature: "Refresh workers", standard: "Up to 2", pro: "Up to 10"),
-        FeatureComparisonRow(feature: "Hangar log", standard: "Latest 5", pro: "Up to 500"),
-        FeatureComparisonRow(feature: "Saved accounts", standard: "1 account", pro: "Up to 10 accounts")
+        FeatureComparisonRow(feature: "Experimental faster sync", standard: "Up to 2 pages", pro: "Up to 10 pages in Labs"),
+        FeatureComparisonRow(feature: "Extended Hangar Log beta", standard: "Latest 5", pro: "Up to 500 in Labs"),
+        FeatureComparisonRow(feature: "Multiple account switching beta", standard: "1 account", pro: "Up to 10 accounts in Labs")
     ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Feature Comparison")
+            Text("Lab Features Access")
                 .font(.headline)
 
             Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 10) {
                 GridRow {
                     Text("Feature")
                     Text("Standard")
-                    Text("Pro")
+                    Text("Early Access")
                 }
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -680,7 +731,7 @@ private struct ProPurchasePlanRow: View {
                 Text(planTitle(for: product))
                     .font(.subheadline.weight(.semibold))
 
-                Text(product.displayName)
+                Text(planSubtitle(for: product))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -773,13 +824,26 @@ private struct FeatureComparisonRow: Identifiable {
 private func planTitle(for product: Product) -> String {
     switch product.id {
     case ProSubscriptionConfiguration.monthlyProductID:
-        return AppLocalizer.string("Monthly Plan")
+        return AppLocalizer.string("Monthly Early Access")
     case ProSubscriptionConfiguration.yearlyProductID:
-        return AppLocalizer.string("Yearly Plan")
+        return AppLocalizer.string("Yearly Early Access")
     case ProSubscriptionConfiguration.lifetimeProductID:
-        return AppLocalizer.string("Lifetime Pro")
+        return AppLocalizer.string("Early Access for Life")
     default:
-        return AppLocalizer.string("Pro Plan")
+        return AppLocalizer.string("Early Access")
+    }
+}
+
+private func planSubtitle(for product: Product) -> String {
+    switch product.id {
+    case ProSubscriptionConfiguration.monthlyProductID:
+        return AppLocalizer.string("Labs access - 1 month")
+    case ProSubscriptionConfiguration.yearlyProductID:
+        return AppLocalizer.string("Labs access - 1 year")
+    case ProSubscriptionConfiguration.lifetimeProductID:
+        return AppLocalizer.string("Lifetime Labs access")
+    default:
+        return AppLocalizer.string("Experimental Labs access")
     }
 }
 
@@ -859,7 +923,7 @@ private struct SavedAccountRow: View {
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                 } else {
-                    Button("Pro", action: onUpgrade)
+                    Button("EA", action: onUpgrade)
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                 }

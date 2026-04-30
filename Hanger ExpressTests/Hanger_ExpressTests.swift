@@ -66,7 +66,7 @@ struct Hanger_ExpressTests {
         #expect(!ProSubscriptionConfiguration.allowsPurchasing("unknown", withActiveProductIDs: []))
         let lifetimeDetails = ProSubscriptionDetails(
             productID: "HangarExpLTI",
-            displayName: "Lifetime Pro",
+            displayName: "Early Access for Life",
             nextRenewalDate: nil,
             expirationDate: nil,
             willAutoRenew: nil

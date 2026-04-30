@@ -13,7 +13,7 @@ Hangar Express may handle the following information when you use the app:
 - RSI account information returned by Roberts Space Industries, such as display name, handle, email address, hangar items, fleet data, buy-back data, hangar logs, account metadata, and authorized-device information.
 - App preferences, including language, appearance, refresh settings, cached subscription entitlement state, and saved-account selection.
 - Locally cached images, ship metadata, and app snapshots used to make the app faster and available between refreshes.
-- Purchase entitlement information from Apple StoreKit, such as whether Hangar Express Pro is active.
+- Purchase entitlement information from Apple StoreKit, such as whether Early Access or Early Access for Life is active.
 
 ## How Information Is Used
 
@@ -24,8 +24,8 @@ The app uses this information to:
 - perform RSI account actions you request, such as pledge actions that require confirmation;
 - save sessions so you can reopen the app without signing in every time;
 - cache images and ship metadata for performance;
-- enable or disable Hangar Express Pro features after an App Store purchase; and
-- respond to support requests when you voluntarily contact support.
+- enable or disable Early Access Lab Features after an App Store purchase; and
+- respond to messages you voluntarily send to the developer.
 
 ## Local Storage
 
@@ -37,7 +37,7 @@ The app stores saved RSI credentials and reusable RSI cookies in the iOS Keychai
 
 Hangar Express does not operate a developer-owned account server for your RSI account data. The developer does not receive your RSI password, RSI cookies, hangar contents, purchase history, or local app snapshots from the app automatically.
 
-If you contact support, you may choose to share diagnostics, screenshots, logs, or other information. Support information is used only to investigate and respond to your request.
+If you contact the developer, you may choose to share diagnostics, screenshots, logs, or other information. That information is used only to investigate and respond to your request.
 
 ## Third-Party Services
 
@@ -52,7 +52,7 @@ These third-party services may process information according to their own privac
 
 ## Payments and Subscriptions
 
-Purchases and subscriptions are processed by Apple through the App Store. Hangar Express does not receive or store your payment card number or other App Store payment credentials. Purchase and subscription entitlement status is checked with StoreKit so the app can unlock Pro features for active customers.
+Purchases and subscriptions are processed by Apple through the App Store. Hangar Express does not receive or store your payment card number or other App Store payment credentials. Purchase and subscription entitlement status is checked with StoreKit so the app can enable Early Access Lab Features for active entitlements.
 
 ## Children's Privacy
 
@@ -80,8 +80,8 @@ This policy may be updated when Hangar Express changes its features, data handli
 
 ## Contact
 
-For app support or privacy questions, use the Hangar Express support page:
+For app or privacy questions, use the Hangar Express issue tracker:
 
-https://github.com/TheRealWiseWolfHolo/Hanger-Express/issues
+https://github.com/TheRealWiseWolfHolo/Hangar-Express/issues
 
 Do not post passwords, cookies, payment information, or other sensitive personal information in public GitHub issues.

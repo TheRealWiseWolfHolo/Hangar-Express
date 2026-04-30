@@ -190,11 +190,11 @@ struct HangarLogView: View {
                     if shouldShowProLogLimitMessage {
                         Section {
                             VStack(alignment: .leading, spacing: 12) {
-                                Text("Standard shows the latest 5 hangar log entries. Pro unlocks up to 500.")
+                                Text("Standard shows the latest 5 hangar log entries. Early Access unlocks up to 500 while Extended Hangar Log is in beta.")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
 
-                                Button("Upgrade to Pro") {
+                                Button("Get Early Access") {
                                     Task {
                                         await appModel.subscriptionStore.purchasePro()
                                     }
