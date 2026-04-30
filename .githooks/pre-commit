@@ -1,0 +1,5 @@
+#!/bin/sh
+
+set -eu
+
+exec ./scripts/check_repo_hygiene.sh --staged
