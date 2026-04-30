@@ -51,11 +51,44 @@ struct Hanger_ExpressTests {
     }
 
     @Test func subscriptionEntitlementsClampRefreshWorkersByPlan() async throws {
-        #expect(ProSubscriptionConfiguration.productIDs == Set(["0001", "0002"]))
+        #expect(ProSubscriptionConfiguration.productIDs == Set(["0001", "0002", "HangarExpLTI"]))
+        #expect(ProSubscriptionConfiguration.productIDOrder == ["0001", "0002", "HangarExpLTI"])
+        #expect(ProSubscriptionConfiguration.isLifetimeProductID("HangarExpLTI"))
+        #expect(ProSubscriptionConfiguration.isSubscriptionProductID("0001"))
+        #expect(ProSubscriptionConfiguration.isSubscriptionProductID("0002"))
+        #expect(!ProSubscriptionConfiguration.isSubscriptionProductID("HangarExpLTI"))
+        #expect(ProSubscriptionConfiguration.allowsPurchasing("HangarExpLTI", withActiveProductIDs: []))
+        #expect(!ProSubscriptionConfiguration.allowsPurchasing("HangarExpLTI", withActiveProductIDs: ["0001"]))
+        #expect(!ProSubscriptionConfiguration.allowsPurchasing("HangarExpLTI", withActiveProductIDs: ["0002"]))
+        #expect(!ProSubscriptionConfiguration.allowsPurchasing("0001", withActiveProductIDs: ["HangarExpLTI"]))
+        #expect(!ProSubscriptionConfiguration.allowsPurchasing("0002", withActiveProductIDs: ["HangarExpLTI"]))
+        #expect(ProSubscriptionConfiguration.allowsPurchasing("0002", withActiveProductIDs: ["0001"]))
+        #expect(!ProSubscriptionConfiguration.allowsPurchasing("unknown", withActiveProductIDs: []))
+        let lifetimeDetails = ProSubscriptionDetails(
+            productID: "HangarExpLTI",
+            displayName: "Lifetime Pro",
+            nextRenewalDate: nil,
+            expirationDate: nil,
+            willAutoRenew: nil
+        )
+        #expect(lifetimeDetails.isLifetime)
         #expect(SyncPreferences.constrainedWorkerCount(10, isPro: false) == 2)
         #expect(SyncPreferences.constrainedWorkerCount(0, isPro: false) == 1)
         #expect(SyncPreferences.constrainedWorkerCount(10, isPro: true) == 10)
         #expect(SyncPreferences.constrainedWorkerCount(11, isPro: true) == 10)
+        #expect(ProSubscriptionConfiguration.savedAccountLimit(isPro: false) == 1)
+        #expect(ProSubscriptionConfiguration.savedAccountLimit(isPro: true) == 10)
+
+        let suiteName = "SubscriptionStoreTests-\(UUID().uuidString)"
+        let userDefaults = try #require(UserDefaults(suiteName: suiteName))
+        defer {
+            userDefaults.removePersistentDomain(forName: suiteName)
+        }
+        userDefaults.set(["HangarExpLTI"], forKey: ProSubscriptionConfiguration.activeProductIDsDefaultsKey)
+
+        let subscriptionStore = SubscriptionStore(userDefaults: userDefaults, storeKitEnabled: false)
+        #expect(subscriptionStore.hasLifetimePro)
+        #expect(!subscriptionStore.hasActiveProSubscription)
     }
 
     @Test func hangarLogFetchModesRespectSubscriptionLimits() async throws {
@@ -2865,6 +2898,29 @@ struct Hanger_ExpressTests {
 
         #expect(payload.snapshot.activeSession?.id == secondSession.id)
         #expect(payload.snapshot.savedSessions.count == 1)
+    }
+
+    @Test func storedSessionsPayloadLimitsSavedAccountsToTenNewestSessions() async throws {
+        var payload = StoredSessionsPayload.empty
+        var sessions: [UserSession] = []
+
+        for index in 0 ... 10 {
+            let session = makeUserSession(
+                handle: "citizen-\(index)",
+                email: "citizen-\(index)@example.com",
+                loginIdentifier: "citizen-\(index)@example.com",
+                password: "secret-\(index)",
+                createdAt: Date(timeIntervalSince1970: TimeInterval(index))
+            )
+            sessions.append(session)
+            payload = payload.saving(session, makeActive: true)
+        }
+
+        #expect(payload.sessions.count == StoredSessionsPayload.maxSavedSessionCount)
+        #expect(payload.snapshot.savedSessions.count == StoredSessionsPayload.maxSavedSessionCount)
+        #expect(payload.snapshot.activeSession?.id == sessions[10].id)
+        let containsOldestSession = payload.sessions.contains { $0.id == sessions[0].id }
+        #expect(!containsOldestSession)
     }
 
     @Test func quickLoginSessionsExcludePreviewAccounts() async throws {

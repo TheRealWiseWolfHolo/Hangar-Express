@@ -52,7 +52,7 @@ These third-party services may process information according to their own privac
 
 ## Payments and Subscriptions
 
-Purchases and subscriptions are processed by Apple through the App Store. Hangar Express does not receive or store your payment card number or other App Store payment credentials. Subscription status is checked with StoreKit so the app can unlock Pro features for active subscribers.
+Purchases and subscriptions are processed by Apple through the App Store. Hangar Express does not receive or store your payment card number or other App Store payment credentials. Purchase and subscription entitlement status is checked with StoreKit so the app can unlock Pro features for active customers.
 
 ## Children's Privacy
 
@@ -85,4 +85,3 @@ For app support or privacy questions, use the Hangar Express support page:
 https://github.com/TheRealWiseWolfHolo/Hanger-Express/issues
 
 Do not post passwords, cookies, payment information, or other sensitive personal information in public GitHub issues.
-

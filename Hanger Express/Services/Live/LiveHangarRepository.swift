@@ -1579,6 +1579,7 @@ final class LiveHangarRepository: HangarRepository {
             preferredWorkerCount: workerCount
         )
         let pageSize = pledgePageSize
+        let totalPageCount = pages.count + 1
         let progressTracker = ConcurrentPageProgress(
             completedPages: 1,
             loadedCount: initialLoadedCount
@@ -1595,8 +1596,13 @@ final class LiveHangarRepository: HangarRepository {
                     ) { _, itemCount in
                         let totals = await progressTracker.record(
                             completedPages: 1,
-                            loadedCount: itemCount
+                            loadedCount: itemCount,
+                            totalPageCount: totalPageCount
                         )
+                        guard totals.shouldEmit else {
+                            return
+                        }
+
                         Task { @MainActor in
                             progress(totals.completedPages, totals.loadedCount)
                         }
@@ -1639,6 +1645,7 @@ final class LiveHangarRepository: HangarRepository {
             preferredWorkerCount: workerCount
         )
         let pageSize = buybackPageSize
+        let totalPageCount = pages.count + 1
         let progressTracker = ConcurrentPageProgress(
             completedPages: 1,
             loadedCount: initialLoadedCount
@@ -1655,8 +1662,13 @@ final class LiveHangarRepository: HangarRepository {
                     ) { _, itemCount in
                         let totals = await progressTracker.record(
                             completedPages: 1,
-                            loadedCount: itemCount
+                            loadedCount: itemCount,
+                            totalPageCount: totalPageCount
                         )
+                        guard totals.shouldEmit else {
+                            return
+                        }
+
                         Task { @MainActor in
                             progress(totals.completedPages, totals.loadedCount)
                         }
@@ -2779,7 +2791,7 @@ final class LiveHangarRepository: HangarRepository {
     }()
 }
 
-enum LiveHangarRepositoryError: Error, LocalizedError, Equatable {
+nonisolated enum LiveHangarRepositoryError: Error, LocalizedError, Equatable {
     case sessionUnavailable
     case sessionExpired
     case unexpectedMarkup(String)
@@ -2808,7 +2820,7 @@ enum LiveHangarRepositoryError: Error, LocalizedError, Equatable {
     }
 }
 
-enum FleetProjector {
+nonisolated enum FleetProjector {
     private static let notForSaleShipNames: Set<String> = [
         "f7a hornet mk ii",
         "dragonfly star kitten edition",
@@ -3045,18 +3057,33 @@ enum FleetProjector {
 }
 
 private actor ConcurrentPageProgress {
+    private static let emissionInterval: TimeInterval = 0.5
+
     private var completedPages: Int
     private var loadedCount: Int
+    private var lastEmissionDate = Date.distantPast
 
     init(completedPages: Int, loadedCount: Int) {
         self.completedPages = completedPages
         self.loadedCount = loadedCount
     }
 
-    func record(completedPages additionalPages: Int, loadedCount additionalItems: Int) -> (completedPages: Int, loadedCount: Int) {
+    func record(
+        completedPages additionalPages: Int,
+        loadedCount additionalItems: Int,
+        totalPageCount: Int
+    ) -> (completedPages: Int, loadedCount: Int, shouldEmit: Bool) {
         completedPages += additionalPages
         loadedCount += additionalItems
-        return (completedPages, loadedCount)
+
+        let isComplete = completedPages >= totalPageCount
+        let now = Date()
+        let shouldEmit = isComplete || now.timeIntervalSince(lastEmissionDate) >= Self.emissionInterval
+        if shouldEmit {
+            lastEmissionDate = now
+        }
+
+        return (completedPages, loadedCount, shouldEmit)
     }
 }
 
@@ -3149,7 +3176,7 @@ private struct RemoteAuthorizedDeviceBulkRemoval: Decodable {
     let debugSummary: String?
 }
 
-private final class RSIAccountHTTPPageClient: @unchecked Sendable {
+private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
     private var cookies: [SessionCookie]
     private let session: URLSession
     private let timeoutSeconds: TimeInterval = 25
@@ -3501,7 +3528,7 @@ private final class RSIAccountHTTPPageClient: @unchecked Sendable {
         return available.isEmpty ? "none" : available.joined(separator: ",")
     }
 
-    private struct HTTPPagePayload {
+    private nonisolated struct HTTPPagePayload {
         let html: String
         let requestedURL: URL
         let finalURL: URL
@@ -8690,7 +8717,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     """
 }
 
-enum RSIStoreCreditParser {
+nonisolated enum RSIStoreCreditParser {
     static func parseStructuredMinorUnits(_ rawValue: String) -> Decimal? {
         guard let value = parseDecimal(rawValue) else {
             return nil
@@ -8720,7 +8747,7 @@ enum RSIStoreCreditParser {
     }
 }
 
-private struct AccountOverview {
+private nonisolated struct AccountOverview {
     let storeCreditUSD: Decimal?
     let totalSpendUSD: Decimal?
     let avatarURL: URL?
@@ -9046,7 +9073,7 @@ private nonisolated struct PrimaryOrganizationOverview {
     let didRefreshPrimaryOrganization: Bool
 }
 
-enum ReferralStatsResolver {
+nonisolated enum ReferralStatsResolver {
     static func resolve(
         currentLadderCount: Int?,
         legacyGraphQLCount: Int?,

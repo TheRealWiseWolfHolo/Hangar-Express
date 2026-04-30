@@ -8,6 +8,8 @@ nonisolated struct StoredSessionsSnapshot: Hashable, Sendable {
 }
 
 nonisolated struct StoredSessionsPayload: Hashable, Sendable, Codable {
+    static let maxSavedSessionCount = ProSubscriptionConfiguration.proSavedAccountLimit
+
     let activeSessionID: UserSession.ID?
     let sessions: [UserSession]
 
@@ -33,7 +35,7 @@ nonisolated struct StoredSessionsPayload: Hashable, Sendable, Codable {
     }
 
     init(activeSessionID: UserSession.ID?, sessions: [UserSession]) {
-        let deduplicatedSessions = Self.deduplicatedSessions(sessions)
+        let deduplicatedSessions = Self.limitedSessions(Self.deduplicatedSessions(sessions))
         let resolvedActiveSessionID: UserSession.ID?
 
         if deduplicatedSessions.contains(where: { $0.id == activeSessionID }) {
@@ -87,6 +89,24 @@ nonisolated struct StoredSessionsPayload: Hashable, Sendable, Codable {
         }
 
         return Array(uniqueByAccountKey.values)
+    }
+
+    private static func limitedSessions(_ sessions: [UserSession]) -> [UserSession] {
+        guard sessions.count > maxSavedSessionCount else {
+            return sessions
+        }
+
+        return Array(
+            sessions
+                .sorted {
+                    if $0.createdAt != $1.createdAt {
+                        return $0.createdAt > $1.createdAt
+                    }
+
+                    return $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+                }
+                .prefix(maxSavedSessionCount)
+        )
     }
 }
 
@@ -351,7 +371,7 @@ nonisolated struct SessionCookie: Hashable, Sendable, Codable {
     }
 }
 
-enum TrustedDeviceDuration: String, CaseIterable, Identifiable, Hashable, Sendable, Codable {
+nonisolated enum TrustedDeviceDuration: String, CaseIterable, Identifiable, Hashable, Sendable, Codable {
     case session
     case day
     case week
@@ -378,7 +398,7 @@ enum TrustedDeviceDuration: String, CaseIterable, Identifiable, Hashable, Sendab
     }
 }
 
-struct HangarSnapshot: Hashable, Sendable, Codable {
+nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
     let accountHandle: String
     let lastSyncedAt: Date
     let avatarURL: URL?
@@ -832,7 +852,7 @@ nonisolated struct HangarLogEntry: Hashable, Sendable, Codable, Identifiable {
     }
 }
 
-struct AccountOrganization: Hashable, Sendable, Codable {
+nonisolated struct AccountOrganization: Hashable, Sendable, Codable {
     let name: String
     let rank: String?
 
@@ -848,7 +868,7 @@ struct AccountOrganization: Hashable, Sendable, Codable {
     }
 }
 
-struct ReferralStats: Hashable, Sendable, Codable {
+nonisolated struct ReferralStats: Hashable, Sendable, Codable {
     let currentLadderCount: Int?
     let legacyLadderCount: Int?
     let hasLegacyLadder: Bool
@@ -878,7 +898,7 @@ struct ReferralStats: Hashable, Sendable, Codable {
     }
 }
 
-struct HangarMetrics: Hashable, Sendable, Codable {
+nonisolated struct HangarMetrics: Hashable, Sendable, Codable {
     let packageCount: Int
     let shipCount: Int
     let giftableCount: Int
@@ -896,7 +916,7 @@ private extension String {
     }
 }
 
-struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
+nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
     struct UpgradeMetadata: Hashable, Sendable, Codable {
         struct MatchItem: Hashable, Sendable, Codable {
             let id: Int?
@@ -1276,7 +1296,7 @@ struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
     }
 }
 
-struct GroupedHangarPackage: Identifiable, Hashable, Sendable {
+nonisolated struct GroupedHangarPackage: Identifiable, Hashable, Sendable {
     let representative: HangarPackage
     let packages: [HangarPackage]
 
@@ -1333,7 +1353,7 @@ extension Sequence where Element == HangarPackage {
     }
 }
 
-struct PackageItem: Identifiable, Hashable, Sendable, Codable {
+nonisolated struct PackageItem: Identifiable, Hashable, Sendable, Codable {
     enum Category: String, Hashable, Sendable, Codable {
         case ship = "Ship"
         case vehicle = "Vehicle"
@@ -1420,7 +1440,7 @@ struct PackageItem: Identifiable, Hashable, Sendable, Codable {
     }
 }
 
-struct FleetShip: Identifiable, Hashable, Sendable, Codable {
+nonisolated struct FleetShip: Identifiable, Hashable, Sendable, Codable {
     let id: Int
     let displayName: String
     let manufacturer: String
@@ -1572,7 +1592,7 @@ struct FleetShip: Identifiable, Hashable, Sendable, Codable {
     }
 }
 
-struct GroupedFleetShip: Identifiable, Hashable, Sendable {
+nonisolated struct GroupedFleetShip: Identifiable, Hashable, Sendable {
     let representative: FleetShip
     let ships: [FleetShip]
 
@@ -1820,7 +1840,7 @@ nonisolated struct BuybackUpgradeContext: Hashable, Sendable, Codable {
     }
 }
 
-struct GroupedBuybackPledge: Identifiable, Hashable, Sendable {
+nonisolated struct GroupedBuybackPledge: Identifiable, Hashable, Sendable {
     let representative: BuybackPledge
     let pledges: [BuybackPledge]
 

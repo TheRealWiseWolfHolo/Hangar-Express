@@ -1,0 +1,13 @@
+{
+  "name": "hangar-express-daily-refresh",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --test-scheduled",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "wrangler": "^4.86.0"
+  }
+}

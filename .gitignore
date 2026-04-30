@@ -12,3 +12,7 @@ DerivedData/
 
 # Swift Package Manager
 .swiftpm/
+
+# Node / Cloudflare Workers
+node_modules/
+.dev.vars

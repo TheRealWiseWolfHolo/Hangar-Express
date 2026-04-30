@@ -1,5 +1,6 @@
 import StoreKit
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
@@ -11,6 +12,7 @@ struct SettingsView: View {
     @AppStorage(DisplayPreferences.hangarGiftedHighlightKey) private var highlightsGiftedHangarRows = DisplayPreferences.hangarGiftedHighlightEnabledByDefault
     @AppStorage(DisplayPreferences.hangarUpgradedHighlightKey) private var highlightsUpgradedHangarRows = DisplayPreferences.hangarUpgradedHighlightEnabledByDefault
     @State private var isShowingClearCacheAlert = false
+    @State private var isShowingProPlans = false
 
     let appModel: AppModel
     let snapshot: HangarSnapshot
@@ -24,7 +26,12 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             List {
-                ProSubscriptionSection(subscriptionStore: appModel.subscriptionStore)
+                ProSubscriptionSection(
+                    subscriptionStore: appModel.subscriptionStore,
+                    onShowPlans: {
+                        isShowingProPlans = true
+                    }
+                )
 
                 Section {
                     Picker("Language", selection: $appLanguageRawValue) {
@@ -95,14 +102,18 @@ struct SettingsView: View {
                         }
                     } label: {
                         Label(
-                            appModel.allowsMultiAccountSwitching ? "Add Another Account" : "Upgrade to Add Another Account",
+                            appModel.allowsMultiAccountSwitching
+                                ? AppLocalizer.string("Add Another Account")
+                                : AppLocalizer.string("Upgrade to Add Another Account"),
                             systemImage: appModel.allowsMultiAccountSwitching ? "plus.circle" : "lock"
                         )
                     }
                 } header: {
                     Text("Accounts")
                 } footer: {
-                    if !appModel.allowsMultiAccountSwitching {
+                    if appModel.allowsMultiAccountSwitching {
+                        Text("Pro stores up to 10 saved accounts. Adding an 11th account replaces the oldest saved account.")
+                    } else {
                         Text("Standard keeps your current saved account. Pro unlocks switching between multiple saved accounts.")
                     }
                 }
@@ -125,7 +136,11 @@ struct SettingsView: View {
                 } header: {
                     Text("Sync")
                 } footer: {
-                    Text(appModel.isPro ? "Pro can refresh up to 10 pages in parallel." : "Standard refreshes up to 2 pages in parallel. Pro unlocks up to 10.")
+                    Text(
+                        appModel.isPro
+                            ? AppLocalizer.string("Pro can refresh up to 10 pages in parallel.")
+                            : AppLocalizer.string("Standard refreshes up to 2 pages in parallel. Pro unlocks up to 10.")
+                    )
                 }
 
                 Section {
@@ -227,6 +242,10 @@ struct SettingsView: View {
             } message: {
                 Text("Clearing local cache removes downloaded images and saved local snapshots. Hangar Express will then run a full reload to rebuild everything from RSI.")
             }
+            .sheet(isPresented: $isShowingProPlans) {
+                ProPlansSheet(subscriptionStore: appModel.subscriptionStore)
+                    .presentationDetents([.medium, .large])
+            }
         }
     }
 
@@ -260,6 +279,7 @@ struct SettingsView: View {
 
 private struct ProSubscriptionSection: View {
     let subscriptionStore: SubscriptionStore
+    let onShowPlans: () -> Void
 
     var body: some View {
         Section {
@@ -270,14 +290,53 @@ private struct ProSubscriptionSection: View {
                         .foregroundStyle(subscriptionStore.isPro ? .green : Color.accentColor)
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(subscriptionStore.isPro ? "Hangar Express Pro Active" : "Hangar Express Pro")
+                        Text(subscriptionStore.isPro ? AppLocalizer.string("Hangar Express Pro Active") : AppLocalizer.string("Hangar Express Pro"))
                             .font(.headline)
 
-                        Text("10 refresh workers, 500 hangar log entries, and multi account switching.")
+                        Text(statusSummary)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
                 }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    LabeledContent("Status") {
+                        Text(subscriptionStore.isPro ? AppLocalizer.string("Active") : AppLocalizer.string("Inactive"))
+                            .foregroundStyle(subscriptionStore.isPro ? .green : .secondary)
+                    }
+
+                    if subscriptionStore.isPro {
+                        LabeledContent("Plan") {
+                            Text(subscriptionStore.proSubscriptionDetails?.displayName ?? AppLocalizer.string("Hangar Express Pro"))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        if subscriptionStore.proSubscriptionDetails?.isLifetime == true {
+                            LabeledContent("Access") {
+                                Text("Lifetime")
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else {
+                            LabeledContent("Next Renewal") {
+                                Text(nextRenewalLabel)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            LabeledContent("Auto Renewal") {
+                                Text(autoRenewalLabel)
+                                    .foregroundStyle(autoRenewalStyle)
+                            }
+
+                            if let accessUntilLabel {
+                                LabeledContent("Access Until") {
+                                    Text(accessUntilLabel)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+                .font(.subheadline)
 
                 if let message = statusMessage {
                     Text(message)
@@ -289,109 +348,485 @@ private struct ProSubscriptionSection: View {
                         .foregroundStyle(.red)
                 }
 
-                VStack(alignment: .leading, spacing: 10) {
-                    if subscriptionStore.isPro {
-                        Button("Restore Purchases") {
-                            Task {
-                                await subscriptionStore.restorePurchases()
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                    } else {
-                        if subscriptionStore.proProducts.isEmpty {
-                            Button(primaryButtonTitle) {
-                                Task {
-                                    await subscriptionStore.purchasePro()
-                                }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(statusIsBusy || subscriptionStore.isLoadingProducts)
-                        } else {
-                            ForEach(subscriptionStore.proProducts, id: \.id) { product in
-                                Button {
-                                    Task {
-                                        await subscriptionStore.purchasePro(productID: product.id)
-                                    }
-                                } label: {
-                                    HStack {
-                                        Text(planTitle(for: product))
-
-                                        Spacer(minLength: 12)
-
-                                        Text(product.displayPrice)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(statusIsBusy)
-                            }
-                        }
-
-                        Button("Restore") {
-                            Task {
-                                await subscriptionStore.restorePurchases()
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                    }
+                Button(action: onShowPlans) {
+                    Text(primaryButtonTitle)
+                        .frame(maxWidth: .infinity, alignment: .center)
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
             }
             .padding(.vertical, 6)
         } header: {
-            Text("Pro")
+            Text("Pro Sub Status")
         } footer: {
-            Text("Purchases are handled by the App Store. Manage or cancel the subscription from your Apple Account settings.")
+            Text("Purchases are handled by the App Store. Manage subscriptions from your Apple Account settings.")
         }
     }
 
     private var primaryButtonTitle: String {
-        if subscriptionStore.isLoadingProducts {
-            return AppLocalizer.string("Loading...")
-        }
-
-        return AppLocalizer.format("Subscribe %@", subscriptionStore.proPriceLabel)
+        subscriptionStore.isPro ? AppLocalizer.string("Manage Plans") : AppLocalizer.string("See Plans")
     }
 
-    private func planTitle(for product: Product) -> String {
-        switch product.id {
-        case ProSubscriptionConfiguration.monthlyProductID:
-            return AppLocalizer.string("Subscribe Monthly")
-        case ProSubscriptionConfiguration.yearlyProductID:
-            return AppLocalizer.string("Subscribe Yearly")
-        default:
-            return AppLocalizer.string("Subscribe")
+    private var statusSummary: String {
+        subscriptionStore.isPro
+            ? AppLocalizer.string("Pro features are unlocked for this Apple Account.")
+            : AppLocalizer.string("See plans for faster sync, longer logs, and multiple saved accounts.")
+    }
+
+    private var nextRenewalLabel: String {
+        guard let details = subscriptionStore.proSubscriptionDetails else {
+            return AppLocalizer.string("Checking...")
         }
+
+        if details.willAutoRenew == false {
+            return AppLocalizer.string("Not scheduled")
+        }
+
+        guard let nextRenewalDate = details.nextRenewalDate else {
+            return AppLocalizer.string("Unavailable")
+        }
+
+        return formattedSubscriptionDate(nextRenewalDate)
+    }
+
+    private var autoRenewalLabel: String {
+        switch subscriptionStore.proSubscriptionDetails?.willAutoRenew {
+        case true:
+            return AppLocalizer.string("On")
+        case false:
+            return AppLocalizer.string("Off")
+        case nil:
+            return AppLocalizer.string("Checking...")
+        }
+    }
+
+    private var autoRenewalStyle: Color {
+        switch subscriptionStore.proSubscriptionDetails?.willAutoRenew {
+        case true:
+            return .green
+        case false:
+            return .orange
+        case nil:
+            return .secondary
+        }
+    }
+
+    private var accessUntilLabel: String? {
+        guard subscriptionStore.proSubscriptionDetails?.willAutoRenew == false,
+              let expirationDate = subscriptionStore.proSubscriptionDetails?.expirationDate else {
+            return nil
+        }
+
+        return formattedSubscriptionDate(expirationDate)
     }
 
     private var statusMessage: String? {
-        switch subscriptionStore.purchaseStatus {
-        case .idle:
-            return nil
-        case .purchasing:
-            return AppLocalizer.string("Opening App Store purchase sheet.")
-        case .restoring:
-            return AppLocalizer.string("Restoring purchases.")
-        case let .success(message), let .failed(message):
-            return message
-        }
+        subscriptionStatusMessage(for: subscriptionStore.purchaseStatus)
     }
 
     private var statusIsError: Bool {
-        if case .failed = subscriptionStore.purchaseStatus {
-            return true
-        }
+        subscriptionStatusIsError(subscriptionStore.purchaseStatus)
+    }
+}
 
-        return false
+private struct ProPlansSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let subscriptionStore: SubscriptionStore
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    ProBenefitsCard(isPro: subscriptionStore.isPro)
+                    ProFeatureComparisonCard()
+                    ProPlanActionsCard(subscriptionStore: subscriptionStore)
+                }
+                .padding()
+            }
+            .background(Color(uiColor: .systemGroupedBackground))
+            .navigationTitle(subscriptionStore.isPro ? AppLocalizer.string("Manage Pro") : AppLocalizer.string("Hangar Express Pro"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+            .task {
+                await subscriptionStore.loadProducts()
+                await subscriptionStore.refreshPurchasedProducts()
+            }
+        }
+    }
+}
+
+private struct ProBenefitsCard: View {
+    let isPro: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: isPro ? "checkmark.seal.fill" : "sparkles")
+                    .font(.title2)
+                    .foregroundStyle(isPro ? .green : Color.accentColor)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(isPro ? AppLocalizer.string("Your Pro plan is active") : AppLocalizer.string("Upgrade to Hangar Express Pro"))
+                        .font(.headline)
+
+                    Text("Pro is built for larger hangars: faster refreshes, deeper history, and up to 10 saved accounts.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct ProFeatureComparisonCard: View {
+    private let rows = [
+        FeatureComparisonRow(feature: "Refresh workers", standard: "Up to 2", pro: "Up to 10"),
+        FeatureComparisonRow(feature: "Hangar log", standard: "Latest 5", pro: "Up to 500"),
+        FeatureComparisonRow(feature: "Saved accounts", standard: "1 account", pro: "Up to 10 accounts")
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Feature Comparison")
+                .font(.headline)
+
+            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 10) {
+                GridRow {
+                    Text("Feature")
+                    Text("Standard")
+                    Text("Pro")
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+                Divider()
+                    .gridCellColumns(3)
+
+                ForEach(rows) { row in
+                    GridRow {
+                        Text(row.feature)
+                            .fontWeight(.medium)
+                        Text(row.standard)
+                            .foregroundStyle(.secondary)
+                        Text(row.pro)
+                            .foregroundStyle(.primary)
+                    }
+                }
+            }
+            .font(.footnote)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct ProPlanActionsCard: View {
+    let subscriptionStore: SubscriptionStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(sectionTitle)
+                .font(.headline)
+
+            if let message = statusMessage {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(statusIsError ? .red : .secondary)
+            } else if let productLoadErrorMessage = subscriptionStore.productLoadErrorMessage {
+                Text(productLoadErrorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+
+            if subscriptionStore.isPro {
+                if let details = subscriptionStore.proSubscriptionDetails {
+                    ProCurrentPlanSummary(details: details)
+                }
+
+                if subscriptionStore.hasActiveProSubscription {
+                    Button {
+                        let scene = currentForegroundWindowScene()
+                        Task {
+                            await subscriptionStore.manageSubscriptions(in: scene)
+                        }
+                    } label: {
+                        Label("Manage Apple Subscription", systemImage: "slider.horizontal.3")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(statusIsBusy)
+                }
+
+                Button {
+                    Task {
+                        await subscriptionStore.restorePurchases()
+                    }
+                } label: {
+                    Label("Restore Purchases", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .disabled(statusIsBusy)
+
+                if !subscriptionStore.hasLifetimePro {
+                    redeemCodeButton
+                }
+            } else {
+                if subscriptionStore.proProducts.isEmpty {
+                    Button {
+                        Task {
+                            await subscriptionStore.loadProducts()
+                        }
+                    } label: {
+                        Label(
+                            subscriptionStore.isLoadingProducts
+                                ? AppLocalizer.string("Loading Plans")
+                                : AppLocalizer.string("Load Plans"),
+                            systemImage: "arrow.clockwise"
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(statusIsBusy || subscriptionStore.isLoadingProducts)
+                } else {
+                    ForEach(subscriptionStore.proProducts, id: \.id) { product in
+                        ProPurchasePlanRow(
+                            product: product,
+                            isBusy: statusIsBusy,
+                            onPurchase: {
+                                Task {
+                                    await subscriptionStore.purchasePro(productID: product.id)
+                                }
+                            }
+                        )
+                    }
+                }
+
+                Button {
+                    Task {
+                        await subscriptionStore.restorePurchases()
+                    }
+                } label: {
+                    Label("Restore Purchases", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .disabled(statusIsBusy)
+
+                if !subscriptionStore.hasLifetimePro {
+                    redeemCodeButton
+                }
+            }
+
+            Text("Purchases are managed by Apple. You can change, cancel, or restore subscriptions from your Apple Account at any time.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private var statusMessage: String? {
+        subscriptionStatusMessage(for: subscriptionStore.purchaseStatus)
+    }
+
+    private var statusIsError: Bool {
+        subscriptionStatusIsError(subscriptionStore.purchaseStatus)
     }
 
     private var statusIsBusy: Bool {
-        switch subscriptionStore.purchaseStatus {
-        case .purchasing, .restoring:
-            return true
-        case .idle, .success, .failed:
-            return false
+        subscriptionStatusIsBusy(subscriptionStore.purchaseStatus)
+    }
+
+    private var sectionTitle: String {
+        if subscriptionStore.isPro {
+            return subscriptionStore.hasLifetimePro && !subscriptionStore.hasActiveProSubscription
+                ? AppLocalizer.string("Purchase")
+                : AppLocalizer.string("Subscription")
+        }
+
+        return AppLocalizer.string("Plans")
+    }
+
+    private var redeemCodeButton: some View {
+        Button {
+            let scene = currentForegroundWindowScene()
+            Task {
+                await subscriptionStore.redeemCode(in: scene)
+            }
+        } label: {
+            Label("Redeem Code", systemImage: "ticket")
+        }
+        .buttonStyle(.bordered)
+        .disabled(statusIsBusy)
+    }
+}
+
+private struct ProPurchasePlanRow: View {
+    let product: Product
+    let isBusy: Bool
+    let onPurchase: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(planTitle(for: product))
+                    .font(.subheadline.weight(.semibold))
+
+                Text(product.displayName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            Button(action: onPurchase) {
+                Text(product.displayPrice)
+                    .font(.subheadline.weight(.semibold))
+                    .monospacedDigit()
+                    .frame(minWidth: 72)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+            .disabled(isBusy)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct ProCurrentPlanSummary: View {
+    let details: ProSubscriptionDetails
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledContent("Current Plan", value: details.displayName)
+
+            if details.isLifetime {
+                LabeledContent("Access", value: AppLocalizer.string("Lifetime"))
+            } else {
+                LabeledContent("Auto Renewal", value: autoRenewalLabel)
+
+                if let renewalLabel {
+                    LabeledContent("Next Renewal", value: renewalLabel)
+                }
+
+                if let accessUntilLabel {
+                    LabeledContent("Access Until", value: accessUntilLabel)
+                }
+            }
+        }
+        .font(.subheadline)
+    }
+
+    private var autoRenewalLabel: String {
+        switch details.willAutoRenew {
+        case true:
+            return AppLocalizer.string("On")
+        case false:
+            return AppLocalizer.string("Off")
+        case nil:
+            return AppLocalizer.string("Checking...")
         }
     }
+
+    private var renewalLabel: String? {
+        guard details.willAutoRenew != false,
+              let nextRenewalDate = details.nextRenewalDate else {
+            return nil
+        }
+
+        return formattedSubscriptionDate(nextRenewalDate)
+    }
+
+    private var accessUntilLabel: String? {
+        guard details.willAutoRenew == false,
+              let expirationDate = details.expirationDate else {
+            return nil
+        }
+
+        return formattedSubscriptionDate(expirationDate)
+    }
+}
+
+private struct FeatureComparisonRow: Identifiable {
+    let id: String
+    let feature: LocalizedStringKey
+    let standard: LocalizedStringKey
+    let pro: LocalizedStringKey
+
+    init(feature: String, standard: String, pro: String) {
+        id = feature
+        self.feature = LocalizedStringKey(feature)
+        self.standard = LocalizedStringKey(standard)
+        self.pro = LocalizedStringKey(pro)
+    }
+}
+
+private func planTitle(for product: Product) -> String {
+    switch product.id {
+    case ProSubscriptionConfiguration.monthlyProductID:
+        return AppLocalizer.string("Monthly Plan")
+    case ProSubscriptionConfiguration.yearlyProductID:
+        return AppLocalizer.string("Yearly Plan")
+    case ProSubscriptionConfiguration.lifetimeProductID:
+        return AppLocalizer.string("Lifetime Pro")
+    default:
+        return AppLocalizer.string("Pro Plan")
+    }
+}
+
+private func subscriptionStatusMessage(for purchaseStatus: SubscriptionStore.PurchaseStatus) -> String? {
+    switch purchaseStatus {
+    case .idle:
+        return nil
+    case .purchasing:
+        return AppLocalizer.string("Opening App Store purchase sheet.")
+    case .restoring:
+        return AppLocalizer.string("Restoring purchases.")
+    case .managing:
+        return AppLocalizer.string("Opening Apple subscription management.")
+    case .redeeming:
+        return AppLocalizer.string("Opening StoreKit code redemption.")
+    case let .success(message), let .failed(message):
+        return message
+    }
+}
+
+private func subscriptionStatusIsError(_ purchaseStatus: SubscriptionStore.PurchaseStatus) -> Bool {
+    if case .failed = purchaseStatus {
+        return true
+    }
+
+    return false
+}
+
+private func subscriptionStatusIsBusy(_ purchaseStatus: SubscriptionStore.PurchaseStatus) -> Bool {
+    switch purchaseStatus {
+    case .purchasing, .restoring, .managing, .redeeming:
+        return true
+    case .idle, .success, .failed:
+        return false
+    }
+}
+
+private func formattedSubscriptionDate(_ date: Date) -> String {
+    date.formatted(date: .abbreviated, time: .omitted)
+}
+
+@MainActor
+private func currentForegroundWindowScene() -> UIWindowScene? {
+    UIApplication.shared.connectedScenes
+        .compactMap { $0 as? UIWindowScene }
+        .first { $0.activationState == .foregroundActive }
+        ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
 }
 
 private struct SavedAccountRow: View {
@@ -416,7 +851,7 @@ private struct SavedAccountRow: View {
                 Spacer(minLength: 12)
 
                 if isActive {
-                    Text("Active")
+                    Text("Current")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.green)
                 } else if canSwitch {

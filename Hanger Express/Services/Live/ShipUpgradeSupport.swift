@@ -1,11 +1,11 @@
 import Foundation
 
-struct ShipUpgradePath: Hashable, Sendable {
+nonisolated struct ShipUpgradePath: Hashable, Sendable {
     let sourceShipName: String
     let targetShipName: String
 }
 
-enum UpgradeTitleParser {
+nonisolated enum UpgradeTitleParser {
     static func parse(_ rawTitle: String) -> ShipUpgradePath? {
         let cleaned = sanitizeTitle(rawTitle)
 
@@ -188,7 +188,7 @@ enum UpgradeTitleParser {
     ]
 }
 
-struct RSIShipCatalog: Sendable {
+nonisolated struct RSIShipCatalog: Sendable {
     struct ManufacturerAsset: Hashable, Sendable {
         let path: String
         let primaryURL: URL?
@@ -413,7 +413,7 @@ struct RSIShipCatalog: Sendable {
     }
 }
 
-struct HostedShipCatalogClient: Sendable {
+nonisolated struct HostedShipCatalogClient: Sendable {
     let urls: [URL]
     let urlSession: URLSession
 
@@ -510,7 +510,7 @@ actor HostedShipCatalogStore {
     }
 }
 
-enum HostedShipCatalogError: Error, LocalizedError {
+nonisolated enum HostedShipCatalogError: Error, LocalizedError {
     case httpStatus(Int)
 
     var errorDescription: String? {
@@ -521,7 +521,7 @@ enum HostedShipCatalogError: Error, LocalizedError {
     }
 }
 
-struct RSIShipDetailCatalog: Sendable {
+nonisolated struct RSIShipDetailCatalog: Sendable {
     struct SpecItem: Hashable, Sendable, Codable {
         let label: String
         let value: String
@@ -928,7 +928,7 @@ struct RSIShipDetailCatalog: Sendable {
     }
 }
 
-struct HostedShipDetailCatalogClient: Sendable {
+nonisolated struct HostedShipDetailCatalogClient: Sendable {
     let urls: [URL]
     let urlSession: URLSession
 
@@ -1044,7 +1044,7 @@ actor HostedShipDetailCatalogStore {
     }
 }
 
-public enum HostedShipFeedEndpoints {
+public nonisolated enum HostedShipFeedEndpoints {
     public static let primaryBaseURL = URL(string: "https://starcitizen-info.pages.dev")!
     public static let fallbackBaseURL = URL(string: "https://therealwisewolfholo.github.io/StarCitizen-Info")!
 
@@ -1059,7 +1059,7 @@ public enum HostedShipFeedEndpoints {
     ]
 }
 
-private struct RemoteHostedShipDetailCatalogPayload: Decodable {
+private nonisolated struct RemoteHostedShipDetailCatalogPayload: Decodable {
     let manufacturers: [RemoteHostedManufacturer]
     let ships: [RemoteHostedShipDetail]
 
@@ -1089,7 +1089,7 @@ private struct RemoteHostedShipDetailCatalogPayload: Decodable {
     }
 }
 
-private struct RemoteHostedShipDetail: Decodable {
+private nonisolated struct RemoteHostedShipDetail: Decodable {
     struct SpecItem: Decodable {
         let label: String
         let value: String?
@@ -1220,7 +1220,7 @@ private struct RemoteHostedShipDetail: Decodable {
     }
 }
 
-private struct RemoteHostedShipCatalogPayload: Decodable {
+private nonisolated struct RemoteHostedShipCatalogPayload: Decodable {
     let manufacturers: [RemoteHostedManufacturer]
     let ships: [RemoteHostedShip]
 
@@ -1250,7 +1250,7 @@ private struct RemoteHostedShipCatalogPayload: Decodable {
     }
 }
 
-private struct RemoteHostedShip: Decodable {
+private nonisolated struct RemoteHostedShip: Decodable {
     let id: String
     let title: String?
     let name: String?
@@ -1314,7 +1314,7 @@ private struct RemoteHostedShip: Decodable {
     }
 }
 
-private struct RemoteHostedManufacturer: Decodable {
+private nonisolated struct RemoteHostedManufacturer: Decodable {
     struct Logos: Decodable {
         let `default`: RemoteHostedManufacturerAsset?
         let onLightBackground: RemoteHostedManufacturerAsset?
@@ -1366,7 +1366,7 @@ private struct RemoteHostedManufacturer: Decodable {
     }
 }
 
-private struct RemoteHostedManufacturerAsset: Decodable {
+private nonisolated struct RemoteHostedManufacturerAsset: Decodable {
     let path: String
     let primaryURL: URL?
     let fallbackURL: URL?
@@ -1386,7 +1386,7 @@ private struct RemoteHostedManufacturerAsset: Decodable {
     }
 }
 
-enum FleetRoleFormatter {
+nonisolated enum FleetRoleFormatter {
     static func summary(type: String?, focus: String?) -> String? {
         let displayType = displayTypeName(for: type)
         let focusCategories = focusComponents(from: focus)
@@ -1446,7 +1446,7 @@ enum FleetRoleFormatter {
     }
 }
 
-enum FleetPresentationFormatter {
+nonisolated enum FleetPresentationFormatter {
     static func roleSummary(role: String, categories: [String]) -> String? {
         let normalizedCategories = categories.compactMap(\.nilIfEmpty)
         if let formattedFromCategories = summary(from: normalizedCategories) {
@@ -1527,14 +1527,14 @@ enum FleetPresentationFormatter {
 }
 
 private extension String {
-    var nilIfEmpty: String? {
+    nonisolated var nilIfEmpty: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
 }
 
 private extension URL {
-    var isSupportedManufacturerLogoURL: Bool {
+    nonisolated var isSupportedManufacturerLogoURL: Bool {
         let supportedExtensions: Set<String> = [
             "png",
             "jpg",

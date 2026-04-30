@@ -23,6 +23,7 @@ struct AccountView: View {
                         organizationSummary: profileOrganizationSummary,
                         totalValueLabel: accountTotalValueLabel,
                         conciergeLevel: conciergeLevel,
+                        proBadgeKind: proBadgeKind,
                         avatarURL: profileAvatarURL,
                         backgroundImageURL: profileBackgroundImageURL,
                         reloadToken: appModel.accountImageReloadToken,
@@ -253,6 +254,14 @@ struct AccountView: View {
 
     private var conciergeLevel: ConciergeLevel? {
         ConciergeLevel(totalSpendUSD: snapshot.metrics.totalSpendUSD)
+    }
+
+    private var proBadgeKind: AccountProBadgeKind? {
+        if appModel.subscriptionStore.hasLifetimePro {
+            return .proPlus
+        }
+
+        return appModel.isPro ? .pro : nil
     }
 
     private var profileOrganizationSummary: String {
@@ -596,6 +605,7 @@ private struct AccountProfileCard: View {
     let organizationSummary: String
     let totalValueLabel: String
     let conciergeLevel: ConciergeLevel?
+    let proBadgeKind: AccountProBadgeKind?
     let avatarURL: URL?
     let backgroundImageURL: URL?
     let reloadToken: UUID?
@@ -664,9 +674,18 @@ private struct AccountProfileCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 Spacer(minLength: 52)
 
-                Text(displayName)
-                    .font(.title2.weight(.bold))
-                    .foregroundStyle(.white)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(displayName)
+                        .font(.title2.weight(.bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
+
+                    if let proBadgeKind {
+                        AccountProBadge(kind: proBadgeKind)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                }
 
                 Text(organizationSummary)
                     .font(.subheadline.weight(.medium))
@@ -713,6 +732,116 @@ private struct AccountProfileCard: View {
             .frame(width: 140, height: 140)
             .offset(x: 36, y: 46)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+    }
+}
+
+private enum AccountProBadgeKind {
+    case pro
+    case proPlus
+
+    var title: String {
+        switch self {
+        case .pro:
+            return "Pro"
+        case .proPlus:
+            return "Pro+"
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .pro:
+            return AppLocalizer.string("Pro account")
+        case .proPlus:
+            return AppLocalizer.string("Lifetime Pro account")
+        }
+    }
+}
+
+private struct AccountProBadge: View {
+    let kind: AccountProBadgeKind
+
+    var body: some View {
+        Text(kind.title)
+            .font(.caption2.weight(.heavy))
+            .foregroundStyle(textColor)
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(backgroundGradient)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(borderGradient, lineWidth: 1)
+            )
+            .shadow(color: shadowColor, radius: 8, y: 3)
+            .accessibilityLabel(kind.accessibilityLabel)
+    }
+
+    private var textColor: Color {
+        switch kind {
+        case .pro:
+            return Color(red: 0.96, green: 0.94, blue: 0.86)
+        case .proPlus:
+            return Color(red: 0.92, green: 0.78, blue: 0.32)
+        }
+    }
+
+    private var backgroundGradient: LinearGradient {
+        switch kind {
+        case .pro:
+            return LinearGradient(
+                colors: [
+                    Color(red: 0.16, green: 0.18, blue: 0.22).opacity(0.96),
+                    Color(red: 0.38, green: 0.36, blue: 0.29).opacity(0.9)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        case .proPlus:
+            return LinearGradient(
+                colors: [
+                    Color.black.opacity(0.72),
+                    Color.black.opacity(0.46)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+    }
+
+    private var borderGradient: LinearGradient {
+        switch kind {
+        case .pro:
+            return LinearGradient(
+                colors: [
+                    Color.white.opacity(0.34),
+                    Color(red: 0.95, green: 0.78, blue: 0.38).opacity(0.24)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        case .proPlus:
+            return LinearGradient(
+                colors: [
+                    Color(red: 0.92, green: 0.78, blue: 0.32).opacity(0.42),
+                    Color(red: 0.92, green: 0.78, blue: 0.32).opacity(0.16)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+    }
+
+    private var shadowColor: Color {
+        switch kind {
+        case .pro:
+            return Color.black.opacity(0.24)
+        case .proPlus:
+            return Color.black.opacity(0.32)
+        }
     }
 }
 
