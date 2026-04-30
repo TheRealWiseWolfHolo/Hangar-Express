@@ -33,7 +33,7 @@ enum DisplayPreferences {
 
 @MainActor
 private final class RefreshProgressDisplayRelay {
-    private static let displayCadenceNanoseconds: UInt64 = 80_000_000
+    private static let displayCadenceNanoseconds: UInt64 = 500_000_000
     private static let regressionTolerance = 0.0001
 
     private struct ProgressKey: Hashable {

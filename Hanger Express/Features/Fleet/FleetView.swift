@@ -430,7 +430,7 @@ enum FleetTool: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .allShips:
-            return AppLocalizer.string("Browse the hosted ship catalog")
+            return AppLocalizer.string("Browse the Star Citizen ship catalog")
         case .authorizedDevices:
             return AppLocalizer.string("Review and remove logged-in RSI devices")
         case .ccuChainCalculator, .resetCharacter:
