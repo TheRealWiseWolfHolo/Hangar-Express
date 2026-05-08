@@ -46,11 +46,15 @@ struct HangarDashboardView: View {
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage(DisplayPreferences.hangarGiftedHighlightKey) private var highlightsGiftedHangarRows = DisplayPreferences.hangarGiftedHighlightEnabledByDefault
     @AppStorage(DisplayPreferences.hangarUpgradedHighlightKey) private var highlightsUpgradedHangarRows = DisplayPreferences.hangarUpgradedHighlightEnabledByDefault
+    @AppStorage(DisplayPreferences.sharePictureAutoCopiesDebugLogKey) private var autoCopiesSharePictureDebugLog = DisplayPreferences.sharePictureAutoCopiesDebugLogEnabledByDefault
     @State private var filter: PackageFilter = .all
     @State private var searchText = ""
     @State private var searchFilters: Set<SearchFilter> = []
     @State private var isSearchPresented = false
     @State private var isLogPresented = false
+    @State private var sharePicturePayload: HangarSharePicturePayload?
+    @State private var sharePictureError: HangarSharePictureError?
+    @State private var isGeneratingSharePicture = false
 
     var body: some View {
         NavigationStack {
@@ -110,6 +114,17 @@ struct HangarDashboardView: View {
                         }
                         .contextMenu {
                             Button {
+                                Task {
+                                    await presentSharePicture(for: packageGroup)
+                                }
+                            } label: {
+                                Label("Share Picture", systemImage: "photo.on.rectangle.angled")
+                            }
+                            .disabled(isGeneratingSharePicture)
+
+                            Divider()
+
+                            Button {
                                 UIPasteboard.general.string = hangarCardDebugExport(for: packageGroup)
                             } label: {
                                 Label("Copy Raw Card Data", systemImage: "doc.on.doc")
@@ -145,6 +160,21 @@ struct HangarDashboardView: View {
             .navigationTitle("Hangar")
             .sheet(isPresented: $isLogPresented) {
                 HangarLogView(appModel: appModel)
+            }
+            .sheet(item: $sharePicturePayload) { payload in
+                HangarShareSheet(activityItems: [payload.fileURL])
+            }
+            .alert(item: $sharePictureError) { error in
+                Alert(
+                    title: Text("Share Picture Failed"),
+                    message: Text(error.message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
+            .overlay {
+                if isGeneratingSharePicture {
+                    HangarSharePictureProgressOverlay()
+                }
             }
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
@@ -223,42 +253,36 @@ struct HangarDashboardView: View {
     }
 
     private func hangarCardDebugExport(for packageGroup: GroupedHangarPackage) -> String {
-        let export = HangarCardDebugExport(
-            generatedAt: ISO8601DateFormatter().string(from: Date()),
-            quantity: packageGroup.quantity,
-            containsMultipleCopies: packageGroup.containsMultipleCopies,
-            displaySettings: .init(
-                showsUpgradedShipInHangar: appModel.showsUpgradedShipInHangar,
-                compositeUpgradeThumbnailsEnabled: appModel.compositeUpgradeThumbnailsEnabled
-            ),
-            representativeComputedDisplay: .init(
-                displayTitle: packageGroup.representative.debugDisplayTitle(showsUpgradedShipInHangar: appModel.showsUpgradedShipInHangar),
-                displayThumbnailURL: packageGroup.representative.debugDisplayThumbnailURL(showsUpgradedShipInHangar: appModel.showsUpgradedShipInHangar)?.absoluteString,
-                insuranceBadgeText: packageGroup.representative.displayedInsurance,
-                isUpgradedShipPledge: packageGroup.representative.isUpgradedShipPledge,
-                upgradedShipDisplayTitle: packageGroup.representative.upgradedShipDisplayTitle,
-                upgradedShipThumbnailURL: packageGroup.representative.upgradedShipThumbnailURL?.absoluteString
-            ),
-            representative: packageGroup.representative,
-            packages: packageGroup.packages
+        HangarCardDebugExporter.string(
+            for: packageGroup,
+            showsUpgradedShipInHangar: appModel.showsUpgradedShipInHangar,
+            compositeUpgradeThumbnailsEnabled: appModel.compositeUpgradeThumbnailsEnabled
         )
+    }
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-
-        guard let data = try? encoder.encode(export),
-              let string = String(data: data, encoding: .utf8) else {
-            return """
-            {
-              "error" : "Failed to encode hangar card debug export",
-              "representativePackageID" : \(packageGroup.representative.id),
-              "quantity" : \(packageGroup.quantity)
-            }
-            """
+    private func presentSharePicture(for packageGroup: GroupedHangarPackage) async {
+        guard !isGeneratingSharePicture else {
+            return
         }
 
-        return string
+        isGeneratingSharePicture = true
+        defer {
+            isGeneratingSharePicture = false
+        }
+
+        if autoCopiesSharePictureDebugLog {
+            UIPasteboard.general.string = hangarCardDebugExport(for: packageGroup)
+        }
+
+        do {
+            let fileURL = try await HangarSharePictureGenerator.makeJPEG(
+                for: packageGroup,
+                fleet: snapshot.fleet
+            )
+            sharePicturePayload = HangarSharePicturePayload(fileURL: fileURL)
+        } catch {
+            sharePictureError = HangarSharePictureError(message: error.localizedDescription)
+        }
     }
 
     @ViewBuilder
@@ -301,6 +325,101 @@ private struct HangarCardDebugExport: Codable {
     let packages: [HangarPackage]
 }
 
+private enum HangarCardDebugExporter {
+    static func string(
+        for packageGroup: GroupedHangarPackage,
+        showsUpgradedShipInHangar: Bool,
+        compositeUpgradeThumbnailsEnabled: Bool
+    ) -> String {
+        let export = HangarCardDebugExport(
+            generatedAt: ISO8601DateFormatter().string(from: Date()),
+            quantity: packageGroup.quantity,
+            containsMultipleCopies: packageGroup.containsMultipleCopies,
+            displaySettings: .init(
+                showsUpgradedShipInHangar: showsUpgradedShipInHangar,
+                compositeUpgradeThumbnailsEnabled: compositeUpgradeThumbnailsEnabled
+            ),
+            representativeComputedDisplay: .init(
+                displayTitle: packageGroup.representative.debugDisplayTitle(showsUpgradedShipInHangar: showsUpgradedShipInHangar),
+                displayThumbnailURL: packageGroup.representative.debugDisplayThumbnailURL(showsUpgradedShipInHangar: showsUpgradedShipInHangar)?.absoluteString,
+                insuranceBadgeText: packageGroup.representative.displayedInsurance,
+                isUpgradedShipPledge: packageGroup.representative.isUpgradedShipPledge,
+                upgradedShipDisplayTitle: packageGroup.representative.upgradedShipDisplayTitle,
+                upgradedShipThumbnailURL: packageGroup.representative.upgradedShipThumbnailURL?.absoluteString
+            ),
+            representative: packageGroup.representative,
+            packages: packageGroup.packages
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+
+        guard let data = try? encoder.encode(export),
+              let string = String(data: data, encoding: .utf8) else {
+            return """
+            {
+              "error" : "Failed to encode hangar card debug export",
+              "representativePackageID" : \(packageGroup.representative.id),
+              "quantity" : \(packageGroup.quantity)
+            }
+            """
+        }
+
+        return string
+    }
+}
+
+private struct HangarCouponInfo: Equatable {
+    let couponLabel: String
+    let cardTitle: String
+    let code: String?
+}
+
+private enum HangarCouponParser {
+    private static let couponExpression = try? NSRegularExpression(
+        pattern: #"\b([0-9]{1,3})\s*%\s*Coupon\b"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let delimiterExpression = try? NSRegularExpression(pattern: #"[:：]"#)
+
+    static func info(from title: String) -> HangarCouponInfo? {
+        let fullRange = NSRange(title.startIndex ..< title.endIndex, in: title)
+        guard let couponExpression,
+              let match = couponExpression.firstMatch(in: title, range: fullRange),
+              let couponRange = Range(match.range, in: title) else {
+            return nil
+        }
+
+        let couponLabel = String(title[couponRange])
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let delimiterSearchRange = NSRange(
+            location: match.range.location + match.range.length,
+            length: max(0, fullRange.length - match.range.location - match.range.length)
+        )
+        let delimiterMatch = delimiterExpression?.firstMatch(in: title, range: delimiterSearchRange)
+        let delimiterRange = delimiterMatch.flatMap { Range($0.range, in: title) }
+        let rawCardTitle = delimiterRange
+            .map { String(title[..<$0.lowerBound]) }
+            ?? title
+        let cardTitle = rawCardTitle
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawCode = delimiterRange.map {
+            String(title[$0.upperBound...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let code = rawCode.flatMap { $0.isEmpty ? nil : $0 }
+
+        return HangarCouponInfo(
+            couponLabel: couponLabel,
+            cardTitle: cardTitle.isEmpty ? couponLabel : cardTitle,
+            code: code
+        )
+    }
+}
+
 struct HangarPackageGroupRow: View {
     @AppStorage(DisplayPreferences.hangarUpgradedShipDisplayModeKey) private var showsUpgradedShipInHangar = DisplayPreferences.hangarUpgradedShipDisplayEnabledByDefault
     let packageGroup: GroupedHangarPackage
@@ -328,12 +447,15 @@ struct HangarPackageGroupRow: View {
     }
 
     private var displayTitle: String {
+        let rawTitle: String
         if showsUpgradedShipInHangar,
            let upgradedShipDisplayTitle = package.upgradedShipDisplayTitle {
-            return upgradedShipDisplayTitle
+            rawTitle = upgradedShipDisplayTitle
+        } else {
+            rawTitle = package.title
         }
 
-        return package.title
+        return HangarCouponParser.info(from: rawTitle)?.cardTitle ?? rawTitle
     }
 
     private var insuranceBadgeText: String? {
@@ -605,6 +727,7 @@ private struct PriceSummaryView: View {
 
 struct HangarPackageDetailView: View {
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(DisplayPreferences.sharePictureAutoCopiesDebugLogKey) private var autoCopiesSharePictureDebugLog = DisplayPreferences.sharePictureAutoCopiesDebugLogEnabledByDefault
 
     private enum PresentedActionSheet: String, Identifiable {
         case melt
@@ -619,6 +742,10 @@ struct HangarPackageDetailView: View {
     let reloadToken: UUID?
 
     @State private var presentedActionSheet: PresentedActionSheet?
+    @State private var sharePicturePayload: HangarSharePicturePayload?
+    @State private var sharePictureError: HangarSharePictureError?
+    @State private var isGeneratingSharePicture = false
+    @State private var copiedCouponCode = false
 
     private var package: HangarPackage {
         packageGroup.representative
@@ -652,6 +779,10 @@ struct HangarPackageDetailView: View {
         return package.contents.compactMap(\.upgradePricing).first
     }
 
+    private var couponInfo: HangarCouponInfo? {
+        HangarCouponParser.info(from: package.title)
+    }
+
     private var displayThumbnailURL: URL? {
         package.packageThumbnailURL
     }
@@ -683,7 +814,8 @@ struct HangarPackageDetailView: View {
                         reloadToken: reloadToken
                     )
                     .frame(maxWidth: .infinity)
-                    .listRowInsets(EdgeInsets(top: 12, leading: 0, bottom: 12, trailing: 0))
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    .listRowBackground(Color.clear)
                 }
             } else if let displayThumbnailURL {
                 Section {
@@ -703,6 +835,18 @@ struct HangarPackageDetailView: View {
                     .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
             } header: {
                 Text("Package")
+            }
+
+            if let couponInfo {
+                Section {
+                    CouponDetailView(
+                        couponInfo: couponInfo,
+                        copiedCouponCode: copiedCouponCode,
+                        onCopyCode: copyCouponCode
+                    )
+                } header: {
+                    Text("Coupon")
+                }
             }
 
             if !primaryContents.isEmpty {
@@ -792,6 +936,19 @@ struct HangarPackageDetailView: View {
         }
         .navigationTitle(package.title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Task {
+                        await presentSharePicture()
+                    }
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .disabled(isGeneratingSharePicture)
+                .accessibilityLabel(Text("Share Picture"))
+            }
+        }
         .sheet(item: $presentedActionSheet) { actionSheet in
             NavigationStack {
                 switch actionSheet {
@@ -826,6 +983,1500 @@ struct HangarPackageDetailView: View {
                 }
             }
         }
+        .sheet(item: $sharePicturePayload) { payload in
+            HangarShareSheet(activityItems: [payload.fileURL])
+        }
+        .alert(item: $sharePictureError) { error in
+            Alert(
+                title: Text("Share Picture Failed"),
+                message: Text(error.message),
+                dismissButton: .default(Text("OK"))
+            )
+        }
+        .overlay {
+            if isGeneratingSharePicture {
+                HangarSharePictureProgressOverlay()
+            }
+        }
+    }
+
+    private func presentSharePicture() async {
+        guard !isGeneratingSharePicture else {
+            return
+        }
+
+        isGeneratingSharePicture = true
+        defer {
+            isGeneratingSharePicture = false
+        }
+
+        if autoCopiesSharePictureDebugLog {
+            UIPasteboard.general.string = HangarCardDebugExporter.string(
+                for: packageGroup,
+                showsUpgradedShipInHangar: appModel.showsUpgradedShipInHangar,
+                compositeUpgradeThumbnailsEnabled: appModel.compositeUpgradeThumbnailsEnabled
+            )
+        }
+
+        do {
+            let fileURL = try await HangarSharePictureGenerator.makeJPEG(
+                for: packageGroup,
+                fleet: appModel.snapshot?.fleet ?? []
+            )
+            sharePicturePayload = HangarSharePicturePayload(fileURL: fileURL)
+        } catch {
+            sharePictureError = HangarSharePictureError(message: error.localizedDescription)
+        }
+    }
+
+    private func copyCouponCode(_ code: String) {
+        UIPasteboard.general.string = code
+        copiedCouponCode = true
+
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await MainActor.run {
+                copiedCouponCode = false
+            }
+        }
+    }
+}
+
+private struct HangarSharePicturePayload: Identifiable {
+    let id = UUID()
+    let fileURL: URL
+}
+
+private struct HangarSharePictureError: Identifiable {
+    let id = UUID()
+    let message: String
+}
+
+private struct HangarShareSheet: UIViewControllerRepresentable {
+    let activityItems: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+private struct HangarSharePictureProgressOverlay: View {
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.22)
+                .ignoresSafeArea()
+
+            ProgressView("Generating share picture...")
+                .padding(18)
+                .background(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(.regularMaterial)
+                )
+        }
+    }
+}
+
+private enum HangarSharePictureGenerator {
+    private struct ShareImages {
+        let primary: UIImage?
+        let source: UIImage?
+        let target: UIImage?
+        let contentThumbnails: [String: UIImage]
+    }
+
+    private struct ShareVisualContentRow {
+        let id: String
+        let title: String
+        let detail: String?
+        let imageURL: URL?
+        let fallbackSystemImage: String
+    }
+
+    private struct ShareContentRow {
+        let title: String
+        let detail: String?
+    }
+
+    private struct ShareContentSections {
+        let visualRows: [ShareVisualContentRow]
+        let otherRows: [ShareContentRow]
+
+        var isEmpty: Bool {
+            visualRows.isEmpty && otherRows.isEmpty
+        }
+    }
+
+    private enum ShareImageContentMode {
+        case fill
+        case fit
+    }
+
+    private struct ShipValueLookup {
+        let valuesByKey: [String: Decimal]
+
+        func valueText(for item: PackageItem, in package: HangarPackage) -> String {
+            valuesByKey[Self.key(packageID: package.id, title: item.title)]?.usdString
+                ?? AppLocalizer.string("Unavailable")
+        }
+
+        static func key(packageID: Int, title: String) -> String {
+            "\(packageID)|\(normalizedTitle(title))"
+        }
+
+        private static func normalizedTitle(_ title: String) -> String {
+            title
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .localizedLowercase
+        }
+    }
+
+    private enum SharePictureError: LocalizedError {
+        case encodingFailed
+
+        var errorDescription: String? {
+            AppLocalizer.string("Unable to create the share picture.")
+        }
+    }
+
+    private static let canvasWidth: CGFloat = 1080
+    private static let margin: CGFloat = 72
+    private static let imageHeight: CGFloat = 520
+    private static let upgradeImageHeight: CGFloat = 430
+    private static let upgradeHeroHeight: CGFloat = 650
+    private static let cornerRadius: CGFloat = 34
+    private static let footerTopSpacing: CGFloat = 52
+    private static let footerHeight: CGFloat = 58
+    private static let footerLogoSize: CGFloat = 42
+    private static let visualContentThumbnailSize: CGFloat = 132
+    private static let visualContentThumbnailCornerRadius: CGFloat = 24
+    private static let visualContentTextGap: CGFloat = 24
+    private static let heroImageDisplayScale: CGFloat = 2
+    private static let upgradeImageOutwardShift: CGFloat = 0.14
+
+    private static let backgroundColor = UIColor(red: 0.035, green: 0.047, blue: 0.058, alpha: 1)
+    private static let surfaceColor = UIColor(red: 0.085, green: 0.105, blue: 0.125, alpha: 1)
+    private static let secondarySurfaceColor = UIColor(red: 0.115, green: 0.140, blue: 0.165, alpha: 1)
+    private static let primaryTextColor = UIColor.white
+    private static let secondaryTextColor = UIColor(white: 0.72, alpha: 1)
+    private static let tertiaryTextColor = UIColor(white: 0.58, alpha: 1)
+    private static let accentColor = UIColor(red: 0.13, green: 0.63, blue: 1, alpha: 1)
+    private static let separatorColor = UIColor.white.withAlphaComponent(0.12)
+
+    @MainActor
+    static func makeJPEG(for packageGroup: GroupedHangarPackage, fleet: [FleetShip]) async throws -> URL {
+        let package = packageGroup.representative
+        let upgradePricing = package.shareUpgradePricing
+        let contentSections = contentSections(for: package, shipValues: shipValueLookup(from: fleet))
+        let images = await loadImages(
+            for: package,
+            upgradePricing: upgradePricing,
+            visualRows: contentSections.visualRows
+        )
+        let size = CGSize(
+            width: canvasWidth,
+            height: measuredHeight(package: package, upgradePricing: upgradePricing, contentSections: contentSections)
+        )
+        let image = render(
+            package: package,
+            upgradePricing: upgradePricing,
+            contentSections: contentSections,
+            images: images,
+            size: size
+        )
+
+        guard let data = image.jpegData(compressionQuality: 0.92) else {
+            throw SharePictureError.encodingFailed
+        }
+
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(safeFilename(package.title))-\(UUID().uuidString.prefix(8)).jpg")
+        try data.write(to: fileURL, options: .atomic)
+        return fileURL
+    }
+
+    private static func loadImages(
+        for package: HangarPackage,
+        upgradePricing: PackageItem.UpgradePricing?,
+        visualRows: [ShareVisualContentRow]
+    ) async -> ShareImages {
+        async let contentThumbnails = loadContentThumbnails(for: visualRows)
+
+        if let upgradePricing {
+            let upgradeTargetSize = CGSize(
+                width: canvasWidth - margin * 2,
+                height: upgradeImageHeight
+            )
+            async let sourceImage = loadImage(
+                from: upgradePricing.sourceShipImageURL,
+                targetSize: upgradeTargetSize,
+                displayScale: heroImageDisplayScale
+            )
+            async let targetImage = loadImage(
+                from: upgradePricing.targetShipImageURL,
+                targetSize: upgradeTargetSize,
+                displayScale: heroImageDisplayScale
+            )
+            return await ShareImages(primary: nil, source: sourceImage, target: targetImage, contentThumbnails: contentThumbnails)
+        }
+
+        let imageURL = package.packageThumbnailURL ?? package.thumbnailURL
+        async let primaryImage = loadImage(
+            from: imageURL,
+            targetSize: CGSize(width: canvasWidth - margin * 2, height: imageHeight),
+            displayScale: heroImageDisplayScale
+        )
+        return await ShareImages(primary: primaryImage, source: nil, target: nil, contentThumbnails: contentThumbnails)
+    }
+
+    private static func loadContentThumbnails(for visualRows: [ShareVisualContentRow]) async -> [String: UIImage] {
+        var thumbnails: [String: UIImage] = [:]
+
+        for row in visualRows {
+            guard let image = await loadImage(
+                from: row.imageURL,
+                targetSize: CGSize(width: visualContentThumbnailSize, height: visualContentThumbnailSize)
+            ) else {
+                continue
+            }
+
+            thumbnails[row.id] = image
+        }
+
+        return thumbnails
+    }
+
+    private static func loadImage(
+        from url: URL?,
+        targetSize: CGSize,
+        displayScale: CGFloat = 1
+    ) async -> UIImage? {
+        guard let url else {
+            return nil
+        }
+
+        return try? await URLCachedImageStore.shared.image(
+            for: url,
+            targetPointSize: targetSize,
+            displayScale: displayScale,
+            maxRetries: 2
+        )
+    }
+
+    private static func shipValueLookup(from fleet: [FleetShip]) -> ShipValueLookup {
+        let valuesByKey = fleet.reduce(into: [String: Decimal]()) { partialResult, ship in
+            guard let msrpUSD = ship.msrpUSD else {
+                return
+            }
+
+            partialResult[ShipValueLookup.key(packageID: ship.sourcePackageID, title: ship.displayName)] = msrpUSD
+        }
+
+        return ShipValueLookup(valuesByKey: valuesByKey)
+    }
+
+    private static func contentSections(
+        for package: HangarPackage,
+        shipValues: ShipValueLookup
+    ) -> ShareContentSections {
+        let visibleItems = package.contents
+            .filter { HangarPledgeSummaryParser.shouldRenderContentTitle($0.title) }
+
+        let visualRows = visibleItems
+            .filter(isVisualContentItem)
+            .map { item in
+                ShareVisualContentRow(
+                    id: item.id,
+                    title: item.title,
+                    detail: visualDetail(for: item, package: package, shipValues: shipValues),
+                    imageURL: item.imageURL,
+                    fallbackSystemImage: item.isShipLike ? "airplane" : "paintpalette.fill"
+                )
+            }
+
+        let insuranceRows = insuranceRows(for: package, visibleItems: visibleItems)
+        guard !package.isUpgradeOnlyPledge else {
+            return ShareContentSections(
+                visualRows: visualRows,
+                otherRows: insuranceRows
+            )
+        }
+
+        let otherRows = visibleItems
+            .filter { !isVisualContentItem($0) && !isInsuranceItem($0) }
+            .map { plainContentRow(for: $0) }
+
+        return ShareContentSections(
+            visualRows: visualRows,
+            otherRows: insuranceRows + otherRows
+        )
+    }
+
+    nonisolated private static func isVisualContentItem(_ item: PackageItem) -> Bool {
+        item.isShipLike || isPaintItem(item)
+    }
+
+    nonisolated private static func isPaintItem(_ item: PackageItem) -> Bool {
+        let haystack = [item.title, item.detail, item.category.rawValue]
+            .joined(separator: " ")
+            .localizedLowercase
+
+        return haystack.contains("paint")
+            || haystack.contains("skin")
+            || haystack.contains("livery")
+            || haystack.contains("camo")
+    }
+
+    nonisolated private static func isInsuranceItem(_ item: PackageItem) -> Bool {
+        isInsuranceLabelCandidate(item.title) || isInsuranceLabelCandidate(item.detail)
+    }
+
+    nonisolated private static func isInsuranceLabelCandidate(_ value: String) -> Bool {
+        let lowercased = value.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
+        guard !lowercased.isEmpty else {
+            return false
+        }
+
+        return lowercased.contains("insurance")
+            || lowercased.contains("lti")
+            || lowercased.range(of: #"\d+\s*(month|months|mo|year|years|yr)\b"#, options: .regularExpression) != nil
+    }
+
+    private static func visualDetail(
+        for item: PackageItem,
+        package: HangarPackage,
+        shipValues: ShipValueLookup
+    ) -> String? {
+        if item.isShipLike {
+            return shipValues.valueText(for: item, in: package)
+        }
+
+        let detailParts = [
+            AppLocalizer.string(item.category.rawValue),
+            cleanedDetail(item.detail)
+        ].compactMap { $0 }
+
+        return detailParts.isEmpty ? nil : detailParts.joined(separator: " - ")
+    }
+
+    private static func insuranceRows(
+        for package: HangarPackage,
+        visibleItems: [PackageItem]
+    ) -> [ShareContentRow] {
+        var rawValues = package.insuranceOptions ?? []
+        rawValues.append(package.insurance)
+
+        for item in visibleItems where isInsuranceItem(item) {
+            rawValues.append(item.title)
+
+            if isInsuranceLabelCandidate(item.detail) {
+                rawValues.append(item.detail)
+            }
+        }
+
+        var seen = Set<String>()
+        return HangarPackage.normalizedInsuranceLevels(rawValues).compactMap { value in
+            let displayLabel = HangarPackage.localizedInsuranceDisplayLabel(from: value)
+            let trimmedLabel = displayLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lowercasedLabel = trimmedLabel.localizedLowercase
+
+            guard !trimmedLabel.isEmpty,
+                  !HangarPackage.isUnknownInsuranceLabel(trimmedLabel),
+                  lowercasedLabel != "insurance",
+                  lowercasedLabel != "rsi pledge entitlement",
+                  seen.insert(lowercasedLabel).inserted else {
+                return nil
+            }
+
+            return ShareContentRow(
+                title: trimmedLabel,
+                detail: AppLocalizer.string("Insurance")
+            )
+        }
+    }
+
+    private static func plainContentRow(for item: PackageItem) -> ShareContentRow {
+        let detailParts = [
+            AppLocalizer.string(item.category.rawValue),
+            cleanedDetail(item.detail)
+        ].compactMap { $0 }
+
+        return ShareContentRow(
+            title: item.title,
+            detail: detailParts.isEmpty ? nil : detailParts.joined(separator: " - ")
+        )
+    }
+
+    private static func measuredHeight(
+        package: HangarPackage,
+        upgradePricing: PackageItem.UpgradePricing?,
+        contentSections: ShareContentSections
+    ) -> CGFloat {
+        let textWidth = canvasWidth - margin * 2
+        var height = margin
+        height += measuredTextHeight(package.title, font: titleFont, width: textWidth)
+        height += 34
+
+        if upgradePricing != nil {
+            height += upgradeHeroHeight
+            height += 34
+        } else {
+            height += imageHeight
+            height += 34
+            height += priceBlockHeight(for: package)
+        }
+
+        if !contentSections.isEmpty {
+            height += 44
+            height += measuredContentSectionsHeight(contentSections, textWidth: textWidth)
+        }
+
+        height += footerTopSpacing
+        height += footerHeight
+        height += margin
+        return ceil(height)
+    }
+
+    private static func render(
+        package: HangarPackage,
+        upgradePricing: PackageItem.UpgradePricing?,
+        contentSections: ShareContentSections,
+        images: ShareImages,
+        size: CGSize
+    ) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+
+        return UIGraphicsImageRenderer(size: size, format: format).image { context in
+            let cgContext = context.cgContext
+            backgroundColor.setFill()
+            cgContext.fill(CGRect(origin: .zero, size: size))
+
+            var y = margin
+            y += drawText(
+                package.title,
+                in: CGRect(x: margin, y: y, width: canvasWidth - margin * 2, height: 240),
+                font: titleFont,
+                color: primaryTextColor
+            )
+            y += 34
+
+            if let upgradePricing {
+                let heroRect = CGRect(x: margin, y: y, width: canvasWidth - margin * 2, height: upgradeHeroHeight)
+                drawUpgradeHero(
+                    in: heroRect,
+                    package: package,
+                    pricing: upgradePricing,
+                    images: images,
+                    context: cgContext
+                )
+                y += upgradeHeroHeight + 34
+            } else {
+                let imageRect = CGRect(x: margin, y: y, width: canvasWidth - margin * 2, height: imageHeight)
+                drawImageSection(
+                    in: imageRect,
+                    images: images,
+                    context: cgContext
+                )
+                y += imageHeight + 34
+
+                y += drawPriceBlock(for: package, at: y, context: cgContext)
+            }
+
+            if !contentSections.isEmpty {
+                y += 44
+                y += drawContentSections(contentSections, images: images, at: y, context: cgContext)
+            }
+
+            y += footerTopSpacing
+            drawWatermark(at: y)
+        }
+    }
+
+    private static func measuredContentSectionsHeight(
+        _ sections: ShareContentSections,
+        textWidth: CGFloat
+    ) -> CGFloat {
+        var height: CGFloat = 0
+
+        if !sections.visualRows.isEmpty {
+            height += measuredContentSectionHeaderHeight(AppLocalizer.string("Items"), textWidth: textWidth)
+            for row in sections.visualRows {
+                height += measuredVisualContentRowHeight(row, textWidth: textWidth)
+            }
+        }
+
+        if !sections.otherRows.isEmpty {
+            if height > 0 {
+                height += 44
+            }
+
+            height += measuredContentSectionHeaderHeight(AppLocalizer.string("Other Items"), textWidth: textWidth)
+            for row in sections.otherRows {
+                height += measuredPlainContentRowHeight(row, textWidth: textWidth)
+            }
+        }
+
+        if sections.isEmpty {
+            height += measuredContentSectionHeaderHeight(AppLocalizer.string("Items"), textWidth: textWidth)
+            height += measuredTextHeight(AppLocalizer.string("No listed contents"), font: rowDetailFont, width: textWidth)
+        }
+
+        return height
+    }
+
+    private static func measuredContentSectionHeaderHeight(_ title: String, textWidth: CGFloat) -> CGFloat {
+        measuredTextHeight(title, font: sectionHeaderFont, width: textWidth) + 20
+    }
+
+    private static func measuredVisualContentRowHeight(
+        _ row: ShareVisualContentRow,
+        textWidth: CGFloat
+    ) -> CGFloat {
+        let contentTextWidth = textWidth - visualContentThumbnailSize - visualContentTextGap
+        var textHeight = measuredTextHeight(row.title, font: rowTitleFont, width: contentTextWidth)
+
+        if let detail = row.detail {
+            textHeight += 6 + measuredTextHeight(detail, font: rowDetailFont, width: contentTextWidth)
+        }
+
+        return max(visualContentThumbnailSize, textHeight + 10) + 28
+    }
+
+    private static func measuredPlainContentRowHeight(
+        _ row: ShareContentRow,
+        textWidth: CGFloat
+    ) -> CGFloat {
+        var textHeight = measuredTextHeight(row.title, font: rowTitleFont, width: textWidth - 34)
+
+        if let detail = row.detail {
+            textHeight += 6 + measuredTextHeight(detail, font: rowDetailFont, width: textWidth - 34)
+        }
+
+        return textHeight + 24
+    }
+
+    private static func drawContentSections(
+        _ sections: ShareContentSections,
+        images: ShareImages,
+        at y: CGFloat,
+        context: CGContext
+    ) -> CGFloat {
+        let textWidth = canvasWidth - margin * 2
+        var currentY = y
+        var hasRenderedSection = false
+
+        if !sections.visualRows.isEmpty {
+            currentY += drawContentSectionHeader(AppLocalizer.string("Items"), at: currentY)
+            for row in sections.visualRows {
+                currentY += drawVisualContentRow(row, image: images.contentThumbnails[row.id], at: currentY, context: context)
+            }
+            hasRenderedSection = true
+        }
+
+        if !sections.otherRows.isEmpty {
+            if hasRenderedSection {
+                currentY += 44
+            }
+
+            currentY += drawContentSectionHeader(AppLocalizer.string("Other Items"), at: currentY)
+            for row in sections.otherRows {
+                currentY += drawContentRow(row, at: currentY, context: context)
+            }
+            hasRenderedSection = true
+        }
+
+        if !hasRenderedSection {
+            currentY += drawContentSectionHeader(AppLocalizer.string("Items"), at: currentY)
+            currentY += drawText(
+                AppLocalizer.string("No listed contents"),
+                in: CGRect(x: margin, y: currentY, width: textWidth, height: 60),
+                font: rowDetailFont,
+                color: secondaryTextColor
+            )
+        }
+
+        return currentY - y
+    }
+
+    private static func drawContentSectionHeader(_ title: String, at y: CGFloat) -> CGFloat {
+        let height = drawText(
+            title,
+            in: CGRect(x: margin, y: y, width: canvasWidth - margin * 2, height: 52),
+            font: sectionHeaderFont,
+            color: primaryTextColor
+        )
+        return height + 20
+    }
+
+    private static func drawImageSection(
+        in rect: CGRect,
+        images: ShareImages,
+        context: CGContext
+    ) {
+        drawImageOrFallback(
+            images.primary,
+            in: rect,
+            fallbackSystemImage: "shippingbox.fill",
+            contentMode: .fit,
+            context: context
+        )
+    }
+
+    private static func drawUpgradeHero(
+        in rect: CGRect,
+        package: HangarPackage,
+        pricing: PackageItem.UpgradePricing,
+        images: ShareImages,
+        context: CGContext
+    ) {
+        let imageRect = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: upgradeImageHeight)
+        drawUpgradeStepFourBothMasksPanel(
+            sourceImage: images.source,
+            targetImage: images.target,
+            in: imageRect,
+            context: context
+        )
+
+        drawUpgradeCenterSummary(
+            package: package,
+            pricing: pricing,
+            in: imageRect,
+            context: context
+        )
+
+        let captionGap: CGFloat = 44
+        let captionY = imageRect.maxY + 22
+        let columnWidth = (rect.width - captionGap) / 2
+        let sourceCaptionRect = CGRect(
+            x: rect.minX,
+            y: captionY,
+            width: columnWidth,
+            height: rect.maxY - captionY
+        )
+        let targetCaptionRect = CGRect(
+            x: sourceCaptionRect.maxX + captionGap,
+            y: captionY,
+            width: columnWidth,
+            height: rect.maxY - captionY
+        )
+        drawUpgradeShipCaption(
+            title: pricing.sourceShipName,
+            label: AppLocalizer.string("From"),
+            msrp: pricing.sourceShipMSRPUSD,
+            in: sourceCaptionRect,
+            alignment: .left
+        )
+        drawUpgradeShipCaption(
+            title: pricing.targetShipName,
+            label: AppLocalizer.string("To"),
+            msrp: pricing.targetShipMSRPUSD,
+            in: targetCaptionRect,
+            alignment: .right
+        )
+    }
+
+    private static func drawUpgradeShipCaption(
+        title: String,
+        label: String,
+        msrp: Decimal?,
+        in rect: CGRect,
+        alignment: NSTextAlignment
+    ) {
+        _ = drawText(
+            label.uppercased(),
+            in: CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: 30),
+            font: upgradeCaptionLabelFont,
+            color: tertiaryTextColor,
+            alignment: alignment
+        )
+        let titleY = rect.minY + 32
+        let titleLimit: CGFloat = 108
+        let titleHeight = drawText(
+            title,
+            in: CGRect(x: rect.minX, y: titleY, width: rect.width, height: titleLimit),
+            font: upgradeShipNameFont,
+            color: primaryTextColor,
+            alignment: alignment
+        )
+        _ = drawText(
+            msrp?.usdString ?? AppLocalizer.string("Unavailable"),
+            in: CGRect(x: rect.minX, y: titleY + min(titleHeight, titleLimit), width: rect.width, height: 50),
+            font: upgradeShipPriceFont,
+            color: secondaryTextColor,
+            alignment: alignment
+        )
+    }
+
+    private static func drawUpgradeStepFourBothMasksPanel(
+        sourceImage: UIImage?,
+        targetImage: UIImage?,
+        in rect: CGRect,
+        context: CGContext
+    ) {
+        let panelPath = UIBezierPath(roundedRect: rect, cornerRadius: cornerRadius)
+        let topSplitX = rect.midX - 72
+        let bottomSplitX = rect.midX + 78
+        let sourceClipPath = UIBezierPath()
+        sourceClipPath.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        sourceClipPath.addLine(to: CGPoint(x: topSplitX, y: rect.minY))
+        sourceClipPath.addLine(to: CGPoint(x: bottomSplitX, y: rect.maxY))
+        sourceClipPath.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        sourceClipPath.close()
+
+        let targetClipPath = UIBezierPath()
+        targetClipPath.move(to: CGPoint(x: topSplitX, y: rect.minY))
+        targetClipPath.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        targetClipPath.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        targetClipPath.addLine(to: CGPoint(x: bottomSplitX, y: rect.maxY))
+        targetClipPath.close()
+
+        let sourceLayer = renderUpgradeImageLayer(
+            sourceImage,
+            fallbackSystemImage: "arrow.uturn.backward.circle.fill",
+            size: rect.size,
+            horizontalAlignment: 0,
+            outwardShift: upgradeImageOutwardShift
+        )
+        let targetLayer = renderUpgradeImageLayer(
+            targetImage,
+            fallbackSystemImage: "arrow.up.right.circle.fill",
+            size: rect.size,
+            horizontalAlignment: 1,
+            outwardShift: upgradeImageOutwardShift
+        )
+
+        context.saveGState()
+        panelPath.addClip()
+        surfaceColor.setFill()
+        UIRectFill(rect)
+        drawUpgradeImageLayer(
+            sourceLayer,
+            clipPath: sourceClipPath,
+            in: rect
+        )
+        drawUpgradeImageLayer(
+            targetLayer,
+            clipPath: targetClipPath,
+            in: rect
+        )
+        context.restoreGState()
+
+        let splitLine = UIBezierPath()
+        splitLine.move(to: CGPoint(x: topSplitX, y: rect.minY))
+        splitLine.addLine(to: CGPoint(x: bottomSplitX, y: rect.maxY))
+        UIColor.white.withAlphaComponent(0.26).setStroke()
+        splitLine.lineWidth = 3
+        splitLine.stroke()
+
+        separatorColor.setStroke()
+        panelPath.lineWidth = 1
+        panelPath.stroke()
+    }
+
+    private static func drawDiagonalUpgradeImagePanel(
+        sourceImage: UIImage?,
+        targetImage: UIImage?,
+        in rect: CGRect,
+        context: CGContext
+    ) {
+        let panelPath = UIBezierPath(roundedRect: rect, cornerRadius: cornerRadius)
+        let topSplitX = rect.midX - 72
+        let bottomSplitX = rect.midX + 78
+        let sourceClipPath = UIBezierPath()
+        sourceClipPath.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        sourceClipPath.addLine(to: CGPoint(x: topSplitX, y: rect.minY))
+        sourceClipPath.addLine(to: CGPoint(x: bottomSplitX, y: rect.maxY))
+        sourceClipPath.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        sourceClipPath.close()
+
+        let targetClipPath = UIBezierPath()
+        targetClipPath.move(to: CGPoint(x: topSplitX, y: rect.minY))
+        targetClipPath.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        targetClipPath.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        targetClipPath.addLine(to: CGPoint(x: bottomSplitX, y: rect.maxY))
+        targetClipPath.close()
+
+        context.saveGState()
+        panelPath.addClip()
+        surfaceColor.setFill()
+        UIRectFill(rect)
+
+        let sourceLayer = renderUpgradeImageLayer(
+            sourceImage,
+            fallbackSystemImage: "arrow.uturn.backward.circle.fill",
+            size: rect.size,
+            horizontalAlignment: 0,
+            outwardShift: upgradeImageOutwardShift
+        )
+        let targetLayer = renderUpgradeImageLayer(
+            targetImage,
+            fallbackSystemImage: "arrow.up.right.circle.fill",
+            size: rect.size,
+            horizontalAlignment: 1,
+            outwardShift: upgradeImageOutwardShift
+        )
+
+        drawUpgradeImageLayer(
+            sourceLayer,
+            clipPath: sourceClipPath,
+            in: rect
+        )
+        drawUpgradeImageLayer(
+            targetLayer,
+            clipPath: targetClipPath,
+            in: rect
+        )
+
+        UIColor.black.withAlphaComponent(0.18).setFill()
+        UIRectFill(rect)
+
+        let splitLine = UIBezierPath()
+        splitLine.move(to: CGPoint(x: topSplitX, y: rect.minY))
+        splitLine.addLine(to: CGPoint(x: bottomSplitX, y: rect.maxY))
+        UIColor.white.withAlphaComponent(0.26).setStroke()
+        splitLine.lineWidth = 3
+        splitLine.stroke()
+        context.restoreGState()
+
+        separatorColor.setStroke()
+        panelPath.lineWidth = 1
+        panelPath.stroke()
+    }
+
+    private static func renderUpgradeImageLayer(
+        _ image: UIImage?,
+        fallbackSystemImage: String,
+        size: CGSize,
+        horizontalAlignment: CGFloat,
+        outwardShift: CGFloat
+    ) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+
+        return UIGraphicsImageRenderer(size: size, format: format).image { context in
+            let bounds = CGRect(origin: .zero, size: size)
+            context.cgContext.clear(bounds)
+
+            if let image {
+                drawImage(
+                    image,
+                    fitting: bounds,
+                    horizontalAlignment: horizontalAlignment,
+                    outwardShift: outwardShift
+                )
+            } else {
+                drawFallback(in: bounds, systemImage: fallbackSystemImage)
+            }
+        }
+    }
+
+    private static func drawUpgradeImageLayer(
+        _ image: UIImage,
+        clipPath: UIBezierPath,
+        in rect: CGRect
+    ) {
+        guard let context = UIGraphicsGetCurrentContext() else {
+            image.draw(in: rect)
+            return
+        }
+
+        context.saveGState()
+        clipPath.addClip()
+        image.draw(in: rect)
+        context.restoreGState()
+    }
+
+    private static func drawUpgradeCenterSummary(
+        package: HangarPackage,
+        pricing: PackageItem.UpgradePricing,
+        in rect: CGRect,
+        context: CGContext
+    ) {
+        let deltaRect = CGRect(x: rect.midX - 118, y: rect.midY - 78, width: 236, height: 156)
+        let deltaPath = UIBezierPath(roundedRect: deltaRect, cornerRadius: 28)
+
+        context.saveGState()
+        context.setShadow(
+            offset: .zero,
+            blur: 34,
+            color: UIColor.black.withAlphaComponent(0.48).cgColor
+        )
+        secondarySurfaceColor.setFill()
+        deltaPath.fill()
+        context.restoreGState()
+
+        context.saveGState()
+        context.setShadow(
+            offset: CGSize(width: 0, height: 14),
+            blur: 26,
+            color: UIColor.black.withAlphaComponent(0.42).cgColor
+        )
+        secondarySurfaceColor.setFill()
+        deltaPath.fill()
+        context.restoreGState()
+
+        secondarySurfaceColor.setFill()
+        deltaPath.fill()
+        UIColor.white.withAlphaComponent(0.08).setStroke()
+        deltaPath.lineWidth = 1
+        deltaPath.stroke()
+
+        _ = drawText(
+            upgradeDifferenceText(for: pricing, fallbackPackage: package),
+            in: CGRect(x: deltaRect.minX + 18, y: deltaRect.minY + 38, width: deltaRect.width - 36, height: 42),
+            font: upgradeDifferenceFont,
+            color: primaryTextColor,
+            alignment: .center
+        )
+
+        _ = drawText(
+            "\(AppLocalizer.string("Melt")) \(package.originalValueUSD.usdString)",
+            in: CGRect(x: deltaRect.minX + 18, y: deltaRect.minY + 92, width: deltaRect.width - 36, height: 34),
+            font: upgradePriceNoteFont,
+            color: secondaryTextColor,
+            alignment: .center
+        )
+    }
+
+    private static func drawImageOrFallback(
+        _ image: UIImage?,
+        in rect: CGRect,
+        fallbackSystemImage: String,
+        contentMode: ShareImageContentMode = .fill,
+        context: CGContext
+    ) {
+        if let image, contentMode == .fit, let fittedRect = aspectFitRect(for: image, in: rect) {
+            let fittedCornerRadius = min(cornerRadius, min(fittedRect.width, fittedRect.height) / 2)
+            let fittedPath = UIBezierPath(roundedRect: fittedRect, cornerRadius: fittedCornerRadius)
+
+            context.saveGState()
+            fittedPath.addClip()
+            image.draw(in: fittedRect)
+            context.restoreGState()
+
+            separatorColor.setStroke()
+            fittedPath.stroke()
+            return
+        }
+
+        context.saveGState()
+        UIBezierPath(roundedRect: rect, cornerRadius: cornerRadius).addClip()
+
+        if let image {
+            drawImage(image, filling: rect)
+        } else {
+            drawFallback(in: rect, systemImage: fallbackSystemImage)
+        }
+
+        context.restoreGState()
+        separatorColor.setStroke()
+        UIBezierPath(roundedRect: rect, cornerRadius: cornerRadius).stroke()
+    }
+
+    private static func aspectFitRect(for image: UIImage, in rect: CGRect) -> CGRect? {
+        guard image.size.width > 0, image.size.height > 0 else {
+            return nil
+        }
+
+        let scale = min(rect.width / image.size.width, rect.height / image.size.height)
+        let drawSize = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        return CGRect(
+            x: rect.midX - drawSize.width / 2,
+            y: rect.midY - drawSize.height / 2,
+            width: drawSize.width,
+            height: drawSize.height
+        )
+    }
+
+    private static func drawImage(_ image: UIImage, filling rect: CGRect) {
+        drawImage(image, filling: rect, horizontalBias: 0.5)
+    }
+
+    private static func drawImage(
+        _ image: UIImage,
+        fitting rect: CGRect,
+        horizontalAlignment: CGFloat,
+        outwardShift: CGFloat = 0
+    ) {
+        guard image.size.width > 0, image.size.height > 0 else {
+            drawFallback(in: rect, systemImage: "shippingbox.fill")
+            return
+        }
+
+        let scale = min(rect.width / image.size.width, rect.height / image.size.height)
+        let drawSize = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let clampedHorizontalAlignment = min(max(horizontalAlignment, 0), 1)
+        let outwardDirection: CGFloat = clampedHorizontalAlignment < 0.5 ? -1 : 1
+        let blankX = max(0, rect.width - drawSize.width)
+        let blankY = max(0, rect.height - drawSize.height)
+        let drawRect = CGRect(
+            x: rect.minX + blankX * clampedHorizontalAlignment + rect.width * outwardShift * outwardDirection,
+            y: rect.minY + blankY / 2,
+            width: drawSize.width,
+            height: drawSize.height
+        )
+        image.draw(in: drawRect)
+    }
+
+    private static func drawImage(_ image: UIImage, filling rect: CGRect, horizontalBias: CGFloat) {
+        guard image.size.width > 0, image.size.height > 0 else {
+            drawFallback(in: rect, systemImage: "shippingbox.fill")
+            return
+        }
+
+        let scale = max(rect.width / image.size.width, rect.height / image.size.height)
+        let drawSize = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let clampedHorizontalBias = min(max(horizontalBias, 0), 1)
+        let overflowX = max(0, drawSize.width - rect.width)
+        let overflowY = max(0, drawSize.height - rect.height)
+        let drawRect = CGRect(
+            x: rect.minX - overflowX * clampedHorizontalBias,
+            y: rect.minY - overflowY / 2,
+            width: drawSize.width,
+            height: drawSize.height
+        )
+        image.draw(in: drawRect)
+    }
+
+    private static func drawFallback(in rect: CGRect, systemImage: String) {
+        let colors = [
+            UIColor(red: 0.08, green: 0.16, blue: 0.22, alpha: 1).cgColor,
+            UIColor(red: 0.04, green: 0.08, blue: 0.12, alpha: 1).cgColor
+        ] as CFArray
+        let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1])
+        if let gradient, let context = UIGraphicsGetCurrentContext() {
+            context.drawLinearGradient(gradient, start: rect.origin, end: CGPoint(x: rect.maxX, y: rect.maxY), options: [])
+        }
+
+        let configuration = UIImage.SymbolConfiguration(pointSize: 96, weight: .semibold)
+        let symbol = UIImage(systemName: systemImage, withConfiguration: configuration)?
+            .withTintColor(UIColor.white.withAlphaComponent(0.72), renderingMode: .alwaysOriginal)
+        let symbolSize = symbol?.size ?? CGSize(width: 96, height: 96)
+        let symbolRect = CGRect(
+            x: rect.midX - symbolSize.width / 2,
+            y: rect.midY - symbolSize.height / 2,
+            width: symbolSize.width,
+            height: symbolSize.height
+        )
+        symbol?.draw(in: symbolRect)
+    }
+
+    private static func drawArrow(in rect: CGRect) {
+        let configuration = UIImage.SymbolConfiguration(pointSize: 58, weight: .bold)
+        let symbol = UIImage(systemName: "arrow.right", withConfiguration: configuration)?
+            .withTintColor(accentColor, renderingMode: .alwaysOriginal)
+        symbol?.draw(in: rect)
+    }
+
+    private static func drawPriceBlock(for package: HangarPackage, at y: CGFloat, context: CGContext) -> CGFloat {
+        let rect = CGRect(x: margin, y: y, width: canvasWidth - margin * 2, height: priceBlockHeight(for: package))
+        fillRoundedRect(rect, color: surfaceColor)
+
+        _ = drawText(
+            AppLocalizer.string("Price"),
+            in: CGRect(x: rect.minX + 34, y: rect.minY + 26, width: rect.width - 68, height: 40),
+            font: eyebrowFont,
+            color: secondaryTextColor
+        )
+
+        if package.originalValueUSD == package.currentValueUSD {
+            _ = drawText(
+                package.currentValueUSD.usdString,
+                in: CGRect(x: rect.minX + 34, y: rect.minY + 70, width: rect.width - 68, height: 72),
+                font: priceFont,
+                color: primaryTextColor
+            )
+        } else {
+            let columnWidth = (rect.width - 90) / 2
+            drawPriceColumn(
+                label: AppLocalizer.string("Melt Value"),
+                value: package.originalValueUSD.usdString,
+                rect: CGRect(x: rect.minX + 34, y: rect.minY + 72, width: columnWidth, height: 80)
+            )
+            drawPriceColumn(
+                label: AppLocalizer.string("Current Value"),
+                value: package.currentValueUSD.usdString,
+                rect: CGRect(x: rect.minX + 56 + columnWidth, y: rect.minY + 72, width: columnWidth, height: 80)
+            )
+        }
+
+        return rect.height + 24
+    }
+
+    private static func drawPriceColumn(label: String, value: String, rect: CGRect) {
+        _ = drawText(label, in: CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: 26), font: smallLabelFont, color: tertiaryTextColor)
+        _ = drawText(value, in: CGRect(x: rect.minX, y: rect.minY + 28, width: rect.width, height: 58), font: priceColumnFont, color: primaryTextColor)
+    }
+
+    private static func drawVisualContentRow(
+        _ row: ShareVisualContentRow,
+        image: UIImage?,
+        at y: CGFloat,
+        context: CGContext
+    ) -> CGFloat {
+        let textX = margin + visualContentThumbnailSize + visualContentTextGap
+        let textWidth = canvasWidth - margin * 2 - visualContentThumbnailSize - visualContentTextGap
+        let thumbnailRect = CGRect(
+            x: margin,
+            y: y,
+            width: visualContentThumbnailSize,
+            height: visualContentThumbnailSize
+        )
+
+        drawContentThumbnail(
+            image,
+            in: thumbnailRect,
+            fallbackSystemImage: row.fallbackSystemImage,
+            context: context
+        )
+
+        var consumed = drawText(
+            row.title,
+            in: CGRect(x: textX, y: y + 10, width: textWidth, height: 92),
+            font: rowTitleFont,
+            color: primaryTextColor
+        )
+
+        if let detail = row.detail {
+            consumed += 6
+            consumed += drawText(
+                detail,
+                in: CGRect(x: textX, y: y + 10 + consumed, width: textWidth, height: 54),
+                font: rowDetailFont,
+                color: secondaryTextColor
+            )
+        }
+
+        let rowHeight = max(visualContentThumbnailSize, consumed + 10) + 28
+        separatorColor.setFill()
+        UIBezierPath(
+            rect: CGRect(x: textX, y: y + rowHeight - 1, width: textWidth, height: 1)
+        ).fill()
+        return rowHeight
+    }
+
+    private static func drawContentThumbnail(
+        _ image: UIImage?,
+        in rect: CGRect,
+        fallbackSystemImage: String,
+        context: CGContext
+    ) {
+        context.saveGState()
+        UIBezierPath(roundedRect: rect, cornerRadius: visualContentThumbnailCornerRadius).addClip()
+
+        if let image {
+            drawImage(image, filling: rect)
+        } else {
+            drawFallback(in: rect, systemImage: fallbackSystemImage)
+        }
+
+        context.restoreGState()
+        separatorColor.setStroke()
+        UIBezierPath(roundedRect: rect, cornerRadius: visualContentThumbnailCornerRadius).stroke()
+    }
+
+    private static func drawContentRow(
+        _ row: ShareContentRow,
+        at y: CGFloat,
+        context: CGContext
+    ) -> CGFloat {
+        let textX = margin + 34
+        let textWidth = canvasWidth - margin * 2 - 34
+        let dotRect = CGRect(x: margin + 2, y: y + 13, width: 10, height: 10)
+        accentColor.setFill()
+        UIBezierPath(ovalIn: dotRect).fill()
+
+        var consumed = drawText(
+            row.title,
+            in: CGRect(x: textX, y: y, width: textWidth, height: 140),
+            font: rowTitleFont,
+            color: primaryTextColor
+        )
+
+        if let detail = row.detail {
+            consumed += 6
+            consumed += drawText(
+                detail,
+                in: CGRect(x: textX, y: y + consumed, width: textWidth, height: 96),
+                font: rowDetailFont,
+                color: secondaryTextColor
+            )
+        }
+
+        let rowHeight = consumed + 24
+        separatorColor.setFill()
+        let separatorY = y + rowHeight - 1
+        UIBezierPath(
+            rect: CGRect(x: textX, y: separatorY, width: textWidth, height: 1)
+        ).fill()
+        return rowHeight
+    }
+
+    private static func drawWatermark(at y: CGFloat) {
+        let poweredByText = AppLocalizer.string("Powered By")
+        let brandText = "Hangar Express"
+        let textHeight = measuredTextHeight(brandText, font: watermarkFont, width: canvasWidth)
+        let poweredByWidth = measuredTextWidth(poweredByText, font: watermarkFont)
+        let brandWidth = measuredTextWidth(brandText, font: watermarkBrandFont)
+        let gap: CGFloat = 12
+        let totalWidth = poweredByWidth + gap + footerLogoSize + gap + brandWidth
+        var x = (canvasWidth - totalWidth) / 2
+        let textY = y + (footerHeight - textHeight) / 2
+        let logoY = y + (footerHeight - footerLogoSize) / 2
+
+        _ = drawText(
+            poweredByText,
+            in: CGRect(x: x, y: textY, width: poweredByWidth + 2, height: textHeight + 4),
+            font: watermarkFont,
+            color: tertiaryTextColor
+        )
+        x += poweredByWidth + gap
+
+        drawBrandLogo(in: CGRect(x: x, y: logoY, width: footerLogoSize, height: footerLogoSize))
+        x += footerLogoSize + gap
+
+        _ = drawText(
+            brandText,
+            in: CGRect(x: x, y: textY, width: brandWidth + 2, height: textHeight + 4),
+            font: watermarkBrandFont,
+            color: secondaryTextColor
+        )
+    }
+
+    private static func drawBrandLogo(in rect: CGRect) {
+        if let image = appIconImage() {
+            drawRoundedAppIcon(image, in: rect)
+            return
+        }
+
+        accentColor.setFill()
+        UIBezierPath(roundedRect: rect, cornerRadius: rect.width * 0.25).fill()
+    }
+
+    private static func appIconImage() -> UIImage? {
+        let iconFiles = ((Bundle.main.object(forInfoDictionaryKey: "CFBundleIcons") as? [String: Any])?["CFBundlePrimaryIcon"] as? [String: Any])?["CFBundleIconFiles"] as? [String]
+
+        if let image = iconFiles?.reversed().lazy.compactMap({ UIImage(named: $0) }).first {
+            return image
+        }
+
+        return UIImage(named: "AppIcon") ?? UIImage(named: "Logo") ?? UIImage(named: "BrandMark")
+    }
+
+    private static func drawRoundedAppIcon(_ image: UIImage, in rect: CGRect) {
+        let iconRect = rect.insetBy(dx: 1, dy: 1)
+        let iconCornerRadius = iconRect.width * 0.2237
+        let path = UIBezierPath(roundedRect: iconRect, cornerRadius: iconCornerRadius)
+
+        if let context = UIGraphicsGetCurrentContext() {
+            context.saveGState()
+            context.setShadow(offset: CGSize(width: 0, height: 2), blur: 5, color: UIColor.black.withAlphaComponent(0.28).cgColor)
+            UIColor.black.withAlphaComponent(0.08).setFill()
+            path.fill()
+            context.restoreGState()
+        }
+
+        if let context = UIGraphicsGetCurrentContext() {
+            context.saveGState()
+            path.addClip()
+            drawImage(image, filling: iconRect)
+            context.restoreGState()
+        }
+
+        UIColor.white.withAlphaComponent(0.16).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+
+    private static func fillRoundedRect(_ rect: CGRect, color: UIColor, cornerRadius: CGFloat = cornerRadius) {
+        color.setFill()
+        UIBezierPath(roundedRect: rect, cornerRadius: cornerRadius).fill()
+    }
+
+    @discardableResult
+    private static func drawText(
+        _ text: String,
+        in rect: CGRect,
+        font: UIFont,
+        color: UIColor,
+        alignment: NSTextAlignment = .left
+    ) -> CGFloat {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byWordWrapping
+        paragraphStyle.lineSpacing = 2
+        paragraphStyle.alignment = alignment
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color,
+            .paragraphStyle: paragraphStyle
+        ]
+        let height = measuredTextHeight(text, font: font, width: rect.width)
+        NSString(string: text).draw(
+            with: CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: max(rect.height, height)),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attributes,
+            context: nil
+        )
+        return height
+    }
+
+    private static func measuredTextHeight(_ text: String, font: UIFont, width: CGFloat) -> CGFloat {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byWordWrapping
+        paragraphStyle.lineSpacing = 2
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .paragraphStyle: paragraphStyle
+        ]
+        let bounds = NSString(string: text).boundingRect(
+            with: CGSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attributes,
+            context: nil
+        )
+        return ceil(bounds.height)
+    }
+
+    private static func measuredTextWidth(_ text: String, font: UIFont) -> CGFloat {
+        ceil(NSString(string: text).size(withAttributes: [.font: font]).width)
+    }
+
+    private static func priceBlockHeight(for package: HangarPackage) -> CGFloat {
+        package.originalValueUSD == package.currentValueUSD ? 162 : 178
+    }
+
+    private static func upgradeDifferenceText(
+        for pricing: PackageItem.UpgradePricing,
+        fallbackPackage package: HangarPackage
+    ) -> String {
+        if let sourceValue = pricing.sourceShipMSRPUSD,
+           let targetValue = pricing.targetShipMSRPUSD {
+            return differenceCurrency(targetValue - sourceValue)
+        }
+
+        if let actualValue = pricing.actualValueUSD {
+            return differenceCurrency(actualValue)
+        }
+
+        return differenceCurrency(package.currentValueUSD)
+    }
+
+    private static func differenceCurrency(_ value: Decimal) -> String {
+        value.usdString
+    }
+
+    private static func cleanedDetail(_ detail: String) -> String? {
+        let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.localizedCaseInsensitiveCompare("Unknown") != .orderedSame,
+              trimmed.localizedCaseInsensitiveCompare("RSI pledge entitlement") != .orderedSame else {
+            return nil
+        }
+
+        return trimmed
+    }
+
+    private static func safeFilename(_ value: String) -> String {
+        let allowedCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let sanitized = value.unicodeScalars.map { scalar in
+            allowedCharacters.contains(scalar) ? String(scalar) : "-"
+        }
+            .joined()
+            .split(separator: "-")
+            .joined(separator: "-")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+
+        return sanitized.isEmpty ? "Hangar-Express-Pledge" : String(sanitized.prefix(80))
+    }
+
+    private static let titleFont = UIFont.systemFont(ofSize: 54, weight: .bold)
+    private static let sectionHeaderFont = UIFont.systemFont(ofSize: 36, weight: .bold)
+    private static let eyebrowFont = UIFont.systemFont(ofSize: 22, weight: .bold)
+    private static let smallLabelFont = UIFont.systemFont(ofSize: 24, weight: .semibold)
+    private static let priceFont = UIFont.monospacedDigitSystemFont(ofSize: 62, weight: .bold)
+    private static let priceColumnFont = UIFont.monospacedDigitSystemFont(ofSize: 48, weight: .bold)
+    private static let upgradeCaptionLabelFont = UIFont.systemFont(ofSize: 23, weight: .bold)
+    private static let upgradeShipNameFont = UIFont.systemFont(ofSize: 38, weight: .semibold)
+    private static let upgradeShipPriceFont = UIFont.monospacedDigitSystemFont(ofSize: 34, weight: .semibold)
+    private static let upgradeDifferenceFont = UIFont.monospacedDigitSystemFont(ofSize: 36, weight: .bold)
+    private static let upgradePriceNoteFont = UIFont.monospacedDigitSystemFont(ofSize: 22, weight: .semibold)
+    private static let rowTitleFont = UIFont.systemFont(ofSize: 30, weight: .semibold)
+    private static let rowDetailFont = UIFont.systemFont(ofSize: 26, weight: .regular)
+    private static let watermarkFont = UIFont.systemFont(ofSize: 24, weight: .medium)
+    private static let watermarkBrandFont = UIFont.systemFont(ofSize: 24, weight: .semibold)
+}
+
+private extension HangarPackage {
+    var shareUpgradePricing: PackageItem.UpgradePricing? {
+        guard isUpgradeOnlyPledge else {
+            return nil
+        }
+
+        return contents.compactMap(\.upgradePricing).first
+    }
+
+    var displayInsuranceText: String {
+        detailInsuranceText ?? Self.localizedInsuranceDisplayLabel(from: insurance)
+    }
+}
+
+private extension UpgradeTargetCandidate {
+    var displayInsuranceText: String? {
+        guard let insurance else {
+            return nil
+        }
+
+        let trimmedInsurance = insurance.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedInsurance.isEmpty else {
+            return nil
+        }
+
+        return HangarPackage.localizedInsuranceDisplayLabel(from: trimmedInsurance)
+    }
+}
+
+private struct CouponDetailView: View {
+    let couponInfo: HangarCouponInfo
+    let copiedCouponCode: Bool
+    let onCopyCode: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            LabeledContent("Coupon", value: couponInfo.couponLabel)
+
+            if let code = couponInfo.code {
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Coupon Code")
+                            .font(.caption2.weight(.bold))
+                            .textCase(.uppercase)
+                            .foregroundStyle(.secondary)
+
+                        Text(code)
+                            .font(.body.weight(.semibold))
+                            .monospaced()
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Button {
+                        onCopyCode(code)
+                    } label: {
+                        Label(
+                            copiedCouponCode ? "Copied" : "Copy Code",
+                            systemImage: copiedCouponCode ? "checkmark" : "doc.on.doc"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+        }
+        .padding(.vertical, 2)
     }
 }
 
@@ -856,7 +2507,7 @@ private struct CompactPackageSummaryView: View {
     }
 
     private var insuranceText: String {
-        package.detailInsuranceText ?? package.insurance
+        package.displayInsuranceText
     }
 
     var body: some View {
@@ -986,7 +2637,7 @@ private struct HangarGiftConfirmationView: View {
                 }
 
                 LabeledContent("Status", value: package.status)
-                LabeledContent("Insurance", value: package.detailInsuranceText ?? package.insurance)
+                LabeledContent("Insurance", value: package.displayInsuranceText)
             } header: {
                 Text("Selected Item")
             }
@@ -1544,8 +3195,7 @@ private struct UpgradeTargetRow: View {
                         .foregroundStyle(.secondary)
                 }
 
-                if let insurance = target.insurance,
-                   !insurance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if let insurance = target.displayInsuranceText {
                     Text(insurance)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1651,8 +3301,7 @@ private struct HangarUpgradeConfirmationView: View {
                                 .foregroundStyle(.secondary)
                         }
 
-                        if let insurance = target.insurance,
-                           !insurance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        if let insurance = target.displayInsuranceText {
                             Text(insurance)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -1769,11 +3418,10 @@ private struct PackageItemRow: View {
 
     private var thumbnailRow: some View {
         HStack(alignment: .top, spacing: 12) {
-            RemoteThumbnailView(
+            PackageDetailItemThumbnailView(
                 url: item.imageURL,
                 reloadToken: reloadToken,
-                fallbackSystemImage: fallbackSystemImage,
-                size: 76
+                fallbackSystemImage: fallbackSystemImage
             )
 
             VStack(alignment: .leading, spacing: 6) {
@@ -1833,6 +3481,56 @@ private struct PackageItemRow: View {
         case .perk:
             return "gift.fill"
         }
+    }
+}
+
+private struct PackageDetailItemThumbnailView: View {
+    let url: URL?
+    let reloadToken: UUID?
+    let fallbackSystemImage: String
+
+    private let width: CGFloat = 112
+    private let height: CGFloat = 76
+    private let cornerRadius: CGFloat = 12
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(Color(.secondarySystemBackground))
+
+            if let url {
+                CachedRemoteImage(
+                    url: url,
+                    targetSize: CGSize(width: width, height: height),
+                    reloadToken: reloadToken
+                ) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    case .empty:
+                        ProgressView()
+                    case .failure:
+                        fallback
+                    }
+                }
+            } else {
+                fallback
+            }
+        }
+        .frame(width: width, height: height)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(.white.opacity(0.10), lineWidth: 1)
+        }
+    }
+
+    private var fallback: some View {
+        Image(systemName: fallbackSystemImage)
+            .font(.title3)
+            .foregroundStyle(.secondary)
     }
 }
 
@@ -2038,25 +3736,206 @@ private struct UpgradeDetailHeaderView: View {
     let reloadToken: UUID?
 
     var body: some View {
-        HStack(spacing: 18) {
-            RemoteThumbnailView(
-                url: pricing.sourceShipImageURL,
-                reloadToken: reloadToken,
-                fallbackSystemImage: "arrow.uturn.backward.circle.fill",
-                size: 132
-            )
+        UpgradeDetailDiagonalPictureView(
+            pricing: pricing,
+            reloadToken: reloadToken
+        )
+        .frame(height: 220)
+        .padding(.horizontal, -8)
+    }
+}
 
-            Image(systemName: "arrow.right")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(.secondary)
+private struct UpgradeDetailDiagonalPictureView: View {
+    let pricing: PackageItem.UpgradePricing
+    let reloadToken: UUID?
 
-            RemoteThumbnailView(
-                url: pricing.targetShipImageURL,
-                reloadToken: reloadToken,
-                fallbackSystemImage: "arrow.up.right.circle.fill",
-                size: 132
-            )
+    private let cornerRadius: CGFloat = 24
+
+    private var panelShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let size = proxy.size
+
+            ZStack {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color(.secondarySystemBackground))
+
+                UpgradeDetailDiagonalImageLayer(
+                    url: pricing.sourceShipImageURL,
+                    reloadToken: reloadToken,
+                    targetSize: size,
+                    alignment: .leading,
+                    outwardDirection: -1,
+                    fallbackSystemImage: "arrow.uturn.backward.circle.fill"
+                )
+                .clipShape(UpgradeSourceDiagonalClipShape())
+
+                UpgradeDetailDiagonalImageLayer(
+                    url: pricing.targetShipImageURL,
+                    reloadToken: reloadToken,
+                    targetSize: size,
+                    alignment: .trailing,
+                    outwardDirection: 1,
+                    fallbackSystemImage: "arrow.up.right.circle.fill"
+                )
+                .clipShape(UpgradeTargetDiagonalClipShape())
+
+                UpgradeDiagonalDividerShape()
+                    .stroke(.white.opacity(0.26), lineWidth: 2)
+
+                UpgradeDetailCenterSummaryCard(pricing: pricing)
+            }
+            .compositingGroup()
+            .clipShape(panelShape, style: FillStyle(eoFill: false, antialiased: true))
+            .overlay {
+                panelShape
+                    .stroke(.white.opacity(0.12), lineWidth: 1)
+            }
         }
-        .padding(.vertical, 8)
+    }
+}
+
+private struct UpgradeDetailDiagonalImageLayer: View {
+    let url: URL?
+    let reloadToken: UUID?
+    let targetSize: CGSize
+    let alignment: Alignment
+    let outwardDirection: CGFloat
+    let fallbackSystemImage: String
+
+    private var outwardOffset: CGFloat {
+        targetSize.width * 0.14 * outwardDirection
+    }
+
+    var body: some View {
+        CachedRemoteImage(
+            url: url,
+            targetSize: targetSize,
+            reloadToken: reloadToken
+        ) { phase in
+            switch phase {
+            case let .success(image):
+                image
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: targetSize.width, height: targetSize.height, alignment: alignment)
+                    .offset(x: outwardOffset)
+            case .empty:
+                ProgressView()
+                    .frame(width: targetSize.width, height: targetSize.height)
+            case .failure:
+                UpgradeDetailPictureFallback(systemImage: fallbackSystemImage)
+                    .frame(width: targetSize.width, height: targetSize.height)
+            }
+        }
+    }
+}
+
+private struct UpgradeDetailCenterSummaryCard: View {
+    let pricing: PackageItem.UpgradePricing
+
+    private var differenceText: String {
+        if let sourceValue = pricing.sourceShipMSRPUSD,
+           let targetValue = pricing.targetShipMSRPUSD {
+            return (targetValue - sourceValue).usdString
+        }
+
+        if let actualValue = pricing.actualValueUSD {
+            return actualValue.usdString
+        }
+
+        return "Unavailable"
+    }
+
+    private var meltText: String {
+        pricing.meltValueUSD?.usdString ?? pricing.actualValueUSD?.usdString ?? "Unavailable"
+    }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Text(differenceText)
+                .font(.title3.weight(.bold))
+                .monospacedDigit()
+                .foregroundStyle(.primary)
+
+            Text("\(AppLocalizer.string("Melt")) \(meltText)")
+                .font(.caption.weight(.semibold))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 124, height: 84)
+        .background {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+                .shadow(color: .black.opacity(0.45), radius: 18, x: 0, y: 8)
+                .shadow(color: .black.opacity(0.32), radius: 26, x: 0, y: 0)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(.white.opacity(0.08), lineWidth: 1)
+        }
+    }
+}
+
+private struct UpgradeDetailPictureFallback: View {
+    let systemImage: String
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(.systemGray5), Color(.systemGray4)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            Image(systemName: systemImage)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct UpgradeSourceDiagonalClipShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let topSplitX = rect.width * 0.423
+        let bottomSplitX = rect.width * 0.583
+
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.minX + topSplitX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.minX + bottomSplitX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+private struct UpgradeTargetDiagonalClipShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let topSplitX = rect.width * 0.423
+        let bottomSplitX = rect.width * 0.583
+
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX + topSplitX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX + bottomSplitX, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+private struct UpgradeDiagonalDividerShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let topSplitX = rect.width * 0.423
+        let bottomSplitX = rect.width * 0.583
+
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX + topSplitX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.minX + bottomSplitX, y: rect.maxY))
+        return path
     }
 }

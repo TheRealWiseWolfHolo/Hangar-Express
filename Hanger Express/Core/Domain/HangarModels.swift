@@ -1239,8 +1239,14 @@ nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
         let localizedUnknown = AppLocalizer.string("Unknown")
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .localizedLowercase
+        let localizedNotApplicable = AppLocalizer.string("Not Applicable")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .localizedLowercase
 
-        return lowercasedValue == "unknown" || lowercasedValue == localizedUnknown
+        return lowercasedValue == "unknown"
+            || lowercasedValue == localizedUnknown
+            || lowercasedValue == "not applicable"
+            || lowercasedValue == localizedNotApplicable
     }
 
     nonisolated static func localizedInsuranceDisplayLabel(from rawValue: String) -> String {
@@ -1252,7 +1258,7 @@ nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
         }
 
         if isUnknownInsuranceLabel(normalizedValue) {
-            return AppLocalizer.string("Unknown")
+            return AppLocalizer.string("Not Applicable")
         }
 
         if let months = insuranceValueMatch(in: lowercased, pattern: #"(\d+)\s*months?\b"#) {
@@ -1691,6 +1697,8 @@ private extension FleetShip {
 }
 
 nonisolated struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
+    static let unknownAddedToBuybackDate = Date(timeIntervalSince1970: 0)
+
     let id: Int
     let title: String
     let recoveredValueUSD: Decimal
@@ -1698,6 +1706,7 @@ nonisolated struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
     let notes: String
     let imageURL: URL?
     let upgradeContext: BuybackUpgradeContext?
+    let sourceRawInfo: BuybackPledgeRawInfo?
 
     init(
         id: Int,
@@ -1706,7 +1715,8 @@ nonisolated struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
         addedToBuybackAt: Date,
         notes: String,
         imageURL: URL? = nil,
-        upgradeContext: BuybackUpgradeContext? = nil
+        upgradeContext: BuybackUpgradeContext? = nil,
+        sourceRawInfo: BuybackPledgeRawInfo? = nil
     ) {
         self.id = id
         self.title = title
@@ -1715,6 +1725,7 @@ nonisolated struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
         self.notes = notes
         self.imageURL = imageURL
         self.upgradeContext = upgradeContext
+        self.sourceRawInfo = sourceRawInfo
     }
 
     var displayedNotes: String? {
@@ -1749,8 +1760,9 @@ nonisolated struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
 
     var isUpgrade: Bool {
         let haystack = searchHaystack
-        return haystack.contains("upgrade")
-            || haystack.contains("ccu")
+        return haystack.range(of: #"\bupgrade\b"#, options: .regularExpression) != nil
+            || haystack.range(of: #"\bccu\b"#, options: .regularExpression) != nil
+            || haystack.range(of: #"\S+\s+to\s+\S+"#, options: .regularExpression) != nil
     }
 
     var isGear: Bool {
@@ -1828,6 +1840,22 @@ nonisolated struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
         let title: String
         let displayedNotes: String
     }
+}
+
+nonisolated struct BuybackPledgeRawInfo: Hashable, Sendable, Codable {
+    let buttonHref: String?
+    let buttonDataPledgeID: Int?
+    let buttonFromShipID: Int?
+    let buttonToShipID: Int?
+    let buttonToSkuID: Int?
+    let titleText: String
+    let dateText: String
+    let containsText: String
+    let valueText: String
+    let imageURL: String?
+    let definitionLabels: [String]
+    let definitionValues: [String]
+    let articleText: String
 }
 
 nonisolated struct BuybackUpgradeContext: Hashable, Sendable, Codable {

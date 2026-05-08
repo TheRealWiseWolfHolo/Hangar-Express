@@ -408,6 +408,7 @@ struct FleetView: View {
 
 enum FleetTool: String, CaseIterable, Identifiable {
     case allShips
+    case limitedShipPurchase
     case authorizedDevices
     case ccuChainCalculator
     case resetCharacter
@@ -418,6 +419,8 @@ enum FleetTool: String, CaseIterable, Identifiable {
         switch self {
         case .allShips:
             return AppLocalizer.string("All Ships")
+        case .limitedShipPurchase:
+            return AppLocalizer.string("Limited Ship Purchase")
         case .authorizedDevices:
             return AppLocalizer.string("View Logged In Devices")
         case .ccuChainCalculator:
@@ -431,6 +434,8 @@ enum FleetTool: String, CaseIterable, Identifiable {
         switch self {
         case .allShips:
             return AppLocalizer.string("Browse the Star Citizen ship catalog")
+        case .limitedShipPurchase:
+            return AppLocalizer.string("Auto-add a timed limited ship to the RSI cart")
         case .authorizedDevices:
             return AppLocalizer.string("Review and remove logged-in RSI devices")
         case .ccuChainCalculator, .resetCharacter:
@@ -442,6 +447,8 @@ enum FleetTool: String, CaseIterable, Identifiable {
         switch self {
         case .allShips:
             return "airplane.circle"
+        case .limitedShipPurchase:
+            return "cart.badge.plus"
         case .authorizedDevices:
             return "iphone"
         case .ccuChainCalculator:
@@ -452,7 +459,7 @@ enum FleetTool: String, CaseIterable, Identifiable {
     }
 
     var isAvailable: Bool {
-        self == .allShips || self == .authorizedDevices
+        self == .allShips || self == .limitedShipPurchase || self == .authorizedDevices
     }
 }
 

@@ -20,6 +20,9 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
     case upgradeRejected(message: String)
     case invalidBuybackItem
     case buybackCheckoutRejected(message: String)
+    case invalidLimitedShip
+    case limitedShipCartInsertionTimedOut(timeoutSeconds: Int)
+    case limitedShipCartInsertionRejected(message: String)
     case authorizedDevicesUnavailable(message: String)
     case authorizedDeviceRemovalRejected(message: String)
 
@@ -82,6 +85,15 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
             return AppLocalizer.string("Choose a valid buy-back pledge before Hangar Express can prepare checkout.")
         case let .buybackCheckoutRejected(message):
             return AppLocalizer.format("RSI did not add the selected buy-back pledge to the cart.\n\n%@", message)
+        case .invalidLimitedShip:
+            return AppLocalizer.string("Choose a valid limited ship before Hangar Express can add it to the cart.")
+        case let .limitedShipCartInsertionTimedOut(timeoutSeconds):
+            return AppLocalizer.format(
+                "RSI did not confirm the limited ship cart request within %lld seconds. Open the RSI cart to verify whether the ship was added before trying again.",
+                timeoutSeconds
+            )
+        case let .limitedShipCartInsertionRejected(message):
+            return AppLocalizer.format("RSI did not add the selected limited ship to the cart.\n\n%@", message)
         case let .authorizedDevicesUnavailable(message):
             return AppLocalizer.format("Hangar Express could not load authorized RSI devices.\n\n%@", message)
         case let .authorizedDeviceRemovalRejected(message):

@@ -22,6 +22,63 @@ struct Hanger_ExpressTests {
         #expect(snapshot.referralStats.hasLegacyLadder)
     }
 
+    @Test func hostedLimitedShipFeedDecodesRequiredFields() throws {
+        let data = Data(
+            #"""
+            {
+              "ships": [
+                {
+                  "id": "gladius-standalone",
+                  "name": "Gladius",
+                  "manufacturer": "Aegis Dynamics",
+                  "priceUsd": 90,
+                  "availabilitySlots": [
+                    {
+                      "startsAt": "2026-05-01T00:00:00Z",
+                      "endsAt": "2026-12-31T23:59:59Z"
+                    }
+                  ],
+                  "storeUrl": "https://example.com/gladius"
+                }
+              ]
+            }
+            """#.utf8
+        )
+
+        let ships = try HostedLimitedShipSaleClient.decodeSales(from: data)
+
+        #expect(ships.count == 1)
+        #expect(ships.first?.name == "Gladius")
+        #expect(ships.first?.priceUSD == 90)
+    }
+
+    @Test func hostedLimitedShipFeedRejectsInvalidData() throws {
+        let data = Data(
+            #"""
+            {
+              "ships": [
+                {
+                  "id": "gladius-standalone",
+                  "name": "Gladius",
+                  "availabilitySlots": [],
+                  "storeUrl": "https://example.com/gladius"
+                }
+              ]
+            }
+            """#.utf8
+        )
+
+        var didThrowInvalidFeedError = false
+        do {
+            _ = try HostedLimitedShipSaleClient.decodeSales(from: data)
+        } catch let error as HostedShipCatalogError {
+            didThrowInvalidFeedError = true
+            #expect(error.errorDescription?.contains("missing priceUsd") == true)
+        }
+
+        #expect(didThrowInvalidFeedError)
+    }
+
     @Test func sessionCookieRoundTripsBackToHTTPCookie() async throws {
         let expiresAt = Date(timeIntervalSince1970: 1_800_000_000)
         let sourceCookie = try #require(
@@ -1186,6 +1243,13 @@ struct Hanger_ExpressTests {
             addedToBuybackAt: .now,
             notes: "CCU"
         )
+        let upgradeWithoutKeyword = BuybackPledge(
+            id: 6,
+            title: "Cutlass Black to Zeus Mk II MR",
+            recoveredValueUSD: 15,
+            addedToBuybackAt: .now,
+            notes: ""
+        )
         let skin = BuybackPledge(
             id: 2,
             title: "Foundation Festival Paint Pack",
@@ -1214,9 +1278,18 @@ struct Hanger_ExpressTests {
             addedToBuybackAt: .now,
             notes: "FPS equipment"
         )
+        let upgradedStandalone = BuybackPledge(
+            id: 7,
+            title: "Standalone Ships - UTV - upgraded",
+            recoveredValueUSD: 0,
+            addedToBuybackAt: .now,
+            notes: "315p Explorer and 2 items"
+        )
 
         #expect(upgrade.isUpgrade)
         #expect(!upgrade.isStandaloneShip)
+        #expect(upgradeWithoutKeyword.isUpgrade)
+        #expect(!upgradeWithoutKeyword.isStandaloneShip)
         #expect(skin.isSkin)
         #expect(!skin.isStandaloneShip)
         #expect(package.isPackage)
@@ -1226,6 +1299,8 @@ struct Hanger_ExpressTests {
         #expect(gear.isGear)
         #expect(!gear.isPackage)
         #expect(!gear.isStandaloneShip)
+        #expect(!upgradedStandalone.isUpgrade)
+        #expect(upgradedStandalone.isStandaloneShip)
     }
 
     @Test func buybackPledgesGroupByVisibleAttributesAndIgnorePlaceholderNotes() async throws {
@@ -3984,6 +4059,42 @@ private actor FakeHangarRepository: HangarRepository {
         BuybackCheckoutPreparation(
             buybackPledgeID: pledge.id,
             checkoutURL: URL(string: "https://example.com/checkout")!,
+            updatedCookies: session.cookies
+        )
+    }
+
+    func fetchLimitedShipSales() async throws -> [LimitedShipSale] {
+        [
+            LimitedShipSale(
+                id: "test-gladius",
+                name: "Gladius",
+                manufacturer: "Aegis Dynamics",
+                priceUSD: 90,
+                availabilitySlots: [
+                    LimitedShipAvailabilitySlot(
+                        startsAt: Date(timeIntervalSince1970: 1_776_000_000),
+                        endsAt: Date(timeIntervalSince1970: 1_776_000_600)
+                    )
+                ],
+                storeURL: URL(string: "https://example.com/gladius")!,
+                imageURL: nil,
+                manufacturerLogoURL: nil
+            )
+        ]
+    }
+
+    func addLimitedShipToCart(
+        for session: UserSession,
+        ship: LimitedShipSale,
+        log: @escaping LimitedShipCartLogHandler
+    ) async throws -> LimitedShipCartInsertionResult {
+        await log("Test fake added \(ship.name) to cart.")
+        return LimitedShipCartInsertionResult(
+            shipID: ship.id,
+            cartURL: URL(string: "https://example.com/cart")!,
+            attemptCount: 1,
+            debugSummary: nil,
+            debugLog: ["Test fake added \(ship.name) to cart."],
             updatedCookies: session.cookies
         )
     }
