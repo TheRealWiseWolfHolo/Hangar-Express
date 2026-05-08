@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct BuybackView: View {
     let appModel: AppModel
@@ -32,7 +33,7 @@ struct BuybackView: View {
     @State private var searchFilters: Set<SearchFilter> = []
     @State private var isSearchPresented = false
     @State private var pendingBuybackGroup: GroupedBuybackPledge?
-    @State private var checkoutContext: BuybackCheckoutContext?
+    @State private var checkoutContext: RSICheckoutContext?
     @State private var buybackError: BuybackCheckoutError?
     @State private var isPreparingCheckout = false
 
@@ -87,6 +88,21 @@ struct BuybackView: View {
                             }
                             .buttonStyle(.plain)
                             .disabled(isPreparingCheckout || appModel.isRefreshing)
+                            .contextMenu {
+                                Button {
+                                    UIPasteboard.general.string = buybackDebugExport(for: itemGroup)
+                                } label: {
+                                    Label("Copy Raw Buy-Back Data", systemImage: "doc.on.doc")
+                                }
+
+                                ShareLink(
+                                    item: buybackDebugExport(for: itemGroup),
+                                    subject: Text("Buy-Back Debug Export"),
+                                    message: Text("Raw Hangar Express buy-back data")
+                                ) {
+                                    Label("Share Raw Buy-Back Data", systemImage: "square.and.arrow.up")
+                                }
+                            }
                         }
                     }
                 }
@@ -156,13 +172,17 @@ struct BuybackView: View {
                 )
             }
             .sheet(item: $checkoutContext) { context in
-                BuybackCheckoutBrowserView(
+                RSICheckoutBrowserView(
                     context: context,
                     onCancel: { cookies in
                         checkoutContext = nil
                         completeBuybackCheckout(exportedCookies: cookies)
                     },
                     onFinished: { cookies in
+                        checkoutContext = nil
+                        completeBuybackCheckout(exportedCookies: cookies)
+                    },
+                    onSucceeded: { cookies, _ in
                         checkoutContext = nil
                         completeBuybackCheckout(exportedCookies: cookies)
                     }
@@ -223,10 +243,11 @@ struct BuybackView: View {
         do {
             let preparation = try await appModel.prepareBuybackCheckout(for: itemGroup.checkoutPledge)
             let cookies = appModel.session?.cookies ?? preparation.updatedCookies
-            checkoutContext = BuybackCheckoutContext(
+            checkoutContext = RSICheckoutContext(
                 itemTitle: itemGroup.representative.title,
                 checkoutURL: preparation.checkoutURL,
-                cookies: cookies
+                cookies: cookies,
+                navigationTitle: "Buy-back Checkout"
             )
         } catch {
             buybackError = BuybackCheckoutError(message: error.localizedDescription)
@@ -238,6 +259,40 @@ struct BuybackView: View {
             await appModel.persistBrowserCookies(exportedCookies)
             await appModel.refresh(scope: .full)
         }
+    }
+
+    private func buybackDebugExport(for itemGroup: GroupedBuybackPledge) -> String {
+        let export = BuybackDebugExport(
+            generatedAt: ISO8601DateFormatter().string(from: Date()),
+            quantity: itemGroup.quantity,
+            representativeComputedDisplay: .init(
+                typeSummary: itemGroup.representative.buybackTypeSummary,
+                dateSummary: itemGroup.dateSummary,
+                metadataLine: itemGroup.metadataLine,
+                validDateCount: itemGroup.validAddedDates.count,
+                checkoutPledgeID: itemGroup.checkoutPledge.id,
+                checkoutUsesUpgradeContext: itemGroup.checkoutPledge.isUpgrade && itemGroup.checkoutPledge.upgradeContext?.isValid == true
+            ),
+            representative: itemGroup.representative,
+            pledges: itemGroup.pledges
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+
+        guard let data = try? encoder.encode(export),
+              let string = String(data: data, encoding: .utf8) else {
+            return """
+            {
+              "error" : "Failed to encode buy-back debug export",
+              "representativePledgeID" : \(itemGroup.representative.id),
+              "quantity" : \(itemGroup.quantity)
+            }
+            """
+        }
+
+        return string
     }
 
     private var emptyStateTitle: String {
@@ -265,11 +320,34 @@ struct BuybackView: View {
     }
 }
 
-struct BuybackCheckoutContext: Identifiable, Hashable {
+struct RSICheckoutContext: Identifiable, Hashable {
     let id = UUID()
     let itemTitle: String
     let checkoutURL: URL
     let cookies: [SessionCookie]
+    let navigationTitle: String
+    let completionButtonTitle: String
+    let automation: RSICheckoutAutomation?
+
+    init(
+        itemTitle: String,
+        checkoutURL: URL,
+        cookies: [SessionCookie],
+        navigationTitle: String,
+        completionButtonTitle: String = "Finished Shopping",
+        automation: RSICheckoutAutomation? = nil
+    ) {
+        self.itemTitle = itemTitle
+        self.checkoutURL = checkoutURL
+        self.cookies = cookies
+        self.navigationTitle = navigationTitle
+        self.completionButtonTitle = completionButtonTitle
+        self.automation = automation
+    }
+}
+
+struct RSICheckoutAutomation: Hashable {
+    let storeCreditAmount: Decimal
 }
 
 private struct BuybackCheckoutError: Identifiable {
@@ -406,8 +484,78 @@ private struct PaymentMethodSection: View {
 
 private extension GroupedBuybackPledge {
     var checkoutPledge: BuybackPledge {
-        pledges.first { $0.upgradeContext?.isValid == true } ?? representative
+        pledges.first { $0.isUpgrade && $0.upgradeContext?.isValid == true } ?? representative
     }
+
+    var validAddedDates: [Date] {
+        pledges
+            .map(\.addedToBuybackAt)
+            .filter { $0 > BuybackPledge.unknownAddedToBuybackDate }
+    }
+
+    var metadataLine: String {
+        if let notes = representative.displayedNotes {
+            return "\(dateSummary) • \(notes)"
+        }
+
+        return dateSummary
+    }
+
+    var dateSummary: String {
+        guard let earliestDate = validAddedDates.min(),
+              let latestDate = validAddedDates.max() else {
+            return AppLocalizer.string("Date unavailable")
+        }
+
+        if Calendar.current.isDate(earliestDate, inSameDayAs: latestDate) {
+            return latestDate.formatted(date: .abbreviated, time: .omitted)
+        }
+
+        return "\(earliestDate.formatted(date: .abbreviated, time: .omitted)) – \(latestDate.formatted(date: .abbreviated, time: .omitted))"
+    }
+}
+
+private extension BuybackPledge {
+    var buybackTypeSummary: String {
+        if isUpgrade {
+            return AppLocalizer.string("Upgrade")
+        }
+
+        if isPackage {
+            return AppLocalizer.string("Package")
+        }
+
+        if isGear {
+            return AppLocalizer.string("Gear")
+        }
+
+        if isSkin {
+            return AppLocalizer.string("Skin")
+        }
+
+        if isStandaloneShip {
+            return AppLocalizer.string("Standalone ship")
+        }
+
+        return AppLocalizer.string("Buy-back item")
+    }
+}
+
+private struct BuybackDebugExport: Codable {
+    struct RepresentativeComputedDisplay: Codable {
+        let typeSummary: String
+        let dateSummary: String
+        let metadataLine: String
+        let validDateCount: Int
+        let checkoutPledgeID: Int
+        let checkoutUsesUpgradeContext: Bool
+    }
+
+    let generatedAt: String
+    let quantity: Int
+    let representativeComputedDisplay: RepresentativeComputedDisplay
+    let representative: BuybackPledge
+    let pledges: [BuybackPledge]
 }
 
 private struct BuybackGroupRow: View {
@@ -458,46 +606,15 @@ private struct BuybackGroupRow: View {
     }
 
     private var typeSummary: String {
-        if item.isUpgrade {
-            return AppLocalizer.string("Upgrade")
-        }
-
-        if item.isPackage {
-            return AppLocalizer.string("Package")
-        }
-
-        if item.isGear {
-            return AppLocalizer.string("Gear")
-        }
-
-        if item.isSkin {
-            return AppLocalizer.string("Skin")
-        }
-
-        if item.isStandaloneShip {
-            return AppLocalizer.string("Standalone ship")
-        }
-
-        return AppLocalizer.string("Buy-back item")
+        item.buybackTypeSummary
     }
 
     private var metadataLine: String {
-        if let notes = item.displayedNotes {
-            return "\(dateSummary) • \(notes)"
-        }
-
-        return dateSummary
+        itemGroup.metadataLine
     }
 
     private var dateSummary: String {
-        let earliestDate = itemGroup.earliestAddedToBuybackAt
-        let latestDate = itemGroup.latestAddedToBuybackAt
-
-        if Calendar.current.isDate(earliestDate, inSameDayAs: latestDate) {
-            return latestDate.formatted(date: .abbreviated, time: .omitted)
-        }
-
-        return "\(earliestDate.formatted(date: .abbreviated, time: .omitted)) – \(latestDate.formatted(date: .abbreviated, time: .omitted))"
+        itemGroup.dateSummary
     }
 
     private var fallbackSystemImage: String {

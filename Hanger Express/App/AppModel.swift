@@ -31,6 +31,8 @@ enum DisplayPreferences {
     static let hangarUpgradedHighlightEnabledByDefault = true
     static let earlyAccessBadgeKey = "display.earlyAccessBadge"
     static let earlyAccessBadgeEnabledByDefault = true
+    static let sharePictureAutoCopiesDebugLogKey = "display.sharePictureAutoCopiesDebugLog"
+    static let sharePictureAutoCopiesDebugLogEnabledByDefault = false
 }
 
 @MainActor
@@ -318,6 +320,7 @@ final class AppModel {
     private static let upgradeRequestTimeoutSeconds = 20
     private static let upgradeTargetLookupTimeoutSeconds = 20
     private static let buybackCheckoutPreparationTimeoutSeconds = 30
+    private static let limitedShipCartInsertionTimeoutSeconds = 30
     private static let authorizedDevicesRequestTimeoutSeconds = 20
     private static let actionCompletionBannerDurationNanoseconds: UInt64 = 2_000_000_000
     private static let postRefreshImageInvalidationDelayNanoseconds: UInt64 = 250_000_000
@@ -1133,6 +1136,50 @@ final class AppModel {
             throw error
         } catch {
             throw HangarAccountActionError.buybackCheckoutRejected(message: error.localizedDescription)
+        }
+    }
+
+    func fetchLimitedShipSales() async throws -> [LimitedShipSale] {
+        try await hangarRepository.fetchLimitedShipSales()
+    }
+
+    func addLimitedShipToCart(
+        _ ship: LimitedShipSale,
+        log: @escaping LimitedShipCartLogHandler = { _ in }
+    ) async throws -> LimitedShipCartInsertionResult {
+        guard !isRefreshing else {
+            throw HangarAccountActionError.actionInProgress
+        }
+
+        guard !ship.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw HangarAccountActionError.invalidLimitedShip
+        }
+
+        guard let session else {
+            throw HangarAccountActionError.missingSession
+        }
+
+        let timeoutSeconds = Self.limitedShipCartInsertionTimeoutSeconds
+        do {
+            let result = try await withTimeout(seconds: timeoutSeconds) { [self] in
+                try await self.hangarRepository.addLimitedShipToCart(
+                    for: session,
+                    ship: ship,
+                    log: log
+                )
+            } onTimeout: {
+                HangarAccountActionError.limitedShipCartInsertionTimedOut(timeoutSeconds: timeoutSeconds)
+            }
+
+            if !result.updatedCookies.isEmpty {
+                await persistUpdatedSessionCookies(result.updatedCookies, baseSession: session)
+            }
+
+            return result
+        } catch let error as HangarAccountActionError {
+            throw error
+        } catch {
+            throw HangarAccountActionError.limitedShipCartInsertionRejected(message: error.localizedDescription)
         }
     }
 

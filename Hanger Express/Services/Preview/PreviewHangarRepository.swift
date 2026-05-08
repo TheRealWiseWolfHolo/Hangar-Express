@@ -254,6 +254,26 @@ struct PreviewHangarRepository: HangarRepository {
         )
     }
 
+    func fetchLimitedShipSales() async throws -> [LimitedShipSale] {
+        try await HostedLimitedShipSaleClient().fetchSales()
+    }
+
+    func addLimitedShipToCart(
+        for session: UserSession,
+        ship: LimitedShipSale,
+        log: @escaping LimitedShipCartLogHandler
+    ) async throws -> LimitedShipCartInsertionResult {
+        log("Preview mode: simulating Add to Cart for \(ship.name).")
+        return LimitedShipCartInsertionResult(
+            shipID: ship.id,
+            cartURL: URL(string: "https://robertsspaceindustries.com/en/pledge/cart")!,
+            attemptCount: 1,
+            debugSummary: "Preview mode simulated adding \(ship.name) to cart.",
+            debugLog: ["Preview mode simulated adding \(ship.name) to cart."],
+            updatedCookies: session.cookies
+        )
+    }
+
     func fetchAuthorizedDevices(
         for _: UserSession,
         password _: String?

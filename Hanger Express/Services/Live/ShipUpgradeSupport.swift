@@ -512,11 +512,17 @@ actor HostedShipCatalogStore {
 
 nonisolated enum HostedShipCatalogError: Error, LocalizedError {
     case httpStatus(Int)
+    case emptyLimitedShipSaleFeed
+    case invalidLimitedShipSaleFeed(String)
 
     var errorDescription: String? {
         switch self {
         case let .httpStatus(statusCode):
             return "Hosted ship catalog returned HTTP \(statusCode)."
+        case .emptyLimitedShipSaleFeed:
+            return "Hosted limited ship sale feed is empty."
+        case let .invalidLimitedShipSaleFeed(reason):
+            return "Hosted limited ship sale feed is invalid. \(reason)"
         }
     }
 }
@@ -1044,6 +1050,75 @@ actor HostedShipDetailCatalogStore {
     }
 }
 
+nonisolated struct HostedLimitedShipSaleClient: Sendable {
+    let urls: [URL]
+    let urlSession: URLSession
+
+    init(
+        urls: [URL] = HostedShipFeedEndpoints.limitedShipSaleURLs,
+        urlSession: URLSession = .shared
+    ) {
+        self.urls = urls
+        self.urlSession = urlSession
+    }
+
+    func fetchSales() async throws -> [LimitedShipSale] {
+        var lastError: Error?
+
+        for url in urls {
+            do {
+                let (data, response) = try await urlSession.data(for: Self.makeRequest(for: url))
+
+                if let httpResponse = response as? HTTPURLResponse,
+                   !(200 ..< 300).contains(httpResponse.statusCode) {
+                    throw HostedShipCatalogError.httpStatus(httpResponse.statusCode)
+                }
+
+                let sales = try Self.decodeSales(from: data)
+                guard !sales.isEmpty else {
+                    throw HostedShipCatalogError.emptyLimitedShipSaleFeed
+                }
+
+                return sales
+            } catch {
+                lastError = error
+            }
+        }
+
+        throw lastError ?? HostedShipCatalogError.invalidLimitedShipSaleFeed(
+            "No hosted limited ship sale feed URLs are configured."
+        )
+    }
+
+    static func decodeSales(from data: Data) throws -> [LimitedShipSale] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let remoteSales: [RemoteHostedLimitedShipSale]
+        do {
+            let payload = try decoder.decode(RemoteHostedLimitedShipSalePayload.self, from: data)
+            remoteSales = payload.ships
+        } catch {
+            let payloadError = error
+            do {
+                remoteSales = try decoder.decode([RemoteHostedLimitedShipSale].self, from: data)
+            } catch {
+                throw HostedShipCatalogError.invalidLimitedShipSaleFeed(
+                    "Unable to decode object feed (\(payloadError.localizedDescription)) or array feed (\(error.localizedDescription))."
+                )
+            }
+        }
+
+        return try remoteSales.enumerated().map { item in
+            try item.element.validatedDomainModel(itemNumber: item.offset + 1)
+        }
+    }
+
+    private static func makeRequest(for url: URL) -> URLRequest {
+        URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+    }
+}
+
 public nonisolated enum HostedShipFeedEndpoints {
     public static let primaryBaseURL = URL(string: "https://starcitizen-info.pages.dev")!
     public static let fallbackBaseURL = URL(string: "https://therealwisewolfholo.github.io/StarCitizen-Info")!
@@ -1057,6 +1132,130 @@ public nonisolated enum HostedShipFeedEndpoints {
         primaryBaseURL.appendingPathComponent("ship-details.json"),
         fallbackBaseURL.appendingPathComponent("ship-details.json")
     ]
+
+    public static let limitedShipSaleURLs: [URL] = [
+        primaryBaseURL.appendingPathComponent("limited-ships.json"),
+        fallbackBaseURL.appendingPathComponent("limited-ships.json")
+    ]
+}
+
+private nonisolated struct RemoteHostedLimitedShipSalePayload: Decodable {
+    let ships: [RemoteHostedLimitedShipSale]
+}
+
+private nonisolated struct RemoteHostedLimitedShipSale: Decodable {
+    let id: String?
+    let name: String
+    let manufacturer: String?
+    let priceUSD: Decimal?
+    let availabilitySlots: [LimitedShipAvailabilitySlot]
+    let storeURL: URL?
+    let imageURL: URL?
+    let manufacturerLogoURL: URL?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id)?.nilIfEmpty
+        name = try container.decode(String.self, forKey: .name)
+        manufacturer = try container.decodeIfPresent(String.self, forKey: .manufacturer)?.nilIfEmpty
+        let decodedPriceUSD = try container.decodeIfPresent(Decimal.self, forKey: .priceUSD)
+        let decodedPriceUsd = try container.decodeIfPresent(Decimal.self, forKey: .priceUsd)
+        priceUSD = decodedPriceUSD ?? decodedPriceUsd
+
+        let decodedAvailabilitySlots = try container.decodeIfPresent(
+            [LimitedShipAvailabilitySlot].self,
+            forKey: .availabilitySlots
+        )
+        let decodedAvailability = try container.decodeIfPresent(
+            [LimitedShipAvailabilitySlot].self,
+            forKey: .availability
+        )
+        availabilitySlots = decodedAvailabilitySlots ?? decodedAvailability ?? []
+
+        storeURL = try Self.firstDecodedURL(
+            in: container,
+            keys: [.storeURL, .storeUrl, .shipURL, .shipUrl, .addToCartURL, .addToCartUrl]
+        )
+        imageURL = try Self.firstDecodedURL(in: container, keys: [.imageURL, .imageUrl])
+        manufacturerLogoURL = try Self.firstDecodedURL(
+            in: container,
+            keys: [.manufacturerLogoURL, .manufacturerLogoUrl]
+        )
+    }
+
+    func validatedDomainModel(itemNumber: Int) throws -> LimitedShipSale {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            throw HostedShipCatalogError.invalidLimitedShipSaleFeed("Ship \(itemNumber) is missing name.")
+        }
+
+        guard let priceUSD else {
+            throw HostedShipCatalogError.invalidLimitedShipSaleFeed("\(trimmedName) is missing priceUsd.")
+        }
+
+        guard priceUSD > 0 else {
+            throw HostedShipCatalogError.invalidLimitedShipSaleFeed("\(trimmedName) must have a positive priceUsd.")
+        }
+
+        guard let storeURL else {
+            throw HostedShipCatalogError.invalidLimitedShipSaleFeed("\(trimmedName) is missing storeUrl.")
+        }
+
+        guard !availabilitySlots.isEmpty else {
+            throw HostedShipCatalogError.invalidLimitedShipSaleFeed("\(trimmedName) is missing availabilitySlots.")
+        }
+
+        guard availabilitySlots.allSatisfy(\.isValid) else {
+            throw HostedShipCatalogError.invalidLimitedShipSaleFeed(
+                "\(trimmedName) has an availability slot where endsAt is not after startsAt."
+            )
+        }
+
+        let fallbackID = UpgradeTitleParser.normalizedShipKey(trimmedName)
+        return LimitedShipSale(
+            id: id ?? fallbackID,
+            name: trimmedName,
+            manufacturer: manufacturer ?? "Unknown Manufacturer",
+            priceUSD: priceUSD,
+            availabilitySlots: availabilitySlots,
+            storeURL: storeURL,
+            imageURL: imageURL,
+            manufacturerLogoURL: manufacturerLogoURL
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case manufacturer
+        case priceUSD
+        case priceUsd
+        case availability
+        case availabilitySlots
+        case storeURL
+        case storeUrl
+        case shipURL
+        case shipUrl
+        case addToCartURL
+        case addToCartUrl
+        case imageURL
+        case imageUrl
+        case manufacturerLogoURL
+        case manufacturerLogoUrl
+    }
+
+    private static func firstDecodedURL(
+        in container: KeyedDecodingContainer<CodingKeys>,
+        keys: [CodingKeys]
+    ) throws -> URL? {
+        for key in keys {
+            if let url = try container.decodeIfPresent(URL.self, forKey: key) {
+                return url
+            }
+        }
+
+        return nil
+    }
 }
 
 private nonisolated struct RemoteHostedShipDetailCatalogPayload: Decodable {

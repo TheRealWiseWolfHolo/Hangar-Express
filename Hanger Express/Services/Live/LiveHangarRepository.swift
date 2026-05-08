@@ -5,6 +5,7 @@ import WebKit
 final class LiveHangarRepository: HangarRepository {
     private let browser = RSIAccountPageBrowser()
     private let shipCatalogClient = HostedShipCatalogClient()
+    private let limitedShipSaleClient = HostedLimitedShipSaleClient()
     private let previewRepository = PreviewHangarRepository()
     private let refreshDiagnostics: RefreshDiagnosticsStore
     private let pledgePageSize = 50
@@ -592,6 +593,60 @@ final class LiveHangarRepository: HangarRepository {
         return try await browser.prepareBuybackCheckout(
             using: session.cookies,
             pledge: pledge
+        )
+    }
+
+    func fetchLimitedShipSales() async throws -> [LimitedShipSale] {
+        let sales = try await limitedShipSaleClient.fetchSales()
+        guard let shipCatalog = try? await HostedShipCatalogStore.shared.catalog(using: shipCatalogClient) else {
+            return sales
+        }
+
+        return sales.map { sale in
+            guard let ship = shipCatalog.matchShip(named: sale.name) else {
+                return sale
+            }
+
+            return sale.replacingHostedAssets(
+                imageURL: ship.imageURL,
+                manufacturerLogoURL: ship.manufacturerLogoURL
+            )
+        }
+    }
+
+    func addLimitedShipToCart(
+        for session: UserSession,
+        ship: LimitedShipSale,
+        log: @escaping LimitedShipCartLogHandler
+    ) async throws -> LimitedShipCartInsertionResult {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.addLimitedShipToCart(
+                for: session,
+                ship: ship,
+                log: log
+            )
+        }
+
+        try validate(session: session)
+        return try await addLimitedShipToCartUsingSingleSession(
+            using: session.cookies,
+            ship: ship,
+            log: log
+        )
+    }
+
+    private func addLimitedShipToCartUsingSingleSession(
+        using cookies: [SessionCookie],
+        ship: LimitedShipSale,
+        log: @escaping LimitedShipCartLogHandler
+    ) async throws -> LimitedShipCartInsertionResult {
+        log("Starting one isolated RSI cart session. Overlapping sessions are disabled so one successful RSI response cannot create duplicate cart items.")
+        let attemptBrowser = RSIAccountPageBrowser()
+        return try await attemptBrowser.addLimitedShipToCart(
+            using: cookies,
+            ship: ship,
+            log: log,
+            maxAttemptCount: 1
         )
     }
 
@@ -2602,13 +2657,14 @@ final class LiveHangarRepository: HangarRepository {
             id: remote.id ?? stableNumericID(from: title),
             title: title,
             recoveredValueUSD: parseMoney(remote.valueText),
-            addedToBuybackAt: parseRSIDate(remote.dateText) ?? .now,
+            addedToBuybackAt: parseRSIDate(remote.dateText) ?? BuybackPledge.unknownAddedToBuybackDate,
             notes: notes,
             imageURL: mirroredCatalogImageURL(
                 remote.imageURL.flatMap(URL.init(string:)),
                 shipCatalog: shipCatalog
             ),
-            upgradeContext: remote.upgradeContext
+            upgradeContext: remote.upgradeContext,
+            sourceRawInfo: remote.sourceRawInfo
         )
     }
 
@@ -2718,9 +2774,17 @@ final class LiveHangarRepository: HangarRepository {
 
     private func parseRSIDate(_ value: String) -> Date? {
         let normalized = value
-            .replacingOccurrences(of: "Created:", with: "")
-            .replacingOccurrences(of: "Date:", with: "")
+            .replacingOccurrences(
+                of: #"(?i)\b(?:created|date|added|reclaimed|recovered)\s*:"#,
+                with: "",
+                options: .regularExpression
+            )
             .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(
+                of: #"\b(\d{1,2})(st|nd|rd|th)\b"#,
+                with: "$1",
+                options: [.regularExpression, .caseInsensitive]
+            )
 
         guard !normalized.isEmpty else {
             return nil
@@ -2778,6 +2842,10 @@ final class LiveHangarRepository: HangarRepository {
             "MMM dd, yyyy",
             "MMMM d, yyyy",
             "MMMM dd, yyyy",
+            "MMM d yyyy",
+            "MMM dd yyyy",
+            "MMMM d yyyy",
+            "MMMM dd yyyy",
             "yyyy-MM-dd"
         ]
 
@@ -2868,7 +2936,7 @@ nonisolated enum FleetProjector {
                     msrpUSD: hostedMSRP(for: item, matchedShip: matchedShip),
                     msrpLabel: hostedMSRPLabel(for: item, matchedShip: matchedShip),
                     catalogWarning: catalogWarning(for: item, matchedShip: matchedShip),
-                    insurance: package.insurance,
+                    insurance: package.detailInsuranceText ?? HangarPackage.localizedInsuranceDisplayLabel(from: package.insurance),
                     sourcePackageID: package.id,
                     sourcePackageName: package.title,
                     meltValueUSD: meltValue,
@@ -3712,10 +3780,37 @@ private nonisolated enum RSIAccountHTMLParser {
         let fromShipID = button.flatMap { intValue(attribute("data-fromshipid", in: $0.openingTag)) }
         let toShipID = button.flatMap { intValue(attribute("data-toshipid", in: $0.openingTag)) }
         let toSkuID = button.flatMap { intValue(attribute("data-toskuid", in: $0.openingTag)) }
+        let definitionLabels = elements(in: article.html, tag: "dt", className: nil)
+            .map { normalizedText(textContent($0.html)) }
+            .filter { !$0.isEmpty }
         let definitionValues = elements(in: article.html, tag: "dd", className: nil)
             .map { normalizedText(textContent($0.html)) }
             .filter { !$0.isEmpty }
         let informationHTML = firstElement(in: article.html, selector: ".information")?.html ?? article.html
+        let articleText = normalizedText(textContent(article.html))
+        let dateText = definitionValue(
+            in: definitionValues,
+            labels: definitionLabels,
+            matching: ["date", "created", "added", "modified", "reclaim", "recovered"]
+        ) ?? definitionValues.first(where: looksLikeRSIDateText)
+            ?? firstRSIDateText(in: articleText)
+            ?? ""
+        let containsText = definitionValue(
+            in: definitionValues,
+            labels: definitionLabels,
+            matching: ["contains", "includes", "items"]
+        ) ?? value(at: 2, in: definitionValues)
+            ?? plainTextValue(
+                in: articleText,
+                after: ["Contained"],
+                before: ["Buy Back", "Not available", "Why can't", "This pledge", "Account FAQ"]
+            )
+        let resolvedContainsText = containsText
+            ?? firstText(in: article.html, selectors: [".information .contains", ".contains"])
+        let titleText = firstText(in: informationHTML, selectors: ["h1", "h2"])
+            .nilIfEmpty ?? firstText(in: article.html, selectors: ["h1", "h2"])
+        let valueText = firstText(in: article.html, selectors: [".price", ".value", ".cost"])
+        let imageURL = firstImageURL(in: article.html, baseURL: pageURL)
         let upgradeContext: BuybackUpgradeContext?
 
         if let fromShipID, fromShipID > 0,
@@ -3733,15 +3828,100 @@ private nonisolated enum RSIAccountHTMLParser {
 
         return RemoteBuybackPledge(
             id: hrefID ?? dataID,
-            title: firstText(in: informationHTML, selectors: ["h1", "h2"])
-                .nilIfEmpty ?? firstText(in: article.html, selectors: ["h1", "h2"]),
-            dateText: value(at: 0, in: definitionValues) ?? "",
-            containsText: value(at: 2, in: definitionValues)
-                ?? firstText(in: article.html, selectors: [".information .contains", ".contains"]),
-            valueText: firstText(in: article.html, selectors: [".price", ".value", ".cost"]),
-            imageURL: firstImageURL(in: article.html, baseURL: pageURL),
-            upgradeContext: upgradeContext
+            title: titleText,
+            dateText: dateText,
+            containsText: resolvedContainsText,
+            valueText: valueText,
+            imageURL: imageURL,
+            upgradeContext: upgradeContext,
+            sourceRawInfo: BuybackPledgeRawInfo(
+                buttonHref: href.nilIfEmpty,
+                buttonDataPledgeID: dataID,
+                buttonFromShipID: fromShipID,
+                buttonToShipID: toShipID,
+                buttonToSkuID: toSkuID,
+                titleText: titleText,
+                dateText: dateText,
+                containsText: resolvedContainsText,
+                valueText: valueText,
+                imageURL: imageURL,
+                definitionLabels: definitionLabels,
+                definitionValues: definitionValues,
+                articleText: String(articleText.prefix(4_000))
+            )
         )
+    }
+
+    private static func definitionValue(
+        in values: [String],
+        labels: [String],
+        matching labelFragments: [String]
+    ) -> String? {
+        for (index, label) in labels.enumerated() {
+            let normalizedLabel = label.localizedLowercase
+            guard labelFragments.contains(where: { normalizedLabel.contains($0) }),
+                  let value = value(at: index, in: values),
+                  !value.isEmpty else {
+                continue
+            }
+
+            return value
+        }
+
+        return nil
+    }
+
+    private static func looksLikeRSIDateText(_ value: String) -> Bool {
+        firstRSIDateText(in: value) != nil
+    }
+
+    private static func firstRSIDateText(in value: String) -> String? {
+        let normalized = normalizedText(value)
+        guard !normalized.isEmpty else {
+            return nil
+        }
+
+        let patterns = [
+            #"(?i)\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b"#,
+            #"\b\d{4}-\d{1,2}-\d{1,2}\b"#
+        ]
+
+        for pattern in patterns {
+            guard let range = normalized.range(of: pattern, options: .regularExpression) else {
+                continue
+            }
+
+            return String(normalized[range])
+        }
+
+        return nil
+    }
+
+    private static func plainTextValue(in text: String, after labels: [String], before stopLabels: [String]) -> String? {
+        let normalized = normalizedText(text)
+        guard !normalized.isEmpty else {
+            return nil
+        }
+
+        let labelPattern = labels
+            .map(NSRegularExpression.escapedPattern(for:))
+            .joined(separator: "|")
+        let stopPattern = stopLabels
+            .map(NSRegularExpression.escapedPattern(for:))
+            .joined(separator: "|")
+        let pattern = "(?i)\\b(?:\(labelPattern))\\b\\s+(.+?)(?=\\s+\\b(?:\(stopPattern))\\b|$)"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+
+        let range = NSRange(normalized.startIndex..., in: normalized)
+        guard let match = regex.firstMatch(in: normalized, range: range),
+              let captureRange = Range(match.range(at: 1), in: normalized) else {
+            return nil
+        }
+
+        let value = normalized[captureRange].trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : String(value)
     }
 
     private static func contentItemFragments(in html: String) -> [HTMLElementFragment] {
@@ -4284,9 +4464,12 @@ private nonisolated enum RSIAccountHTMLParser {
 
 @MainActor
 final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
+    private static let limitedShipCartLogMessageName = "limitedShipCartLog"
+
     private let webView: WKWebView
     private var loadContinuation: CheckedContinuation<Void, Error>?
     private var loadTimeoutTask: Task<Void, Never>?
+    private var limitedShipCartLogBridge: LimitedShipCartLogBridge?
     private var activeLoadURL: URL?
     private var lastNavigationEvents: [String] = []
     private var lastNavigationFailureDescription: String?
@@ -4540,7 +4723,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             script: Self.prepareBuybackCheckoutScript,
             arguments: [
                 "buybackPledgeID": pledge.id,
-                "isUpgradeBuyback": upgradeContext?.isValid == true,
+                "buybackTitle": pledge.title,
+                "isUpgradeBuyback": pledge.isUpgrade && upgradeContext?.isValid == true,
                 "fromShipID": upgradeContext?.fromShipID ?? 0,
                 "toShipID": upgradeContext?.toShipID ?? 0,
                 "toSkuID": upgradeContext?.toSkuID ?? 0
@@ -4572,6 +4756,144 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             checkoutURL: checkoutURL,
             updatedCookies: await currentRSICookies()
         )
+    }
+
+    fileprivate func addLimitedShipToCart(
+        using cookies: [SessionCookie],
+        ship: LimitedShipSale,
+        log: @escaping LimitedShipCartLogHandler,
+        maxAttemptCount: Int? = nil
+    ) async throws -> LimitedShipCartInsertionResult {
+        try Task.checkCancellation()
+        let browseURL = try limitedShipStandaloneBrowseURL()
+        let initialURL = shouldPreferStandaloneShipBrowseURL(for: ship.storeURL) ? browseURL : ship.storeURL
+
+        log("Preparing RSI browser session for \(ship.name).")
+        log("Installing \(cookies.count) saved RSI session cookie(s) into the cart WebView.")
+        try await prepareWebView(with: cookies)
+        try Task.checkCancellation()
+
+        if initialURL != ship.storeURL {
+            log("Ship feed URL points to an RSI ship detail page. Using standalone ships browse page for the Add to Cart control.")
+        }
+
+        log("Loading RSI ship page: \(initialURL.absoluteString)")
+        try await load(url: initialURL)
+        try Task.checkCancellation()
+        log("RSI ship page loaded: \(webView.url?.absoluteString ?? initialURL.absoluteString)")
+
+        installLimitedShipCartLogHandler(log)
+        defer {
+            removeLimitedShipCartLogHandler()
+        }
+
+        var result = try await evaluateLimitedShipCartInsertion(
+            ship: ship,
+            browseURL: browseURL,
+            log: log,
+            maxAttemptCount: maxAttemptCount
+        )
+        try Task.checkCancellation()
+
+        if result.status != "ok",
+           webView.url?.absoluteString != browseURL.absoluteString,
+           shouldRetryLimitedShipCartFromBrowsePage(result: result) {
+            log("Retrying from standalone ships browse page because the first page did not expose a usable Add to Cart control.")
+            try await load(url: browseURL)
+            try Task.checkCancellation()
+            log("RSI standalone ships page loaded: \(webView.url?.absoluteString ?? browseURL.absoluteString)")
+            result = try await evaluateLimitedShipCartInsertion(
+                ship: ship,
+                browseURL: browseURL,
+                log: log,
+                maxAttemptCount: maxAttemptCount
+            )
+            try Task.checkCancellation()
+        }
+
+        if result.accessDenied {
+            result.debugLog.forEach(log)
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        guard result.status == "ok" else {
+            result.debugLog.forEach(log)
+            let failureMessage = [result.failureMessage, result.debugSummary]
+                .compactMap { value in
+                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                }
+                .joined(separator: "\n\n")
+                .nilIfEmpty ?? "RSI did not confirm that the limited ship was added to the cart."
+            throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
+        }
+
+        let fallbackCartURL = try storefrontURL(path: "/en/pledge/cart")
+        let cartURL = result.cartURL
+            .flatMap(URL.init(string:))
+            ?? fallbackCartURL
+
+        result.debugLog.forEach(log)
+        log("Add to Cart finished with status=\(result.status), attempts=\(result.attemptCount).")
+        return LimitedShipCartInsertionResult(
+            shipID: ship.id,
+            cartURL: cartURL,
+            attemptCount: result.attemptCount,
+            debugSummary: result.debugSummary,
+            debugLog: result.debugLog,
+            updatedCookies: await currentRSICookies()
+        )
+    }
+
+    private func evaluateLimitedShipCartInsertion(
+        ship: LimitedShipSale,
+        browseURL: URL,
+        log: @escaping LimitedShipCartLogHandler,
+        maxAttemptCount: Int? = nil
+    ) async throws -> RemoteLimitedShipCartInsertion {
+        log("Starting Add to Cart retry script.")
+        var arguments: [String: Any] = [
+            "shipName": ship.name,
+            "storeURL": ship.storeURL.absoluteString,
+            "browseURL": browseURL.absoluteString,
+            "maxDurationMilliseconds": 12_000,
+            "retryIntervalMinimumMilliseconds": 350,
+            "retryIntervalMaximumMilliseconds": 580,
+            "singleAttemptTimeoutMilliseconds": 5_000,
+            "untrackedClickCooldownMilliseconds": 650
+        ]
+
+        if let maxAttemptCount {
+            arguments["maxAttemptCount"] = maxAttemptCount
+        }
+
+        return try await evaluate(
+            script: Self.limitedShipAddToCartScript,
+            arguments: arguments,
+            as: RemoteLimitedShipCartInsertion.self
+        )
+    }
+
+    private func limitedShipStandaloneBrowseURL() throws -> URL {
+        try storefrontURL(path: "/en/store/pledge/browse/extras/standalone-ships")
+    }
+
+    private func shouldPreferStandaloneShipBrowseURL(for url: URL) -> Bool {
+        let path = url.path.lowercased()
+        return path.contains("/pledge/ships/")
+    }
+
+    private func shouldRetryLimitedShipCartFromBrowsePage(result: RemoteLimitedShipCartInsertion) -> Bool {
+        guard result.status != "ok" else {
+            return false
+        }
+
+        let message = [result.failureMessage, result.debugSummary]
+            .compactMap { $0?.lowercased() }
+            .joined(separator: " ")
+        return result.attemptCount == 0 ||
+            message.contains("no enabled add to cart") ||
+            message.contains("no scoped add to cart") ||
+            message.contains("no add to cart")
     }
 
     fileprivate func fetchAuthorizedDevices(
@@ -5094,20 +5416,36 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             throw LiveHangarRepositoryError.unexpectedMarkup("The RSI page loader is already busy.")
         }
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            loadContinuation = continuation
-            activeLoadURL = url
-            lastNavigationEvents.removeAll()
-            lastNavigationFailureDescription = nil
-            lastNavigationResponseSummary = nil
-            appendNavigationEvent("loadRequest url=\(url.absoluteString)")
-            loadTimeoutTask?.cancel()
-            loadTimeoutTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: self?.loadTimeoutNanoseconds ?? 30_000_000_000)
-                await self?.finishLoadingAfterTimeout(requestedURL: url)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                loadContinuation = continuation
+                activeLoadURL = url
+                lastNavigationEvents.removeAll()
+                lastNavigationFailureDescription = nil
+                lastNavigationResponseSummary = nil
+                appendNavigationEvent("loadRequest url=\(url.absoluteString)")
+                loadTimeoutTask?.cancel()
+                loadTimeoutTask = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: self?.loadTimeoutNanoseconds ?? 30_000_000_000)
+                    await self?.finishLoadingAfterTimeout(requestedURL: url)
+                }
+                webView.load(URLRequest(url: url))
             }
-            webView.load(URLRequest(url: url))
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancelActiveLoad()
+            }
         }
+    }
+
+    private func cancelActiveLoad() {
+        webView.stopLoading()
+        guard loadContinuation != nil else {
+            return
+        }
+
+        appendNavigationEvent("cancelled")
+        finishLoading(with: .failure(CancellationError()))
     }
 
     private func finishLoadingAfterTimeout(requestedURL: URL) async {
@@ -5331,6 +5669,26 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
         let data = try JSONSerialization.data(withJSONObject: result)
         return try JSONDecoder().decode(Value.self, from: data)
+    }
+
+    private func installLimitedShipCartLogHandler(_ log: @escaping LimitedShipCartLogHandler) {
+        removeLimitedShipCartLogHandler()
+
+        let bridge = LimitedShipCartLogBridge(handler: log)
+        limitedShipCartLogBridge = bridge
+        webView.configuration.userContentController.add(
+            bridge,
+            name: Self.limitedShipCartLogMessageName
+        )
+    }
+
+    private func removeLimitedShipCartLogHandler() {
+        if limitedShipCartLogBridge != nil {
+            webView.configuration.userContentController.removeScriptMessageHandler(
+                forName: Self.limitedShipCartLogMessageName
+            )
+            limitedShipCartLogBridge = nil
+        }
     }
 
     private func ensureLoaded(url: URL) async throws {
@@ -6877,6 +7235,43 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       return "";
     };
 
+    const firstDateText = (value) => {
+      const normalized = String(value || '').replace(/\\s+/g, ' ').trim();
+      const monthMatch = normalized.match(/\\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?,?\\s+\\d{4}\\b/i);
+      if (monthMatch?.[0]) {
+        return monthMatch[0];
+      }
+
+      const isoMatch = normalized.match(/\\b\\d{4}-\\d{1,2}-\\d{1,2}\\b/);
+      return isoMatch?.[0] || '';
+    };
+
+    const looksLikeDateText = (value) => {
+      return Boolean(firstDateText(value));
+    };
+
+    const definitionValue = (labels, values, labelPatterns) => {
+      for (let index = 0; index < labels.length; index += 1) {
+        const label = String(labels[index] || '').toLowerCase();
+        if (!labelPatterns.some((pattern) => pattern.test(label))) {
+          continue;
+        }
+
+        const value = values[index];
+        if (value) {
+          return value;
+        }
+      }
+
+      return '';
+    };
+
+    const containedTextFromArticle = (text) => {
+      const normalized = String(text || '').replace(/\\s+/g, ' ').trim();
+      const match = normalized.match(/\\bContained\\b\\s+(.+?)(?=\\s+\\b(?:Buy Back|Not available|Why can't|This pledge|Account FAQ)\\b|$)/i);
+      return match?.[1]?.trim() || '';
+    };
+
     const currentPage = (() => {
       const parsed = Number.parseInt(new URL(window.location.href).searchParams.get('page') || '1', 10);
       return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
@@ -6973,9 +7368,26 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         const fromShipID = Number(button?.getAttribute('data-fromshipid'));
         const toShipID = Number(button?.getAttribute('data-toshipid'));
         const toSkuID = Number(button?.getAttribute('data-toskuid'));
+        const definitionLabels = Array.from(article.querySelectorAll('dl dt'))
+          .map((node) => node.textContent.trim())
+          .filter(Boolean);
         const definitionValues = Array.from(article.querySelectorAll('dl dd'))
           .map((node) => node.textContent.trim())
           .filter(Boolean);
+        const articleText = String(article.innerText || article.textContent || '').replace(/\\s+/g, ' ').trim();
+        const dateText =
+          definitionValue(definitionLabels, definitionValues, [/date/, /created/, /added/, /modified/, /reclaim/, /recovered/]) ||
+          definitionValues.find(looksLikeDateText) ||
+          firstDateText(articleText) ||
+          '';
+        const containsText =
+          definitionValue(definitionLabels, definitionValues, [/contains/, /includes/, /items/]) ||
+          definitionValues[2] ||
+          containedTextFromArticle(articleText) ||
+          firstText(article, ['.information .contains']);
+        const titleText = firstText(article, ['.information h1', 'h1', 'h2']);
+        const valueText = firstText(article, ['.price', '.value', '.cost']);
+        const imageURL = firstImageURL(article.querySelector('.image, .thumb, .thumbnail, picture, img') || article);
         const upgradeContext = Number.isFinite(fromShipID) && fromShipID > 0 &&
           Number.isFinite(toShipID) && toShipID > 0 &&
           Number.isFinite(toSkuID) && toSkuID > 0
@@ -6988,12 +7400,27 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
         return {
           id: Number.isFinite(hrefId) && hrefId > 0 ? hrefId : (Number.isFinite(dataId) && dataId > 0 ? dataId : null),
-          title: firstText(article, ['.information h1', 'h1', 'h2']),
-          dateText: definitionValues[0] || '',
-          containsText: definitionValues[2] || firstText(article, ['.information .contains']),
-          valueText: firstText(article, ['.price', '.value', '.cost']),
-          imageURL: firstImageURL(article.querySelector('.image, .thumb, .thumbnail, picture, img') || article),
-          upgradeContext
+          title: titleText,
+          dateText,
+          containsText,
+          valueText,
+          imageURL,
+          upgradeContext,
+          sourceRawInfo: {
+            buttonHref: href || null,
+            buttonDataPledgeID: Number.isFinite(dataId) && dataId > 0 ? dataId : null,
+            buttonFromShipID: Number.isFinite(fromShipID) && fromShipID > 0 ? fromShipID : null,
+            buttonToShipID: Number.isFinite(toShipID) && toShipID > 0 ? toShipID : null,
+            buttonToSkuID: Number.isFinite(toSkuID) && toSkuID > 0 ? toSkuID : null,
+            titleText,
+            dateText,
+            containsText,
+            valueText,
+            imageURL,
+            definitionLabels,
+            definitionValues,
+            articleText: articleText.slice(0, 4000)
+          }
         };
       })
     };
@@ -7360,7 +7787,13 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     let parsedFromShipID = Number(fromShipID);
     let parsedToShipID = Number(toShipID);
     let parsedToSkuID = Number(toSkuID);
-    let shouldUseUpgradeBuybackFlow = isUpgradeBuyback === true;
+    const buybackTitleText = normalizeText(typeof buybackTitle === 'string' ? buybackTitle : '');
+    const looksLikeUpgradeBuyback = (value) => {
+      const normalized = normalizeText(value).toLowerCase();
+      return /\\b(?:upgrade|ccu|cross[-\\s]?chassis)\\b/.test(normalized)
+        || /\\S+\\s+to\\s+\\S+/.test(normalized);
+    };
+    let shouldUseUpgradeBuybackFlow = isUpgradeBuyback === true && looksLikeUpgradeBuyback(buybackTitleText);
 
     const hasAccessDeniedMarkup =
       document.title.toLowerCase().includes('access denied') ||
@@ -7403,6 +7836,11 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     const selectedButton = Array.from(document.querySelectorAll('.holosmallbtn, a[href*="/pledge/buyback/"]'))
       .find((button) => buybackButtonID(button) === parsedBuybackPledgeID);
+    const selectedArticle = selectedButton?.closest?.('article.pledge') || null;
+    const selectedArticleTitle = selectedArticle
+      ? normalizeText(selectedArticle.querySelector('.information h1, h1, h2')?.textContent || '')
+      : '';
+    const selectedItemLooksLikeUpgrade = looksLikeUpgradeBuyback([buybackTitleText, selectedArticleTitle].join(' '));
 
     if (selectedButton) {
       const liveFromShipID = Number(selectedButton.getAttribute('data-fromshipid'));
@@ -7413,7 +7851,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         Number.isFinite(liveToShipID) && liveToShipID > 0 &&
         Number.isFinite(liveToSkuID) && liveToSkuID > 0;
 
-      if (hasLiveUpgradeContext) {
+      if (hasLiveUpgradeContext && selectedItemLooksLikeUpgrade) {
         parsedFromShipID = liveFromShipID;
         parsedToShipID = liveToShipID;
         parsedToSkuID = liveToSkuID;
@@ -7640,6 +8078,587 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       checkoutURL,
       failureMessage: null,
       debugSummary: `pledge=${parsedBuybackPledgeID}, flow=upgradeBuyback, fromShipID=${parsedFromShipID}, toShipID=${parsedToShipID}, toSkuID=${parsedToSkuID}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+    };
+    """
+
+    private static let limitedShipAddToCartScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const normalizeKey = (value) => normalizeText(value).toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ').trim();
+    const compactKey = (value) => normalizeKey(value).replace(/\\s+/g, '');
+    const desiredShipLabel = normalizeText(typeof shipName === 'string' ? shipName : '');
+    const desiredShipName = desiredShipLabel.toLowerCase();
+    const desiredShipKey = normalizeKey(desiredShipLabel);
+    const desiredShipCompact = compactKey(desiredShipLabel);
+    const desiredStoreURL = normalizeText(typeof storeURL === 'string' ? storeURL : '');
+    const desiredStorePath = (() => {
+      try {
+        return desiredStoreURL ? new URL(desiredStoreURL, window.location.origin).pathname.toLowerCase() : '';
+      } catch (error) {
+        return '';
+      }
+    })();
+    const desiredStoreSlug = compactKey(desiredStorePath.split('/').filter(Boolean).pop() || '');
+    const maxDuration = Math.max(1000, Number(maxDurationMilliseconds) || 12000);
+    const maximumAttemptCount = Math.max(0, Number(maxAttemptCount) || 0);
+    const retryIntervalMinimum = Math.max(100, Number(retryIntervalMinimumMilliseconds) || 350);
+    const retryIntervalMaximum = Math.max(retryIntervalMinimum, Number(retryIntervalMaximumMilliseconds) || 580);
+    const nextRetryInterval = () => Math.floor(retryIntervalMinimum + Math.random() * (retryIntervalMaximum - retryIntervalMinimum + 1));
+    const singleAttemptTimeout = Math.max(1000, Number(singleAttemptTimeoutMilliseconds) || 2500);
+    const untrackedClickCooldown = Math.min(1200, Math.max(350, Number(untrackedClickCooldownMilliseconds) || 650));
+    const cartURL = new URL('/en/pledge/cart', window.location.origin).toString();
+    const debugLog = [];
+    const postLog = (message) => {
+      const entry = `[${new Date().toISOString()}] ${String(message || '')}`;
+      debugLog.push(entry);
+      try {
+        window.webkit?.messageHandlers?.limitedShipCartLog?.postMessage(entry);
+      } catch (error) {
+        // Keep logging local even if the native bridge is unavailable.
+      }
+      return entry;
+    };
+    const waitForNextRetry = (reason) => {
+      const delay = nextRetryInterval();
+      postLog(`Waiting ${delay}ms before next retry${reason ? ` (${reason})` : ''}.`);
+      return wait(delay);
+    };
+
+    postLog(`Initialized limited ship cart script for ship="${desiredShipLabel || 'unknown'}", maxDurationMs=${maxDuration}, maxAttemptCount=${maximumAttemptCount || 'unlimited'}, retryIntervalRangeMs=${retryIntervalMinimum}-${retryIntervalMaximum}, url=${window.location.href}, title=${document.title}`);
+    postLog(`Desired store path="${desiredStorePath || 'n/a'}", desired slug="${desiredStoreSlug || 'n/a'}".`);
+
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      postLog('Access denied markup found before cart insertion started.');
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        cartURL: null,
+        attemptCount: 0,
+        failureMessage: 'The RSI store page reported access denied before cart insertion started.',
+        debugSummary: null,
+        debugLog
+      };
+    }
+
+    const wait = (milliseconds) => new Promise(resolve => setTimeout(resolve, milliseconds));
+    const cartRequestTracker = (() => {
+      const state = {
+        pending: 0,
+        observed: 0,
+        lastStartedAt: 0,
+        lastFinishedAt: 0,
+        lastDescription: ''
+      };
+      const bodyText = (body) => {
+        if (!body) {
+          return '';
+        }
+
+        if (typeof body === 'string') {
+          return body;
+        }
+
+        if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
+          return body.toString();
+        }
+
+        if (typeof FormData !== 'undefined' && body instanceof FormData) {
+          return Array.from(body.entries())
+            .map(([key, value]) => `${key}=${typeof File !== 'undefined' && value instanceof File ? value.name : String(value)}`)
+            .join('&');
+        }
+
+        return '';
+      };
+      const requestInfo = (input, init) => {
+        const request = typeof Request !== 'undefined' && input instanceof Request ? input : null;
+        return {
+          method: normalizeText(init?.method || request?.method || 'GET').toUpperCase(),
+          url: normalizeText(request?.url || (typeof input === 'string' ? input : input?.url || '')),
+          body: bodyText(init?.body)
+        };
+      };
+      const shouldTrack = (info) => {
+        if (!info || info.method === 'GET' || info.method === 'HEAD') {
+          return false;
+        }
+
+        const urlText = info.url.toLowerCase();
+        const haystack = `${urlText} ${info.body.toLowerCase()}`;
+        return haystack.includes('addtocart') ||
+          haystack.includes('add_to_cart') ||
+          /add\\s*to\\s*cart/.test(haystack) ||
+          haystack.includes('/cart') ||
+          (urlText.includes('graphql') && /cart|store|pledge|sku/.test(haystack));
+      };
+      const start = (info) => {
+        state.pending += 1;
+        state.observed += 1;
+        state.lastStartedAt = Date.now();
+        state.lastDescription = `${info.method} ${info.url || 'unknown url'}`.slice(0, 220);
+        postLog(`Observed RSI cart request start: ${state.lastDescription}`);
+
+        let finished = false;
+        return () => {
+          if (finished) {
+            return;
+          }
+
+          finished = true;
+          state.pending = Math.max(0, state.pending - 1);
+          state.lastFinishedAt = Date.now();
+          postLog(`Observed RSI cart request finish: pending=${state.pending}, request=${state.lastDescription}`);
+        };
+      };
+
+      if (typeof window.fetch === 'function' && !window.fetch.__hangerExpressCartTracked) {
+        const originalFetch = window.fetch.bind(window);
+        const trackedFetch = (...args) => {
+          const info = requestInfo(args[0], args[1]);
+          if (!shouldTrack(info)) {
+            return originalFetch(...args);
+          }
+
+          const finish = start(info);
+          return originalFetch(...args).then(
+            (value) => {
+              finish();
+              return value;
+            },
+            (error) => {
+              finish();
+              throw error;
+            }
+          );
+        };
+        trackedFetch.__hangerExpressCartTracked = true;
+        window.fetch = trackedFetch;
+      }
+
+      if (typeof XMLHttpRequest !== 'undefined' && !XMLHttpRequest.prototype.__hangerExpressCartTracked) {
+        const originalOpen = XMLHttpRequest.prototype.open;
+        const originalSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function(method, url) {
+          this.__hangerExpressCartInfo = {
+            method: normalizeText(method).toUpperCase(),
+            url: normalizeText(url)
+          };
+          return originalOpen.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function(body) {
+          const info = {
+            method: this.__hangerExpressCartInfo?.method || 'GET',
+            url: this.__hangerExpressCartInfo?.url || '',
+            body: bodyText(body)
+          };
+          const finish = shouldTrack(info) ? start(info) : null;
+          if (finish) {
+            this.addEventListener('loadend', finish, { once: true });
+            this.addEventListener('error', finish, { once: true });
+            this.addEventListener('abort', finish, { once: true });
+          }
+
+          return originalSend.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.__hangerExpressCartTracked = true;
+      }
+
+      return state;
+    })();
+    const classText = (node) => {
+      const value = node?.className;
+      if (!value) {
+        return '';
+      }
+
+      return typeof value === 'string' ? value : String(value.baseVal || value);
+    };
+    const textFor = (node) => normalizeText([
+      node?.textContent,
+      node?.getAttribute?.('aria-label'),
+      node?.getAttribute?.('title'),
+      node?.getAttribute?.('value'),
+      node?.getAttribute?.('data-action'),
+      node?.getAttribute?.('data-cy-id'),
+      classText(node)
+    ].filter(Boolean).join(' '));
+
+    const isVisible = (node) => {
+      if (!node || !node.getBoundingClientRect) {
+        return false;
+      }
+
+      const rect = node.getBoundingClientRect();
+      const style = window.getComputedStyle(node);
+      return rect.width > 0 &&
+        rect.height > 0 &&
+        style.visibility !== 'hidden' &&
+        style.display !== 'none';
+    };
+
+    const isDisabled = (node) => {
+      if (!node) {
+        return true;
+      }
+
+      if (node.disabled || node.matches?.('[disabled], [aria-disabled="true"]')) {
+        return true;
+      }
+
+      const label = textFor(node).toLowerCase();
+      const nodeClasses = classText(node).toLowerCase();
+      const disabledAncestor = node.closest?.('.disabled, .-disabled, .-isDisabled, [aria-disabled="true"]');
+      return node.classList?.contains('disabled') ||
+        nodeClasses.includes('-disabled') ||
+        nodeClasses.includes('-isdisabled') ||
+        disabledAncestor ||
+        /sold\\s*out|out\\s*of\\s*stock|unavailable|not\\s*available/.test(label);
+    };
+
+    const cartCount = () => {
+      const selectors = [
+        '.cart-count',
+        '.js-cart-count',
+        '[class*="cart-count"]',
+        '[data-cart-count]',
+        '[aria-label*="cart" i]',
+        'a[href*="/pledge/cart"]'
+      ];
+
+      const values = Array.from(document.querySelectorAll(selectors.join(',')))
+        .flatMap((node) => [
+          node.getAttribute?.('data-cart-count'),
+          node.getAttribute?.('aria-label'),
+          node.textContent
+        ])
+        .map((value) => String(value || '').match(/\\b(\\d+)\\b/)?.[1])
+        .filter(Boolean)
+        .map((value) => Number.parseInt(value, 10))
+        .filter((value) => Number.isFinite(value));
+
+      return values.length ? Math.max(...values) : null;
+    };
+
+    const initialCartCount = cartCount();
+    postLog(`Initial cart count=${initialCartCount === null ? 'unknown' : initialCartCount}`);
+    postLog(`Found ${document.querySelectorAll('.c-skuCard').length} RSI sku card(s) and ${document.querySelectorAll('button.a-skuButton, .c-skuCard__actions button, .m-skuDrawerContent__actionsContainer button').length} sku button candidate(s) on load.`);
+
+    const successSignal = () => {
+      if (window.location.pathname.includes('/pledge/cart')) {
+        return 'cart page opened';
+      }
+
+      const pageText = normalizeText(document.body?.innerText || '').toLowerCase();
+      if (/added\\s+(?:to|in)\\s+(?:your\\s+)?cart/.test(pageText)) {
+        return 'added-to-cart text found';
+      }
+
+      if (/item\\s+has\\s+been\\s+added/.test(pageText) || pageText.includes('cart updated')) {
+        return 'cart update text found';
+      }
+
+      if (pageText.includes('view cart') || pageText.includes('checkout now')) {
+        return 'post-add cart action found';
+      }
+
+      const currentCartCount = cartCount();
+      if (initialCartCount !== null && currentCartCount !== null && currentCartCount > initialCartCount) {
+        return `cart count changed ${initialCartCount}->${currentCartCount}`;
+      }
+
+      return '';
+    };
+
+    const waitForAttemptResolution = async (attemptNumber) => {
+      const attemptStartedAt = Date.now();
+      const observedBaseline = cartRequestTracker.observed;
+      let sawTrackedRequest = false;
+      let didLogUntrackedWait = false;
+      postLog(`Attempt ${attemptNumber}: waiting for RSI cart response before another click.`);
+      await wait(250);
+
+      while (Date.now() - attemptStartedAt <= singleAttemptTimeout) {
+        const successReason = successSignal();
+        if (successReason) {
+          return successReason;
+        }
+
+        sawTrackedRequest = sawTrackedRequest ||
+          cartRequestTracker.observed > observedBaseline ||
+          cartRequestTracker.pending > 0;
+
+        if (
+          sawTrackedRequest &&
+          cartRequestTracker.pending === 0 &&
+          cartRequestTracker.lastFinishedAt >= attemptStartedAt &&
+          Date.now() - cartRequestTracker.lastFinishedAt >= 300
+        ) {
+          postLog(`Attempt ${attemptNumber}: RSI cart request settled without a success signal.`);
+          return '';
+        }
+
+        if (!sawTrackedRequest && !didLogUntrackedWait && Date.now() - attemptStartedAt >= untrackedClickCooldown) {
+          didLogUntrackedWait = true;
+          postLog(`Attempt ${attemptNumber}: no RSI cart request was observed after ${untrackedClickCooldown}ms; continuing to wait so the same click cannot overlap with a second cart insertion.`);
+        }
+
+        if (sawTrackedRequest && !didLogUntrackedWait && Date.now() - attemptStartedAt >= untrackedClickCooldown) {
+          didLogUntrackedWait = true;
+          postLog(`Attempt ${attemptNumber}: RSI cart request is still in flight; not sending an overlapping click.`);
+        }
+
+        await wait(150);
+      }
+
+      postLog(`Attempt ${attemptNumber}: cart response wait timed out after ${singleAttemptTimeout}ms; allowing one retry.`);
+      return '';
+    };
+
+    const addToCartRegex = /\\badd\\s+to\\s+(?:cart|basket)\\b/i;
+    const cartClassRegex = /(?:^|\\s)(?:a-skuButton|-shoppingCart|shoppingCart)(?:\\s|$)/i;
+    const candidateSelectors = [
+      'button.a-skuButton',
+      '.c-skuCard__actions button',
+      '.m-skuDrawerContent__actionsContainer button',
+      'button[data-cy-id="button"]',
+      'button',
+      '[role="button"]',
+      'input[type="button"]',
+      'input[type="submit"]',
+      '.add-to-cart',
+      '.js-add-to-cart',
+      '.js-add-to-customizer',
+      '[data-action*="cart" i]',
+      '[class*="add-to-cart" i]',
+      '[class*="skuButton" i]'
+    ];
+
+    const hrefFor = (node) => {
+      const anchor = node?.closest?.('a[href]') || (node?.matches?.('a[href]') ? node : null);
+      return normalizeText(anchor?.getAttribute?.('href') || anchor?.href || '');
+    };
+
+    const scopeFor = (node) => node?.closest?.(
+      '.c-skuCard, .m-skuDrawerContent, .c-skuDrawer, [data-rsi-component="StoreSkuWidget"], article, .pledge, .product, .card, .row, li, section, a'
+    ) || node;
+
+    const scopeTitleFor = (scope) => normalizeText(
+      scope?.querySelector?.('.c-skuCard__skuTitle, [data-cy-id="sku_title"], h1, h2, h3, [class*="title" i]')?.textContent ||
+      ''
+    );
+
+    const isCartIntent = (node, label) => {
+      const classes = classText(node);
+      return addToCartRegex.test(label) ||
+        cartClassRegex.test(classes) ||
+        Boolean(node?.querySelector?.('.-shoppingCart, [class*="shoppingCart" i]'));
+    };
+
+    const scopeMatchesShip = (scope, href, titleText) => {
+      if (!desiredShipKey && !desiredStoreSlug) {
+        return true;
+      }
+
+      const titleKey = normalizeKey(titleText);
+      const titleCompact = compactKey(titleText);
+      const scopeKey = normalizeKey(scope?.innerText || scope?.textContent || '');
+      const scopeCompact = compactKey(scope?.innerText || scope?.textContent || '');
+      const hrefPath = (() => {
+        try {
+          return href ? new URL(href, window.location.origin).pathname.toLowerCase() : '';
+        } catch (error) {
+          return href.toLowerCase();
+        }
+      })();
+      const hrefCompact = compactKey(hrefPath);
+
+      if (desiredShipKey && (titleKey === desiredShipKey || titleKey.includes(desiredShipKey))) {
+        return true;
+      }
+
+      if (desiredShipCompact && titleCompact.includes(desiredShipCompact)) {
+        return true;
+      }
+
+      if (desiredStoreSlug && hrefCompact.includes(desiredStoreSlug)) {
+        return true;
+      }
+
+      return desiredShipKey ? scopeKey.includes(desiredShipKey) || scopeCompact.includes(desiredShipCompact) : false;
+    };
+
+    const findAddToCartCandidate = () => {
+      const nodes = Array.from(document.querySelectorAll(candidateSelectors.join(',')));
+      const candidates = nodes
+        .map((node) => {
+          const label = textFor(node);
+          const scope = scopeFor(node);
+          const href = hrefFor(node);
+          const titleText = scopeTitleFor(scope);
+          const shipScoped = scopeMatchesShip(scope, href, titleText);
+          return {
+            node,
+            label,
+            href,
+            titleText,
+            shipScoped,
+            scopeText: normalizeText(scope?.innerText || scope?.textContent || '').slice(0, 220)
+          };
+        })
+        .filter((candidate) => {
+          const label = candidate.label.toLowerCase();
+          return isCartIntent(candidate.node, label) &&
+            isVisible(candidate.node) &&
+            !isDisabled(candidate.node);
+        });
+
+      const scopedCandidates = candidates.filter((candidate) => candidate.shipScoped);
+      if (scopedCandidates.length > 0) {
+        return scopedCandidates[0];
+      }
+
+      return candidates.length === 1 ? candidates[0] : null;
+    };
+
+    let didApplySearchFilter = false;
+    const applySearchFilterIfAvailable = () => {
+      if (didApplySearchFilter || !desiredShipLabel) {
+        return false;
+      }
+
+      const input = Array.from(document.querySelectorAll('input[type="search"], input[placeholder*="Search" i], input'))
+        .find((candidate) => isVisible(candidate) && !candidate.disabled);
+      if (!input) {
+        return false;
+      }
+
+      didApplySearchFilter = true;
+      const prototype = Object.getPrototypeOf(input);
+      const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+      if (valueSetter) {
+        valueSetter.call(input, desiredShipLabel);
+      } else {
+        input.value = desiredShipLabel;
+      }
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: desiredShipLabel }));
+      input.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: 'Enter' }));
+      postLog(`Applied RSI page search filter for "${desiredShipLabel}".`);
+      return true;
+    };
+
+    const clickCandidate = (candidate) => {
+      const node = candidate.node;
+      node.scrollIntoView({ block: 'center', inline: 'center' });
+      const rect = node.getBoundingClientRect();
+      const clientX = Math.max(0, rect.left + rect.width / 2);
+      const clientY = Math.max(0, rect.top + rect.height / 2);
+      const target = document.elementFromPoint(clientX, clientY) || node;
+      const eventOptions = { bubbles: true, cancelable: true, composed: true, view: window, clientX, clientY };
+      const PointerEventConstructor = window.PointerEvent || MouseEvent;
+
+      target.dispatchEvent(new PointerEventConstructor('pointerdown', { ...eventOptions, pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0 }));
+      target.dispatchEvent(new MouseEvent('mousedown', { ...eventOptions, button: 0 }));
+      target.dispatchEvent(new PointerEventConstructor('pointerup', { ...eventOptions, pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0 }));
+      target.dispatchEvent(new MouseEvent('mouseup', { ...eventOptions, button: 0 }));
+      target.dispatchEvent(new MouseEvent('click', { ...eventOptions, button: 0 }));
+      if (target !== node) {
+        node.click();
+      }
+    };
+
+    let attemptCount = 0;
+    let lastFailure = '';
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt <= maxDuration) {
+      const successReason = successSignal();
+      if (successReason) {
+        postLog(`Success signal before click: ${successReason}`);
+        return {
+          accessDenied: false,
+          status: 'ok',
+          cartURL,
+          attemptCount,
+          failureMessage: null,
+          debugSummary: `success=${successReason}, attempts=${attemptCount}, url=${window.location.href}`,
+          debugLog
+        };
+      }
+
+      const candidate = findAddToCartCandidate();
+      if (!candidate) {
+        if (applySearchFilterIfAvailable()) {
+          await waitForNextRetry('after applying search filter');
+          continue;
+        }
+
+        lastFailure = 'No scoped enabled Add to Cart button was found on the RSI ship page.';
+        postLog(`Attempt ${attemptCount + 1}: ${lastFailure}`);
+        await waitForNextRetry('no candidate found');
+        continue;
+      }
+
+      attemptCount += 1;
+      try {
+        const buttonLabel = candidate.label.slice(0, 180);
+        postLog(`Attempt ${attemptCount}: clicking candidate title="${candidate.titleText || 'n/a'}", label="${buttonLabel}", href="${candidate.href || 'n/a'}"`);
+        clickCandidate(candidate);
+        lastFailure = `Clicked candidate with title: ${(candidate.titleText || candidate.label).slice(0, 120)}`;
+        postLog(`Attempt ${attemptCount}: click dispatched.`);
+      } catch (error) {
+        lastFailure = `Click failed: ${String(error && error.message ? error.message : error)}`;
+        postLog(`Attempt ${attemptCount}: ${lastFailure}`);
+      }
+
+      const attemptSuccessReason = await waitForAttemptResolution(attemptCount);
+      if (attemptSuccessReason) {
+        postLog(`Success signal after click: ${attemptSuccessReason}`);
+        return {
+          accessDenied: false,
+          status: 'ok',
+          cartURL,
+          attemptCount,
+          failureMessage: null,
+          debugSummary: `success=${attemptSuccessReason}, attempts=${attemptCount}, url=${window.location.href}`,
+          debugLog
+        };
+      }
+
+      if (maximumAttemptCount > 0 && attemptCount >= maximumAttemptCount) {
+        postLog(`Reached maxAttemptCount=${maximumAttemptCount} without an RSI success signal.`);
+        break;
+      }
+
+      await waitForNextRetry('after settled cart attempt');
+    }
+
+    const finalSuccessReason = successSignal();
+    if (finalSuccessReason) {
+      postLog(`Final success signal: ${finalSuccessReason}`);
+      return {
+        accessDenied: false,
+        status: 'ok',
+        cartURL,
+        attemptCount,
+        failureMessage: null,
+        debugSummary: `success=${finalSuccessReason}, attempts=${attemptCount}, url=${window.location.href}`,
+        debugLog
+      };
+    }
+
+    postLog(`Failed before timeout. attempts=${attemptCount}, lastFailure="${lastFailure || 'none'}", url=${window.location.href}, title=${document.title}`);
+    return {
+      accessDenied: false,
+      status: 'failed',
+      cartURL: null,
+      attemptCount,
+      failureMessage: lastFailure || 'RSI did not show an Add to Cart success state before the retry window ended.',
+      debugSummary: `attempts=${attemptCount}, durationMs=${Date.now() - startedAt}, url=${window.location.href}, title=${document.title}`,
+      debugLog
     };
     """
 
@@ -9117,6 +10136,7 @@ private nonisolated struct RemoteBuybackPledge: Decodable {
     let valueText: String
     let imageURL: String?
     let upgradeContext: BuybackUpgradeContext?
+    let sourceRawInfo: BuybackPledgeRawInfo?
 
     var pageSignature: String {
         [
@@ -9131,12 +10151,59 @@ private nonisolated struct RemoteBuybackPledge: Decodable {
     }
 }
 
+private final class LimitedShipCartLogBridge: NSObject, WKScriptMessageHandler {
+    private let handler: LimitedShipCartLogHandler
+
+    init(handler: @escaping LimitedShipCartLogHandler) {
+        self.handler = handler
+    }
+
+    func userContentController(
+        _: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        let renderedMessage = Self.render(message.body)
+        guard !renderedMessage.isEmpty else {
+            return
+        }
+
+        let handler = handler
+        Task { @MainActor in
+            handler(renderedMessage)
+        }
+    }
+
+    private static func render(_ body: Any) -> String {
+        if let string = body as? String {
+            return string.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        if JSONSerialization.isValidJSONObject(body),
+           let data = try? JSONSerialization.data(withJSONObject: body),
+           let string = String(data: data, encoding: .utf8) {
+            return string
+        }
+
+        return String(describing: body).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 private nonisolated struct RemoteBuybackCheckoutPreparation: Decodable {
     let accessDenied: Bool
     let status: String
     let checkoutURL: String?
     let failureMessage: String?
     let debugSummary: String?
+}
+
+private nonisolated struct RemoteLimitedShipCartInsertion: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let cartURL: String?
+    let attemptCount: Int
+    let failureMessage: String?
+    let debugSummary: String?
+    let debugLog: [String]
 }
 
 private nonisolated struct RemoteHangarLogPage: Decodable {

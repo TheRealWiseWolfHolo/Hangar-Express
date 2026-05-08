@@ -103,6 +103,7 @@ nonisolated struct RefreshProgress: Hashable, Sendable {
 }
 
 typealias RefreshProgressHandler = @MainActor @Sendable (RefreshProgress) -> Void
+typealias LimitedShipCartLogHandler = @MainActor @Sendable (String) -> Void
 
 nonisolated enum HangarLogFetchMode: Hashable, Sendable {
     case initial
@@ -259,6 +260,143 @@ nonisolated struct BuybackCheckoutPreparation: Hashable, Sendable {
     let updatedCookies: [SessionCookie]
 }
 
+nonisolated struct LimitedShipAvailabilitySlot: Identifiable, Hashable, Sendable, Codable {
+    let startsAt: Date
+    let endsAt: Date
+
+    init(startsAt: Date, endsAt: Date) {
+        self.startsAt = startsAt
+        self.endsAt = endsAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        if let startsAt = try container.decodeIfPresent(Date.self, forKey: .startsAt)
+            ?? container.decodeIfPresent(Date.self, forKey: .startAt) {
+            self.startsAt = startsAt
+        } else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.startsAt,
+                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Missing startsAt")
+            )
+        }
+
+        if let endsAt = try container.decodeIfPresent(Date.self, forKey: .endsAt)
+            ?? container.decodeIfPresent(Date.self, forKey: .endAt) {
+            self.endsAt = endsAt
+        } else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.endsAt,
+                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Missing endsAt")
+            )
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(startsAt, forKey: .startsAt)
+        try container.encode(endsAt, forKey: .endsAt)
+    }
+
+    var id: String {
+        "\(startsAt.timeIntervalSince1970)-\(endsAt.timeIntervalSince1970)"
+    }
+
+    var isValid: Bool {
+        endsAt > startsAt
+    }
+
+    func contains(_ date: Date) -> Bool {
+        startsAt <= date && date <= endsAt
+    }
+
+    func isWithinStartWindow(at date: Date, leadTime: TimeInterval) -> Bool {
+        if contains(date) {
+            return true
+        }
+
+        let secondsUntilStart = startsAt.timeIntervalSince(date)
+        return secondsUntilStart >= 0 && secondsUntilStart <= leadTime
+    }
+
+    func fireDate(at date: Date) -> Date {
+        if contains(date) {
+            return date
+        }
+
+        return max(date, startsAt.addingTimeInterval(-1))
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case startsAt
+        case startAt
+        case endsAt
+        case endAt
+    }
+}
+
+nonisolated struct LimitedShipSale: Identifiable, Hashable, Sendable, Codable {
+    let id: String
+    let name: String
+    let manufacturer: String
+    let priceUSD: Decimal
+    let availabilitySlots: [LimitedShipAvailabilitySlot]
+    let storeURL: URL
+    let imageURL: URL?
+    let manufacturerLogoURL: URL?
+
+    var priceText: String {
+        "$\(NSDecimalNumber(decimal: priceUSD).stringValue) USD"
+    }
+
+    var validAvailabilitySlots: [LimitedShipAvailabilitySlot] {
+        availabilitySlots
+            .filter(\.isValid)
+            .sorted { $0.startsAt < $1.startsAt }
+    }
+
+    func bestAvailabilitySlot(at date: Date) -> LimitedShipAvailabilitySlot? {
+        if let activeSlot = validAvailabilitySlots.first(where: { $0.contains(date) }) {
+            return activeSlot
+        }
+
+        if let upcomingSlot = validAvailabilitySlots.first(where: { $0.startsAt > date }) {
+            return upcomingSlot
+        }
+
+        return validAvailabilitySlots.last
+    }
+
+    func slotWithinStartWindow(at date: Date, leadTime: TimeInterval) -> LimitedShipAvailabilitySlot? {
+        validAvailabilitySlots.first { slot in
+            slot.isWithinStartWindow(at: date, leadTime: leadTime)
+        }
+    }
+
+    func replacingHostedAssets(imageURL: URL?, manufacturerLogoURL: URL?) -> LimitedShipSale {
+        LimitedShipSale(
+            id: id,
+            name: name,
+            manufacturer: manufacturer,
+            priceUSD: priceUSD,
+            availabilitySlots: availabilitySlots,
+            storeURL: storeURL,
+            imageURL: self.imageURL ?? imageURL,
+            manufacturerLogoURL: self.manufacturerLogoURL ?? manufacturerLogoURL
+        )
+    }
+}
+
+nonisolated struct LimitedShipCartInsertionResult: Hashable, Sendable {
+    let shipID: String
+    let cartURL: URL
+    let attemptCount: Int
+    let debugSummary: String?
+    let debugLog: [String]
+    let updatedCookies: [SessionCookie]
+}
+
 nonisolated struct AuthorizedDevice: Identifiable, Hashable, Sendable {
     static let hangarExpressDeviceName = "Hangar Express"
 
@@ -403,6 +541,14 @@ protocol HangarRepository: Sendable {
         for session: UserSession,
         pledge: BuybackPledge
     ) async throws -> BuybackCheckoutPreparation
+
+    func fetchLimitedShipSales() async throws -> [LimitedShipSale]
+
+    func addLimitedShipToCart(
+        for session: UserSession,
+        ship: LimitedShipSale,
+        log: @escaping LimitedShipCartLogHandler
+    ) async throws -> LimitedShipCartInsertionResult
 
     func fetchAuthorizedDevices(
         for session: UserSession,

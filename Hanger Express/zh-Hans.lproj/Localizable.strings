@@ -84,7 +84,7 @@
 "1 month" = "1 个月";
 "1 year" = "1 年";
 "Created" = "创建";
-"Melt" = "熔铸";
+"Melt" = "可溶";
 "Consumed" = "已消耗";
 "Upgrade Applied" = "已应用升级";
 "Gift" = "赠送";
@@ -99,6 +99,7 @@
 "Legacy N/A" = "旧阶梯 不可用";
 "%lld months" = "%lld 个月";
 "Unknown" = "未知";
+"Not Applicable" = "不适用";
 "Hangar Express is already refreshing or finishing another account action." = "Hangar Express 已在刷新或完成另一项账户操作。";
 "No signed-in RSI session is currently available for this account action." = "当前没有可用于此账户操作的已登录 RSI 会话。";
 "This RSI account no longer has a saved password. Sign in again before Hangar Express can send melt or gift requests." = "这个 RSI 账户已没有保存的密码。在 Hangar Express 发送回收或赠送请求前，请重新登录。";
@@ -158,6 +159,7 @@
 "Skin" = "涂装";
 "Standalone ship" = "独立舰船";
 "Buy-back item" = "回购物品";
+"Date unavailable" = "日期不可用";
 "All Time" = "全部时间";
 "30 Days" = "30 天";
 "90 Days" = "90 天";
@@ -534,6 +536,24 @@
 "Copy Raw Card Data" = "复制原始卡片数据";
 "Share Raw Card Data" = "分享原始卡片数据";
 "Raw Hangar Express card data" = "Hangar Express 原始卡片数据";
+"Share Picture" = "分享图片";
+"Share Picture Failed" = "分享图片失败";
+"Generating share picture..." = "正在生成分享图片...";
+"Unable to create the share picture." = "无法生成分享图片。";
+"Powered By" = "Powered By";
+"Items" = "物品";
+"Other Items" = "其他物品";
+"Contents" = "内容";
+"Coupon" = "优惠券";
+"Coupon Code" = "优惠码";
+"Copy Code" = "复制优惠码";
+"Copied" = "已复制";
+"No listed contents" = "没有列出的内容";
+"Difference" = "差价";
+"Copy Raw Buy-Back Data" = "复制原始回购数据";
+"Share Raw Buy-Back Data" = "分享原始回购数据";
+"Buy-Back Debug Export" = "回购调试导出";
+"Raw Hangar Express buy-back data" = "Hangar Express 原始回购数据";
 "Search packages, ships, insurance" = "搜索项目、舰船、保险";
 "Log" = "日志";
 "Pledges" = "项目";
@@ -623,3 +643,5 @@
 "RSI rejected password confirmation for logged-in devices." = "RSI 拒绝了已登录设备的密码确认。";
 "Confirm removing %lld authorized RSI devices except this app." = "确认移除此应用以外的 %lld 个授权 RSI 设备。";
 "RSI did not remove %@ within %lld seconds." = "RSI 未在 %lld 秒内移除 %@。";
+"Auto Copy Share Picture Log" = "自动复制分享图片日志";
+"Control hangar artwork, row highlights, and share-picture diagnostics." = "控制机库图像、行高亮和分享图片诊断。";

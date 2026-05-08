@@ -14,6 +14,8 @@ struct AccountView: View {
     @State private var isOverviewEmailVisible = false
     @State private var isOverviewSavedLoginVisible = false
     @State private var presentedTool: FleetTool?
+    @State private var limitedShipAccessPrompt: LimitedShipAccessPrompt?
+    @State private var isCheckingLimitedShipAccess = false
 
     var body: some View {
         NavigationStack {
@@ -81,11 +83,7 @@ struct AccountView: View {
 
                 Section {
                     FleetToolsSection(showsHeader: false) { tool in
-                        guard tool.isAvailable else {
-                            return
-                        }
-
-                        presentedTool = tool
+                        handleToolSelection(tool)
                     }
                     .padding(.vertical, 4)
                     .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
@@ -168,10 +166,25 @@ struct AccountView: View {
                     totalSpendUSD: snapshot.metrics.totalSpendUSD
                 )
             }
+            .sheet(item: $limitedShipAccessPrompt) { _ in
+                LimitedShipAccessCodePromptView(account: appModel.session) {
+                    limitedShipAccessPrompt = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        presentedTool = .limitedShipPurchase
+                    }
+                }
+                .presentationDetents([.large])
+            }
             .sheet(item: $presentedTool) { tool in
                 switch tool {
                 case .allShips:
                     AllShipsBrowserView(reloadToken: appModel.hangarFleetImageReloadToken)
+                case .limitedShipPurchase:
+                    LimitedShipPurchaseView(
+                        appModel: appModel,
+                        snapshot: snapshot,
+                        reloadToken: appModel.hangarFleetImageReloadToken
+                    )
                 case .authorizedDevices:
                     AuthorizedDevicesView(appModel: appModel)
                 case .ccuChainCalculator, .resetCharacter:
@@ -183,8 +196,49 @@ struct AccountView: View {
             } message: {
                 Text(accountTotalValueExplanation)
             }
+            .overlay {
+                if isCheckingLimitedShipAccess {
+                    LimitedShipAccessCheckingOverlay()
+                }
+            }
             .task(id: backgroundSelectionLoadID) {
                 loadSavedProfileBackgroundSelection()
+            }
+        }
+    }
+
+    private func handleToolSelection(_ tool: FleetTool) {
+        guard tool.isAvailable else {
+            return
+        }
+
+        guard tool == .limitedShipPurchase else {
+            presentedTool = tool
+            return
+        }
+
+        checkLimitedShipAccessAndPresent()
+    }
+
+    private func checkLimitedShipAccessAndPresent() {
+        guard !isCheckingLimitedShipAccess else {
+            return
+        }
+
+        isCheckingLimitedShipAccess = true
+        let account = appModel.session
+
+        Task {
+            let entitlement = await LimitedShipAccessManager.shared.currentEntitlement(account: account)
+
+            await MainActor.run {
+                isCheckingLimitedShipAccess = false
+
+                if entitlement != nil {
+                    presentedTool = .limitedShipPurchase
+                } else {
+                    limitedShipAccessPrompt = LimitedShipAccessPrompt()
+                }
             }
         }
     }
@@ -1135,6 +1189,1387 @@ private enum ProfileBackgroundSelectionPersistence {
         } else {
             UserDefaults.standard.removeObject(forKey: storageKey)
         }
+    }
+}
+
+private struct LimitedShipAccessPrompt: Identifiable {
+    let id = UUID()
+}
+
+private struct LimitedShipAccessCodePromptView: View {
+    let account: UserSession?
+    let onGranted: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var accessCode = ""
+    @State private var validationMessage: String?
+    @State private var grantedEntitlement: LimitedShipAccessEntitlement?
+    @State private var isRedeeming = false
+    @State private var deviceID = LimitedShipAccessDeviceIdentity.currentID()
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        Label("Invite Only", systemImage: "lock.shield")
+                            .font(.title2.weight(.semibold))
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("Limited Ship Purchase is restricted while this alpha feature is being tested. Enter a lifetime or 24-hour access code to continue.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        LimitedShipAccessWarningLabel()
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Device ID", systemImage: "iphone.gen3")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+
+                            Text(deviceID)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(nil)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(Color(.secondarySystemGroupedBackground))
+                                )
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Access Code")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+
+                            TextField("HXLS1...", text: $accessCode, axis: .vertical)
+                                .lineLimit(4...8)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(.body, design: .monospaced))
+                                .disabled(isRedeeming || grantedEntitlement != nil)
+                        }
+
+                        if let grantedEntitlement {
+                            Label(grantedSummary(for: grantedEntitlement), systemImage: "checkmark.seal.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.green)
+                                .lineLimit(nil)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                        } else if let validationMessage {
+                            Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
+                                .font(.subheadline)
+                                .foregroundStyle(.orange)
+                                .lineLimit(nil)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .transition(.opacity)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
+                }
+                .scrollDismissesKeyboard(.interactively)
+
+                Button {
+                    redeemAccessCode()
+                } label: {
+                    HStack(spacing: 10) {
+                        if isRedeeming {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "key.fill")
+                        }
+
+                        Text(isRedeeming ? "Verifying..." : "Unlock Limited Ship Purchase")
+                            .fontWeight(.semibold)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.82)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(normalizedAccessCode.isEmpty || isRedeeming || grantedEntitlement != nil)
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 16)
+                .background(.regularMaterial)
+            }
+            .navigationTitle("Access Code")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .disabled(isRedeemingOrGranted)
+                }
+            }
+            .onChange(of: accessCode) { _, _ in
+                if validationMessage != nil {
+                    validationMessage = nil
+                }
+            }
+        }
+    }
+
+    private var normalizedAccessCode: String {
+        accessCode
+            .split(whereSeparator: \.isWhitespace)
+            .joined()
+    }
+
+    private var isRedeemingOrGranted: Bool {
+        isRedeeming || grantedEntitlement != nil
+    }
+
+    private func redeemAccessCode() {
+        let code = normalizedAccessCode
+        guard !code.isEmpty else {
+            return
+        }
+
+        Task { @MainActor in
+            isRedeeming = true
+            validationMessage = nil
+
+            do {
+                let entitlement = try await LimitedShipAccessManager.shared.redeem(
+                    code: code,
+                    account: account
+                )
+
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
+                    grantedEntitlement = entitlement
+                }
+
+                try? await Task.sleep(nanoseconds: 650_000_000)
+                isRedeeming = false
+                dismiss()
+                onGranted()
+            } catch {
+                isRedeeming = false
+                validationMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
+        }
+    }
+
+    private func grantedSummary(for entitlement: LimitedShipAccessEntitlement) -> String {
+        switch entitlement.kind {
+        case .lifetime:
+            return "Lifetime access unlocked."
+        case .timed24h:
+            if let expiresAt = entitlement.expiresAt {
+                return "24-hour access active until \(expiresAt.formatted(date: .abbreviated, time: .shortened))."
+            }
+
+            return "24-hour access unlocked."
+        }
+    }
+}
+
+private struct LimitedShipAccessWarningLabel: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Experimental Feature Notice", systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.orange)
+
+            Text("This alpha automation may interact with RSI checkout in ways that could result in account review, restriction, suspension, purchase errors, loss of access, or other consequences. Use is entirely at your own risk. The author and contributors assume no liability for any damage, account action, loss, purchase issue, or other outcome arising from use of this feature. By continuing, you acknowledge and accept full responsibility for all risks.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(nil)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.orange.opacity(0.12))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.orange.opacity(0.28), lineWidth: 1)
+        }
+    }
+}
+
+private struct LimitedShipAccessCheckingOverlay: View {
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.18)
+                .ignoresSafeArea()
+
+            HStack(spacing: 12) {
+                ProgressView()
+                Text("Checking access...")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+    }
+}
+
+private struct LimitedShipPurchaseView: View {
+    let appModel: AppModel
+    let snapshot: HangarSnapshot
+    let reloadToken: UUID?
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var loadState: LimitedShipPurchaseLoadState = .idle
+    @State private var now = Date()
+    @State private var pendingConfirmation: LimitedShipPurchaseConfirmation?
+    @State private var alert: LimitedShipPurchaseAlert?
+    @State private var operation: LimitedShipPurchaseOperation?
+    @State private var checkoutContext: RSICheckoutContext?
+    @State private var purchaseSuccess: LimitedShipPurchaseSuccess?
+    @State private var purchaseTask: Task<Void, Never>?
+    @State private var accessEntitlement: LimitedShipAccessEntitlement?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                switch loadState {
+                case .idle, .loading:
+                    LimitedShipLoadingView()
+                case let .loaded(ships):
+                    if ships.isEmpty {
+                        ContentUnavailableView(
+                            "No Limited Ships",
+                            systemImage: "cart.badge.questionmark",
+                            description: Text("No limited ship sale data is available yet.")
+                        )
+                    } else {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 14) {
+                                LimitedShipAccessValidityCard(
+                                    entitlement: accessEntitlement,
+                                    now: now
+                                )
+
+                                Text("What ship do you want to buy?")
+                                    .font(.title3.weight(.semibold))
+                                    .padding(.horizontal, 4)
+
+                                ForEach(ships) { ship in
+                                    VStack(spacing: 8) {
+                                        LimitedShipHeroCard(
+                                            ship: ship,
+                                            now: now,
+                                            reloadToken: reloadToken,
+                                            isDisabled: isOperationActive
+                                        ) {
+                                            prepare(ship)
+                                        }
+
+                                        Button {
+                                            openShipPage(ship)
+                                        } label: {
+                                            Label("Open Browser", systemImage: "safari")
+                                                .frame(maxWidth: .infinity)
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.large)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.top, 8)
+                            .padding(.bottom, operation == nil ? 24 : 340)
+                        }
+                    }
+                case let .failed(message):
+                    LimitedShipErrorView(message: message) {
+                        Task {
+                            await loadShips(force: true)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Limited Ship Purchase")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Refresh") {
+                        Task {
+                            await refreshAccessEntitlement()
+                            await loadShips(force: true)
+                        }
+                    }
+                    .disabled(isLoading || isOperationActive)
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if let operation {
+                    LimitedShipOperationPanel(
+                        operation: operation,
+                        now: now,
+                        onCancel: cancelOperation,
+                        onOpenCheckout: openCheckout,
+                        onDismiss: {
+                            self.operation = nil
+                        }
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(.regularMaterial)
+                }
+            }
+            .overlay {
+                if let purchaseSuccess {
+                    LimitedShipPurchaseSuccessOverlay(success: purchaseSuccess) {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
+                            self.purchaseSuccess = nil
+                        }
+                    }
+                    .transition(.asymmetric(
+                        insertion: .scale(scale: 0.88).combined(with: .opacity),
+                        removal: .opacity
+                    ))
+                    .zIndex(10)
+                }
+            }
+            .confirmationDialog(
+                "Start Limited Ship Watch?",
+                isPresented: Binding(
+                    get: { pendingConfirmation != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            pendingConfirmation = nil
+                        }
+                    }
+                ),
+                titleVisibility: .visible,
+                presenting: pendingConfirmation
+            ) { confirmation in
+                Button("Start Cart Watch") {
+                    startCartWatch(ship: confirmation.ship, slot: confirmation.slot)
+                }
+
+                Button("Cancel", role: .cancel) {}
+            } message: { confirmation in
+                Text(
+                    "Hangar Express will wait until one second before \(confirmation.ship.name)'s slot, then watch for an enabled Add to Cart button and click it once. Open checkout afterward to apply store credit and finish the RSI order."
+                )
+            }
+            .alert(item: $alert) { alert in
+                Alert(
+                    title: Text(alert.title),
+                    message: Text(alert.message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
+            .sheet(item: $checkoutContext) { context in
+                RSICheckoutBrowserView(
+                    context: context,
+                    onCancel: { cookies in
+                        checkoutContext = nil
+                        persistLimitedShipCheckoutCookies(cookies)
+                    },
+                    onFinished: { cookies in
+                        checkoutContext = nil
+                        persistLimitedShipCheckoutCookies(cookies)
+                    },
+                    onSucceeded: { cookies, confirmationURL in
+                        checkoutContext = nil
+                        handleCheckoutSucceeded(cookies: cookies, confirmationURL: confirmationURL)
+                    }
+                )
+            }
+            .task {
+                await loadShips(force: false)
+            }
+            .task {
+                await refreshAccessEntitlement()
+            }
+            .task {
+                while !Task.isCancelled {
+                    now = Date()
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+            }
+            .onDisappear {
+                purchaseTask?.cancel()
+            }
+        }
+    }
+
+    private func refreshAccessEntitlement() async {
+        accessEntitlement = await LimitedShipAccessManager.shared.currentEntitlement(account: appModel.session)
+    }
+
+    private var isLoading: Bool {
+        if case .loading = loadState {
+            return true
+        }
+
+        return false
+    }
+
+    private var isOperationActive: Bool {
+        guard let operation else {
+            return false
+        }
+
+        return operation.phase == .waiting || operation.phase == .adding
+    }
+
+    private func loadShips(force: Bool) async {
+        if !force,
+           case .loaded = loadState {
+            return
+        }
+
+        loadState = .loading
+
+        do {
+            let ships = try await appModel.fetchLimitedShipSales()
+            loadState = .loaded(ships)
+        } catch {
+            loadState = .failed(error.localizedDescription)
+        }
+    }
+
+    private func prepare(_ ship: LimitedShipSale) {
+        guard !isOperationActive else {
+            return
+        }
+
+        guard let storeCreditUSD = snapshot.metrics.storeCreditUSD else {
+            alert = LimitedShipPurchaseAlert(
+                title: "Credit Unavailable",
+                message: "Refresh Account before starting a limited ship cart watch."
+            )
+            return
+        }
+
+        guard storeCreditUSD.isGreaterThanOrEqual(to: ship.priceUSD) else {
+            let missingCredit = ship.priceUSD - storeCreditUSD
+            alert = LimitedShipPurchaseAlert(
+                title: "Not Enough Store Credit",
+                message: "\(ship.name) costs \(ship.priceText). You are missing \(missingCredit.usdString)."
+            )
+            return
+        }
+
+        let currentDate = Date()
+        guard let slot = ship.bestAvailabilitySlot(at: currentDate),
+              slot.endsAt >= currentDate else {
+            alert = LimitedShipPurchaseAlert(
+                title: "No Upcoming Slot",
+                message: "\(ship.name) does not have an upcoming dummy availability slot."
+            )
+            return
+        }
+
+        pendingConfirmation = LimitedShipPurchaseConfirmation(ship: ship, slot: slot)
+    }
+
+    private func startCartWatch(ship: LimitedShipSale, slot: LimitedShipAvailabilitySlot) {
+        pendingConfirmation = nil
+        purchaseTask?.cancel()
+
+        let currentDate = Date()
+        let fireDate = slot.fireDate(at: currentDate)
+        let initialLogs = [
+            Self.timestampedLog("Selected \(ship.name) at \(ship.priceText)."),
+            Self.timestampedLog(
+                "Availability slot: \(slot.startsAt.formatted(date: .abbreviated, time: .standard)) - \(slot.endsAt.formatted(date: .abbreviated, time: .standard))."
+            ),
+            Self.timestampedLog(
+                fireDate > currentDate
+                    ? "Watch armed. Add to Cart will start at \(fireDate.formatted(date: .abbreviated, time: .standard))."
+                    : "Slot is active. Add to Cart will start immediately."
+            )
+        ]
+        operation = LimitedShipPurchaseOperation(
+            phase: fireDate > currentDate ? .waiting : .adding,
+            shipName: ship.name,
+            storeCreditAmountUSD: ship.priceUSD,
+            detail: fireDate > currentDate
+                ? "Waiting until \(fireDate.formatted(date: .omitted, time: .standard))"
+                : "Waiting for an enabled Add to Cart button",
+            fireDate: fireDate > currentDate ? fireDate : nil,
+            cartURL: nil,
+            attemptCount: nil,
+            checkoutCookies: nil,
+            logs: initialLogs
+        )
+
+        purchaseTask = Task {
+            let delay = max(0, fireDate.timeIntervalSinceNow)
+            if delay > 0 {
+                let nanoseconds = UInt64(min(delay, 24 * 60 * 60) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanoseconds)
+            }
+
+            guard !Task.isCancelled else {
+                return
+            }
+
+            await MainActor.run {
+                appendOperationLog("Reached fire time. Watching for an enabled Add to Cart button.")
+                replaceOperation(
+                    phase: .adding,
+                    detail: "Watching for an enabled Add to Cart button",
+                    fireDate: nil,
+                    cartURL: nil,
+                    attemptCount: nil
+                )
+            }
+
+            do {
+                let result = try await appModel.addLimitedShipToCart(ship) { message in
+                    appendOperationLog(message)
+                }
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                await MainActor.run {
+                    appendOperationLogs(result.debugLog)
+                    appendOperationLog(result.debugSummary ?? "RSI confirmed the cart update.")
+                    purchaseTask = nil
+                    replaceOperation(
+                        phase: .succeeded,
+                        detail: result.debugSummary ?? "RSI confirmed the cart update.",
+                        fireDate: nil,
+                        cartURL: result.cartURL,
+                        attemptCount: result.attemptCount,
+                        checkoutCookies: result.updatedCookies.isEmpty ? appModel.session?.cookies : result.updatedCookies
+                    )
+                }
+            } catch {
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                await MainActor.run {
+                    purchaseTask = nil
+                    appendOperationLog("Add to Cart failed: \(error.localizedDescription)")
+                    replaceOperation(
+                        phase: .failed,
+                        detail: error.localizedDescription,
+                        fireDate: nil,
+                        cartURL: nil,
+                        attemptCount: nil,
+                        checkoutCookies: nil
+                    )
+                    alert = LimitedShipPurchaseAlert(
+                        title: "Add to Cart Failed",
+                        message: error.localizedDescription
+                    )
+                }
+            }
+        }
+    }
+
+    private func cancelOperation() {
+        purchaseTask?.cancel()
+        purchaseTask = nil
+        operation = nil
+    }
+
+    private func openCheckout(_ cartURL: URL) {
+        let shipName = operation?.shipName ?? "Limited Ship"
+        let cookies = operation?.checkoutCookies ?? appModel.session?.cookies ?? []
+        checkoutContext = RSICheckoutContext(
+            itemTitle: shipName,
+            checkoutURL: cartURL,
+            cookies: cookies,
+            navigationTitle: "RSI Checkout",
+            automation: operation.map {
+                RSICheckoutAutomation(storeCreditAmount: $0.storeCreditAmountUSD)
+            }
+        )
+    }
+
+    private func openShipPage(_ ship: LimitedShipSale) {
+        let cookies = operation?.checkoutCookies ?? appModel.session?.cookies ?? []
+        checkoutContext = RSICheckoutContext(
+            itemTitle: ship.name,
+            checkoutURL: ship.storeURL,
+            cookies: cookies,
+            navigationTitle: ship.name,
+            completionButtonTitle: "Done"
+        )
+    }
+
+    private func persistLimitedShipCheckoutCookies(_ cookies: [SessionCookie]) {
+        Task {
+            await appModel.persistBrowserCookies(cookies)
+        }
+    }
+
+    private func handleCheckoutSucceeded(cookies: [SessionCookie], confirmationURL: URL?) {
+        let shipName = operation?.shipName ?? checkoutContext?.itemTitle ?? "Limited Ship"
+        persistLimitedShipCheckoutCookies(cookies)
+        appendOperationLog(
+            confirmationURL.map { "RSI checkout confirmation reached: \($0.absoluteString)" }
+                ?? "RSI checkout confirmation reached."
+        )
+        replaceOperation(
+            phase: .purchased,
+            detail: "RSI confirmed the order. Check your hangar for delivery.",
+            fireDate: nil,
+            cartURL: nil,
+            attemptCount: operation?.attemptCount,
+            checkoutCookies: cookies
+        )
+
+        withAnimation(.spring(response: 0.55, dampingFraction: 0.78)) {
+            purchaseSuccess = LimitedShipPurchaseSuccess(
+                shipName: shipName,
+                confirmationURL: confirmationURL
+            )
+        }
+
+        Task {
+            await appModel.refresh(scope: .full)
+        }
+    }
+
+    private func replaceOperation(
+        phase: LimitedShipPurchaseOperation.Phase,
+        detail: String,
+        fireDate: Date?,
+        cartURL: URL?,
+        attemptCount: Int?,
+        checkoutCookies: [SessionCookie]? = nil
+    ) {
+        guard let operation else {
+            return
+        }
+
+        self.operation = LimitedShipPurchaseOperation(
+            phase: phase,
+            shipName: operation.shipName,
+            storeCreditAmountUSD: operation.storeCreditAmountUSD,
+            detail: detail,
+            fireDate: fireDate,
+            cartURL: cartURL,
+            attemptCount: attemptCount,
+            checkoutCookies: checkoutCookies ?? operation.checkoutCookies,
+            logs: operation.logs
+        )
+    }
+
+    private func appendOperationLog(_ message: String) {
+        let line = Self.normalizedLogLine(message)
+        guard let operation,
+              !operation.logs.contains(line) else {
+            return
+        }
+
+        self.operation = operation.appendingLog(line)
+    }
+
+    private func appendOperationLogs(_ messages: [String]) {
+        for message in messages {
+            appendOperationLog(message)
+        }
+    }
+
+    private static func normalizedLogLine(_ message: String) -> String {
+        let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedMessage.isEmpty else {
+            return timestampedLog("Empty log message")
+        }
+
+        if trimmedMessage.hasPrefix("[") {
+            return trimmedMessage
+        }
+
+        return timestampedLog(trimmedMessage)
+    }
+
+    private static func timestampedLog(_ message: String) -> String {
+        "[\(Date().formatted(date: .omitted, time: .standard))] \(message)"
+    }
+}
+
+private enum LimitedShipPurchaseLoadState {
+    case idle
+    case loading
+    case loaded([LimitedShipSale])
+    case failed(String)
+}
+
+private struct LimitedShipPurchaseConfirmation {
+    let ship: LimitedShipSale
+    let slot: LimitedShipAvailabilitySlot
+}
+
+private struct LimitedShipPurchaseAlert: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
+private struct LimitedShipPurchaseSuccess: Identifiable, Equatable {
+    let id = UUID()
+    let shipName: String
+    let confirmationURL: URL?
+}
+
+private struct LimitedShipPurchaseOperation: Equatable {
+    enum Phase: Equatable {
+        case waiting
+        case adding
+        case succeeded
+        case purchased
+        case failed
+    }
+
+    let phase: Phase
+    let shipName: String
+    let storeCreditAmountUSD: Decimal
+    let detail: String
+    let fireDate: Date?
+    let cartURL: URL?
+    let attemptCount: Int?
+    let checkoutCookies: [SessionCookie]?
+    let logs: [String]
+
+    func appendingLog(_ line: String) -> LimitedShipPurchaseOperation {
+        LimitedShipPurchaseOperation(
+            phase: phase,
+            shipName: shipName,
+            storeCreditAmountUSD: storeCreditAmountUSD,
+            detail: detail,
+            fireDate: fireDate,
+            cartURL: cartURL,
+            attemptCount: attemptCount,
+            checkoutCookies: checkoutCookies,
+            logs: logs + [line]
+        )
+    }
+}
+
+private struct LimitedShipPurchaseSuccessOverlay: View {
+    let success: LimitedShipPurchaseSuccess
+    let onDismiss: () -> Void
+
+    @State private var animate = false
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.62)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onDismiss)
+
+            ZStack {
+                ForEach(0..<24, id: \.self) { index in
+                    SuccessSpark(index: index, animate: animate)
+                }
+
+                VStack(spacing: 18) {
+                    ZStack {
+                        Circle()
+                            .stroke(
+                                AngularGradient(
+                                    colors: [.cyan, .blue, .purple, .cyan],
+                                    center: .center
+                                ),
+                                lineWidth: 3
+                            )
+                            .frame(width: 128, height: 128)
+                            .rotationEffect(.degrees(animate ? 360 : 0))
+                            .scaleEffect(animate ? 1.08 : 0.76)
+                            .opacity(animate ? 0.9 : 0.2)
+
+                        Circle()
+                            .fill(.ultraThinMaterial)
+                            .frame(width: 102, height: 102)
+                            .overlay {
+                                Circle()
+                                    .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                            }
+
+                        Image(systemName: "checkmark.seal.fill")
+                            .font(.system(size: 58, weight: .bold))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, .cyan)
+                            .scaleEffect(animate ? 1 : 0.35)
+                            .rotationEffect(.degrees(animate ? 0 : -18))
+                    }
+
+                    VStack(spacing: 8) {
+                        Text("ORDER SECURED")
+                            .font(.system(.title2, design: .rounded, weight: .black))
+                            .tracking(1.8)
+
+                        Text(success.shipName)
+                            .font(.title.weight(.heavy))
+                            .multilineTextAlignment(.center)
+
+                        Text("RSI confirmed the checkout. The pledge is now headed to your hangar.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 8)
+                    }
+
+                    Button(action: onDismiss) {
+                        Label("Continue", systemImage: "arrow.right.circle.fill")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .tint(.cyan)
+                }
+                .padding(24)
+                .frame(maxWidth: 360)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .stroke(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.5),
+                                    Color.cyan.opacity(0.45),
+                                    Color.purple.opacity(0.28)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1.2
+                        )
+                }
+                .shadow(color: .cyan.opacity(animate ? 0.45 : 0.1), radius: animate ? 34 : 8)
+                .scaleEffect(animate ? 1 : 0.86)
+                .opacity(animate ? 1 : 0)
+            }
+            .padding(24)
+        }
+        .onAppear {
+            withAnimation(.spring(response: 0.62, dampingFraction: 0.72)) {
+                animate = true
+            }
+        }
+    }
+}
+
+private struct SuccessSpark: View {
+    let index: Int
+    let animate: Bool
+
+    var body: some View {
+        Image(systemName: index.isMultiple(of: 3) ? "sparkle" : "star.fill")
+            .font(.system(size: CGFloat(8 + (index % 4) * 3), weight: .bold))
+            .foregroundStyle(index.isMultiple(of: 2) ? Color.cyan : Color.purple)
+            .opacity(animate ? 0.95 : 0)
+            .scaleEffect(animate ? 1 : 0.2)
+            .offset(
+                x: cos(angle) * radius,
+                y: sin(angle) * radius
+            )
+            .rotationEffect(.degrees(animate ? Double(index * 37 + 180) : Double(index * 11)))
+            .animation(
+                .easeInOut(duration: 1.35 + Double(index % 5) * 0.12)
+                    .repeatForever(autoreverses: true)
+                    .delay(Double(index) * 0.035),
+                value: animate
+            )
+    }
+
+    private var angle: CGFloat {
+        CGFloat(index) / 24 * .pi * 2
+    }
+
+    private var radius: CGFloat {
+        CGFloat(122 + (index % 5) * 22)
+    }
+}
+
+private struct LimitedShipLoadingView: View {
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+            Text("Loading limited ship sale data...")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct LimitedShipErrorView: View {
+    let message: String
+    let retry: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Unable to Load Limited Ships", systemImage: "exclamationmark.triangle")
+        } description: {
+            Text(message)
+        } actions: {
+            Button("Try Again", action: retry)
+        }
+    }
+}
+
+private struct LimitedShipAccessValidityCard: View {
+    let entitlement: LimitedShipAccessEntitlement?
+    let now: Date
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: statusIcon)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(statusColor)
+                    .frame(width: 28, height: 28)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Access Validity")
+                        .font(.headline)
+
+                    Text(primaryText)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(statusColor)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text(secondaryText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            if let entitlement {
+                HStack(spacing: 8) {
+                    validityChip(icon: "envelope", text: emailScope(for: entitlement))
+                    validityChip(icon: "iphone.gen3", text: "Device-bound")
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(statusColor.opacity(0.26), lineWidth: 1)
+        }
+    }
+
+    private var statusIcon: String {
+        guard let entitlement else {
+            return "hourglass"
+        }
+
+        if entitlement.kind == .timed24h,
+           let expiresAt = entitlement.expiresAt,
+           expiresAt <= now {
+            return "exclamationmark.triangle.fill"
+        }
+
+        return "checkmark.shield.fill"
+    }
+
+    private var statusColor: Color {
+        guard let entitlement else {
+            return .secondary
+        }
+
+        if entitlement.kind == .timed24h,
+           let expiresAt = entitlement.expiresAt,
+           expiresAt <= now {
+            return .orange
+        }
+
+        return .green
+    }
+
+    private var primaryText: String {
+        guard let entitlement else {
+            return "Checking access..."
+        }
+
+        switch entitlement.kind {
+        case .lifetime:
+            return "Lifetime access active"
+        case .timed24h:
+            guard let expiresAt = entitlement.expiresAt else {
+                return "24-hour access active"
+            }
+
+            if expiresAt <= now {
+                return "24-hour access expired"
+            }
+
+            return "24-hour access active"
+        }
+    }
+
+    private var secondaryText: String {
+        guard let entitlement else {
+            return "The app is verifying the signed access entitlement for this device."
+        }
+
+        switch entitlement.kind {
+        case .lifetime:
+            return "This invite does not expire while it remains valid for this install."
+        case .timed24h:
+            guard let expiresAt = entitlement.expiresAt else {
+                return "This invite is time-limited for this install."
+            }
+
+            if expiresAt <= now {
+                return "Expired at \(expiresAt.formatted(date: .abbreviated, time: .shortened))."
+            }
+
+            return "Expires \(expiresAt.formatted(date: .abbreviated, time: .shortened)). \(Self.remainingText(from: now, to: expiresAt)) remaining."
+        }
+    }
+
+    private func emailScope(for entitlement: LimitedShipAccessEntitlement) -> String {
+        guard let audience = entitlement.audience?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !audience.isEmpty else {
+            return "Any email"
+        }
+
+        return audience
+    }
+
+    private func validityChip(icon: String, text: String) -> some View {
+        Label(text, systemImage: icon)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.72)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color(.tertiarySystemGroupedBackground))
+            )
+    }
+
+    private static func remainingText(from now: Date, to expiresAt: Date) -> String {
+        let remainingSeconds = max(0, Int(expiresAt.timeIntervalSince(now).rounded(.down)))
+        let hours = remainingSeconds / 3600
+        let minutes = (remainingSeconds % 3600) / 60
+
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        }
+
+        return "\(minutes)m"
+    }
+}
+
+private struct LimitedShipHeroCard: View {
+    let ship: LimitedShipSale
+    let now: Date
+    let reloadToken: UUID?
+    let isDisabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            GeometryReader { proxy in
+                ZStack(alignment: .topLeading) {
+                    heroCardBase(size: proxy.size)
+
+                    VStack(alignment: .leading, spacing: 0) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("Standalone Ships", systemImage: "shippingbox.fill")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(Color.white.opacity(0.78))
+
+                            Text(ship.name)
+                                .font(.title.weight(.heavy))
+                                .foregroundStyle(.white)
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.72)
+
+                            Text(ship.manufacturer)
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(Color.white.opacity(0.76))
+                        }
+                        .padding(.trailing, 148)
+
+                        Spacer(minLength: 12)
+
+                        HStack(alignment: .bottom, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(ship.priceText)
+                                    .font(.title3.weight(.heavy))
+                                    .foregroundStyle(.white)
+
+                                Text(availabilitySummary)
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(Color.white.opacity(0.74))
+                                    .lineLimit(2)
+                            }
+
+                            Spacer(minLength: 0)
+
+                            Label("ADD TO CART", systemImage: "cart.badge.plus")
+                                .font(.headline.weight(.heavy))
+                                .foregroundStyle(.black)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.72)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 13)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(Color(red: 1.0, green: 0.83, blue: 0.66))
+                                )
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(.horizontal, 22)
+                    .padding(.top, 18)
+                    .padding(.bottom, 18)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 236, alignment: .bottomLeading)
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .opacity(isDisabled ? 0.62 : 1)
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+    }
+
+    private var availabilitySummary: String {
+        guard let slot = ship.bestAvailabilitySlot(at: now) else {
+            return "Availability unavailable"
+        }
+
+        if slot.contains(now) {
+            return "Available until \(slot.endsAt.formatted(date: .omitted, time: .shortened))"
+        }
+
+        return "Next slot \(slot.startsAt.formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    private func heroCardBase(size: CGSize) -> some View {
+        let recipe = FleetCardBaseSnapshotRecipe(
+            style: .hero,
+            pointSize: size,
+            manufacturerName: ship.manufacturer,
+            backdropURL: ship.imageURL,
+            logoURL: ship.manufacturerLogoURL
+        )
+
+        return CachedFleetCardBaseImage(
+            recipe: recipe,
+            reloadToken: reloadToken
+        ) { phase in
+            switch phase {
+            case let .success(image):
+                image
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: size.width, height: size.height)
+                    .clipped()
+            case .empty:
+                FleetCardBaseSnapshotPlaceholder(recipe: recipe, showsProgress: true)
+            case .failure:
+                FleetCardBaseSnapshotPlaceholder(recipe: recipe)
+            }
+        }
+    }
+}
+
+private struct LimitedShipOperationPanel: View {
+    let operation: LimitedShipPurchaseOperation
+    let now: Date
+    let onCancel: () -> Void
+    let onOpenCheckout: (URL) -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                statusIcon
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.headline)
+
+                    Text(detail)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 8)
+
+                if operation.phase == .waiting {
+                    Button("Cancel", role: .cancel, action: onCancel)
+                        .buttonStyle(.bordered)
+                } else if operation.phase == .succeeded || operation.phase == .purchased || operation.phase == .failed {
+                    if operation.phase == .succeeded,
+                       let cartURL = operation.cartURL {
+                        Button {
+                            onOpenCheckout(cartURL)
+                        } label: {
+                            Label("Open Checkout", systemImage: "safari")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+
+                    Button("Dismiss", action: onDismiss)
+                        .buttonStyle(.bordered)
+                }
+            }
+
+            if !operation.logs.isEmpty {
+                Divider()
+                logView
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        )
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        switch operation.phase {
+        case .waiting:
+            Image(systemName: "clock")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Color.accentColor)
+        case .adding:
+            ProgressView()
+                .controlSize(.small)
+        case .succeeded:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.green)
+        case .purchased:
+            Image(systemName: "sparkles")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.cyan)
+        case .failed:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.orange)
+        }
+    }
+
+    private var logView: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 5) {
+                    ForEach(operation.logs.indices, id: \.self) { index in
+                        Text(operation.logs[index])
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .id(index)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .frame(maxHeight: 180)
+            .onAppear {
+                scrollToLatestLog(using: proxy)
+            }
+            .onChange(of: operation.logs) { _, _ in
+                scrollToLatestLog(using: proxy)
+            }
+        }
+    }
+
+    private func scrollToLatestLog(using proxy: ScrollViewProxy) {
+        guard let lastIndex = operation.logs.indices.last else {
+            return
+        }
+
+        withAnimation(.easeOut(duration: 0.15)) {
+            proxy.scrollTo(lastIndex, anchor: .bottom)
+        }
+    }
+
+    private var title: String {
+        switch operation.phase {
+        case .waiting:
+            return "Watching \(operation.shipName)"
+        case .adding:
+            return "Adding \(operation.shipName)"
+        case .succeeded:
+            return "\(operation.shipName) Added to Cart"
+        case .purchased:
+            return "\(operation.shipName) Secured"
+        case .failed:
+            return "\(operation.shipName) Failed"
+        }
+    }
+
+    private var detail: String {
+        switch operation.phase {
+        case .waiting:
+            if let fireDate = operation.fireDate,
+               fireDate > now {
+                return "Starts in \(Self.durationText(fireDate.timeIntervalSince(now)))"
+            }
+
+            return operation.detail
+        case .adding:
+            return operation.detail
+        case .succeeded:
+            if let attemptCount = operation.attemptCount {
+                return "Confirmed after \(attemptCount) attempt(s). Open checkout to complete with store credit."
+            }
+
+            return "Open checkout to complete with store credit."
+        case .purchased:
+            return "RSI confirmed the order. Check your hangar for delivery."
+        case .failed:
+            return operation.detail
+        }
+    }
+
+    private static func durationText(_ interval: TimeInterval) -> String {
+        let seconds = max(0, Int(interval.rounded(.up)))
+        if seconds < 60 {
+            return "\(seconds)s"
+        }
+
+        let minutes = seconds / 60
+        let remainingSeconds = seconds % 60
+        return "\(minutes)m \(remainingSeconds)s"
+    }
+}
+
+private extension Decimal {
+    func isGreaterThanOrEqual(to other: Decimal) -> Bool {
+        NSDecimalNumber(decimal: self).compare(NSDecimalNumber(decimal: other)) != .orderedAscending
     }
 }
 
