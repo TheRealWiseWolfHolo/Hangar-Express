@@ -338,17 +338,37 @@ nonisolated struct RSIShipCatalog: Sendable {
         }
     }
 
+    struct StoreUpgradeOffer: Hashable, Sendable {
+        let id: String
+        let skuID: Int?
+        let title: String
+        let targetShipID: Int?
+        let targetShipName: String
+        let targetShipMSRPUSD: Decimal?
+        let priceUSD: Decimal
+        let savingsUSD: Decimal
+        let available: Bool
+        let unlimitedStock: Bool?
+        let availableStock: Int?
+    }
+
     let ships: [Ship]
     let manufacturers: [Manufacturer]
+    let storeUpgradeOffers: [StoreUpgradeOffer]
 
     private let shipsByKey: [String: Ship]
     private let mirroredImageURLsBySource: [String: URL]
     private let manufacturersBySlug: [String: Manufacturer]
     private let manufacturersByName: [String: Manufacturer]
 
-    init(ships: [Ship], manufacturers: [Manufacturer] = []) {
+    init(
+        ships: [Ship],
+        manufacturers: [Manufacturer] = [],
+        storeUpgradeOffers: [StoreUpgradeOffer] = []
+    ) {
         self.ships = ships
         self.manufacturers = manufacturers
+        self.storeUpgradeOffers = storeUpgradeOffers
 
         var keyedShips: [String: Ship] = [:]
         var mirroredImages: [String: URL] = [:]
@@ -481,7 +501,8 @@ nonisolated struct HostedShipCatalogClient: Sendable {
                     sourceImageURL: ship.sourceThumbnailURL
                 )
             },
-            manufacturers: payload.manufacturers.map { $0.catalogManufacturer }
+            manufacturers: payload.manufacturers.map { $0.catalogManufacturer },
+            storeUpgradeOffers: payload.storeUpgradeOffers.compactMap(\.catalogOffer)
         )
     }
 
@@ -1422,11 +1443,16 @@ private nonisolated struct RemoteHostedShipDetail: Decodable {
 private nonisolated struct RemoteHostedShipCatalogPayload: Decodable {
     let manufacturers: [RemoteHostedManufacturer]
     let ships: [RemoteHostedShip]
+    let storeUpgradeOffers: [RemoteHostedStoreUpgradeOffer]
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         manufacturers = try container.decodeIfPresent([RemoteHostedManufacturer].self, forKey: .manufacturers) ?? []
         ships = try container.decode([RemoteHostedShip].self, forKey: .ships)
+        storeUpgradeOffers = try container.decodeIfPresent(
+            [RemoteHostedStoreUpgradeOffer].self,
+            forKey: .storeUpgradeOffers
+        ) ?? []
     }
 
     func manufacturer(named name: String?, slug: String?) -> RSIShipCatalog.Manufacturer? {
@@ -1446,6 +1472,147 @@ private nonisolated struct RemoteHostedShipCatalogPayload: Decodable {
     private enum CodingKeys: String, CodingKey {
         case manufacturers
         case ships
+        case storeUpgradeOffers
+    }
+}
+
+private nonisolated struct RemoteHostedStoreUpgradeOffer: Decodable {
+    let id: String?
+    let skuID: Int?
+    let title: String?
+    let targetShipID: Int?
+    let targetShipName: String?
+    let targetShipMSRPUSD: Decimal?
+    let priceUSD: Decimal?
+    let savingsUSD: Decimal?
+    let available: Bool?
+    let unlimitedStock: Bool?
+    let availableStock: Int?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id)?.nilIfEmpty
+        skuID = try Self.decodeFlexibleInt(from: container, keys: [.skuID, .skuId])
+        title = try container.decodeIfPresent(String.self, forKey: .title)?.nilIfEmpty
+        targetShipID = try Self.decodeFlexibleInt(from: container, keys: [.targetShipID, .targetShipId])
+        targetShipName = try container.decodeIfPresent(String.self, forKey: .targetShipName)?.nilIfEmpty
+        targetShipMSRPUSD = try Self.decodeDecimal(
+            from: container,
+            keys: [.targetShipMSRPUSD, .targetShipMSRPUsd, .targetShipMsrpUsd]
+        )
+        priceUSD = try Self.decodeDecimal(from: container, keys: [.priceUSD, .priceUsd])
+        savingsUSD = try Self.decodeDecimal(from: container, keys: [.savingsUSD, .savingsUsd])
+        available = try container.decodeIfPresent(Bool.self, forKey: .available)
+        unlimitedStock = try container.decodeIfPresent(Bool.self, forKey: .unlimitedStock)
+        availableStock = try Self.decodeFlexibleInt(from: container, keys: [.availableStock])
+    }
+
+    var catalogOffer: RSIShipCatalog.StoreUpgradeOffer? {
+        guard let targetShipName,
+              let priceUSD,
+              priceUSD > 0 else {
+            return nil
+        }
+
+        let resolvedSavingsUSD = savingsUSD ?? targetShipMSRPUSD.map { $0 - priceUSD }
+        guard let resolvedSavingsUSD,
+              resolvedSavingsUSD > 0 else {
+            return nil
+        }
+
+        let resolvedTitle = title ?? "Warbond Edition"
+        let resolvedID = id ?? skuID.map { "rsi-upgrade-sku-\($0)" } ?? [
+            targetShipName,
+            resolvedTitle,
+            "\(priceUSD)"
+        ].joined(separator: "-")
+
+        return RSIShipCatalog.StoreUpgradeOffer(
+            id: resolvedID,
+            skuID: skuID,
+            title: resolvedTitle,
+            targetShipID: targetShipID,
+            targetShipName: targetShipName,
+            targetShipMSRPUSD: targetShipMSRPUSD,
+            priceUSD: priceUSD,
+            savingsUSD: resolvedSavingsUSD,
+            available: available ?? true,
+            unlimitedStock: unlimitedStock,
+            availableStock: availableStock
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case skuID = "skuID"
+        case skuId
+        case title
+        case targetShipID = "targetShipID"
+        case targetShipId
+        case targetShipName
+        case targetShipMSRPUSD = "targetShipMSRPUSD"
+        case targetShipMSRPUsd = "targetShipMSRPUsd"
+        case targetShipMsrpUsd
+        case priceUSD = "priceUSD"
+        case priceUsd
+        case savingsUSD = "savingsUSD"
+        case savingsUsd
+        case available
+        case unlimitedStock
+        case availableStock
+    }
+
+    private static func decodeFlexibleInt(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        keys: [CodingKeys]
+    ) throws -> Int? {
+        for key in keys {
+            if let value = try decodeOptionalInt(from: container, forKey: key) {
+                return value
+            }
+
+            if let stringValue = try decodeOptionalString(from: container, forKey: key),
+               let value = Int(stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return value
+            }
+        }
+
+        return nil
+    }
+
+    private static func decodeOptionalInt(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys
+    ) throws -> Int? {
+        do {
+            return try container.decodeIfPresent(Int.self, forKey: key)
+        } catch DecodingError.typeMismatch(_, _) {
+            return nil
+        }
+    }
+
+    private static func decodeOptionalString(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys
+    ) throws -> String? {
+        do {
+            return try container.decodeIfPresent(String.self, forKey: key)
+        } catch DecodingError.typeMismatch(_, _) {
+            return nil
+        }
+    }
+
+    private static func decodeDecimal(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        keys: [CodingKeys]
+    ) throws -> Decimal? {
+        for key in keys {
+            if let value = try container.decodeIfPresent(Decimal.self, forKey: key) {
+                return value
+            }
+        }
+
+        return nil
     }
 }
 

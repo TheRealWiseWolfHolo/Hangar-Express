@@ -516,6 +516,10 @@
 "Current Value" = "当前价值";
 "Credit" = "信用点";
 "Referrals" = "推荐";
+"Copy Referral Code" = "复制推荐码";
+"Referral Code Unavailable" = "推荐码不可用";
+"Referral code is still loading. Try again after the current refresh finishes." = "推荐码仍在加载。请在当前刷新完成后重试。";
+"Refresh Account did not find a referral code yet. Open the RSI referral page once, then refresh Account and try again." = "刷新账户尚未找到推荐码。请先打开一次 RSI 推荐页面，然后刷新账户并重试。";
 "Email Hidden" = "邮箱已隐藏";
 "Saved Login Hidden" = "登录名已隐藏";
 "Refreshing Account..." = "正在刷新账户...";

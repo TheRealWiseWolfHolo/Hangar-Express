@@ -3827,7 +3827,7 @@ private nonisolated enum RSIAccountHTMLParser {
         }
 
         return RemoteBuybackPledge(
-            id: hrefID ?? dataID,
+            id: dataID ?? hrefID,
             title: titleText,
             dateText: dateText,
             containsText: resolvedContainsText,
@@ -5169,6 +5169,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
         return ReferralStatsResolver.resolve(
             currentLadderCount: currentPayload.currentLadderCount,
+            inviteCode: currentPayload.inviteCode,
             legacyGraphQLCount: legacyPayload.graphQLCount,
             legacyParsedCount: legacyPayload.legacyLadderCount,
             legacyPageUnavailable: legacyPayload.pageUnavailable
@@ -6698,6 +6699,166 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       return Number.isFinite(parsed) ? parsed : null;
     };
 
+    const normalizeInviteCode = (value) => {
+      const match = String(value || '').toUpperCase().match(/\\bSTAR-[A-Z0-9]{4}-[A-Z0-9]{4}\\b/);
+      return match ? match[0] : null;
+    };
+
+    const attributeValue = (element, name) => {
+      return element && typeof element.getAttribute === 'function' ? element.getAttribute(name) : null;
+    };
+
+    const extractInviteCodeFromElement = (element) => {
+      if (!element) {
+        return null;
+      }
+
+      const textCode = normalizeInviteCode(element.textContent);
+      if (textCode) {
+        return textCode;
+      }
+
+      const directValues = [
+        element.value,
+        attributeValue(element, 'value'),
+        attributeValue(element, 'aria-label'),
+        attributeValue(element, 'title'),
+        attributeValue(element, 'data-referral'),
+        attributeValue(element, 'data-referral-code')
+      ];
+
+      for (const value of directValues) {
+        const code = normalizeInviteCode(value);
+        if (code) {
+          return code;
+        }
+      }
+
+      if (element.attributes) {
+        for (const attribute of Array.from(element.attributes)) {
+          if (String(attribute.name || '').toLowerCase() === 'href') {
+            continue;
+          }
+
+          const code = normalizeInviteCode(attribute.value);
+          if (code) {
+            return code;
+          }
+        }
+      }
+
+      return null;
+    };
+
+    const extractInviteCode = (includePageHTML = true) => {
+      const selectors = [
+        '.accountReferralCopyForm__referralCodeValue',
+        '.accountReferralCopyForm__referralCode',
+        '.accountReferralCopyForm',
+        '[data-cy-id="button-copy-referral-code"]',
+        '[class*="referralCodeValue"]',
+        '[class*="referralCode"]',
+        '[class*="ReferralCode"]',
+        '[class*="referral-code"]',
+        '[class*="ReferralCopy"]',
+        '[class*="referralCopy"]'
+      ];
+
+      for (const selector of selectors) {
+        for (const element of Array.from(document.querySelectorAll(selector))) {
+          const code = extractInviteCodeFromElement(element);
+          if (code) {
+            return code;
+          }
+        }
+      }
+
+      const textCode = normalizeInviteCode(document.body?.innerText);
+      if (textCode) {
+        return textCode;
+      }
+
+      return includePageHTML ? normalizeInviteCode(document.documentElement?.outerHTML) : null;
+    };
+
+    const fetchAccountInviteCode = async () => {
+      const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+      if (!csrfToken) {
+        return null;
+      }
+
+      const query = `query AccountReferralCode {
+        account {
+          isAnonymous
+          ... on RsiAuthenticatedAccount {
+            referral_code
+          }
+        }
+      }`;
+
+      try {
+        const response = await fetch('/graphql', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json;charset=UTF-8',
+            'Accept': 'application/json',
+            'X-CSRF-TOKEN': csrfToken,
+            'Accept-Language': document.documentElement.getAttribute('lang') || 'en'
+          },
+          body: JSON.stringify({
+            operationName: 'AccountReferralCode',
+            query,
+            variables: {}
+          })
+        });
+
+        const rawBody = await response.text();
+        let payload = null;
+        try {
+          payload = JSON.parse(rawBody);
+        } catch {
+          return null;
+        }
+
+        return normalizeInviteCode(payload?.data?.account?.referral_code);
+      } catch {
+        return null;
+      }
+    };
+
+    const fetchInviteCodeFromReferralHTML = async () => {
+      const paths = Array.from(new Set([
+        window.location.pathname.includes('/referral') ? window.location.pathname + window.location.search : '/en/referral',
+        '/en/referral'
+      ]));
+
+      for (const path of paths) {
+        try {
+          const response = await fetch(path, {
+            method: 'GET',
+            credentials: 'include',
+            headers: {
+              'Accept': 'text/html,application/xhtml+xml',
+              'Accept-Language': document.documentElement.getAttribute('lang') || 'en'
+            }
+          });
+
+          if (!response.ok) {
+            continue;
+          }
+
+          const code = normalizeInviteCode(await response.text());
+          if (code) {
+            return code;
+          }
+        } catch {
+        }
+      }
+
+      return null;
+    };
+
     const decodeHTML = (value) => {
       const textarea = document.createElement('textarea');
       textarea.innerHTML = value;
@@ -6778,7 +6939,12 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       }
     };
 
-    await waitFor(() => document.querySelector('.accountReferralHeroBanner, .accountReferralRecruitsCount__text, g-platform-client-component'), 1200);
+    await waitFor(() => document.querySelector('.accountReferralHeroBanner, .accountReferralRecruitsCount__text'), 2400);
+    const inviteCode =
+      await fetchAccountInviteCode() ||
+      await waitFor(() => extractInviteCode(false), 3600) ||
+      extractInviteCode(true) ||
+      await fetchInviteCodeFromReferralHTML();
 
     const accessDenied = document.title.toLowerCase().includes('access denied') || document.body.innerText.includes('Access denied');
     const campaignId = extractCampaignId();
@@ -6788,6 +6954,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     return {
       accessDenied,
       campaignId,
+      inviteCode,
       currentLadderCount: graphQLCount ?? parseCount(counterText),
       counterText: counterText || null
     };
@@ -7783,7 +7950,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       return match ? decodeURIComponent(match[1]) : '';
     };
 
-    const parsedBuybackPledgeID = Number(buybackPledgeID);
+    const requestedBuybackPledgeID = Number(buybackPledgeID);
+    let parsedBuybackPledgeID = requestedBuybackPledgeID;
     let parsedFromShipID = Number(fromShipID);
     let parsedToShipID = Number(toShipID);
     let parsedToSkuID = Number(toSkuID);
@@ -7834,27 +8002,75 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       return Number.isFinite(dataID) && dataID > 0 ? dataID : 0;
     };
 
-    const selectedButton = Array.from(document.querySelectorAll('.holosmallbtn, a[href*="/pledge/buyback/"]'))
-      .find((button) => buybackButtonID(button) === parsedBuybackPledgeID);
-    const selectedArticle = selectedButton?.closest?.('article.pledge') || null;
-    const selectedArticleTitle = selectedArticle
-      ? normalizeText(selectedArticle.querySelector('.information h1, h1, h2')?.textContent || '')
-      : '';
-    const selectedItemLooksLikeUpgrade = looksLikeUpgradeBuyback([buybackTitleText, selectedArticleTitle].join(' '));
-
-    if (selectedButton) {
-      const liveFromShipID = Number(selectedButton.getAttribute('data-fromshipid'));
-      const liveToShipID = Number(selectedButton.getAttribute('data-toshipid'));
-      const liveToSkuID = Number(selectedButton.getAttribute('data-toskuid'));
+    const allBuybackButtons = Array.from(document.querySelectorAll('.holosmallbtn, .js-open-ship-upgrades, a[href*="/pledge/buyback/"]'));
+    const articleForButton = (button) => button?.closest?.('article.pledge') || null;
+    const articleTitleForButton = (button) => {
+      const article = articleForButton(button);
+      return article
+        ? normalizeText(article.querySelector('.information h1, h1, h2')?.textContent || '')
+        : '';
+    };
+    const upgradeContextForButton = (button) => {
+      const liveFromShipID = Number(button?.getAttribute?.('data-fromshipid'));
+      const liveToShipID = Number(button?.getAttribute?.('data-toshipid'));
+      const liveToSkuID = Number(button?.getAttribute?.('data-toskuid'));
       const hasLiveUpgradeContext =
         Number.isFinite(liveFromShipID) && liveFromShipID > 0 &&
         Number.isFinite(liveToShipID) && liveToShipID > 0 &&
         Number.isFinite(liveToSkuID) && liveToSkuID > 0;
 
-      if (hasLiveUpgradeContext && selectedItemLooksLikeUpgrade) {
-        parsedFromShipID = liveFromShipID;
-        parsedToShipID = liveToShipID;
-        parsedToSkuID = liveToSkuID;
+      return {
+        fromShipID: liveFromShipID,
+        toShipID: liveToShipID,
+        toSkuID: liveToSkuID,
+        hasLiveUpgradeContext
+      };
+    };
+
+    let selectedButton = allBuybackButtons
+      .find((button) => buybackButtonID(button) === parsedBuybackPledgeID);
+    if (!selectedButton && shouldUseUpgradeBuybackFlow) {
+      selectedButton = allBuybackButtons.find((button) => {
+        const liveContext = upgradeContextForButton(button);
+        if (!liveContext.hasLiveUpgradeContext) {
+          return false;
+        }
+
+        const title = articleTitleForButton(button);
+        const titleMatches =
+          !buybackTitleText ||
+          title === buybackTitleText ||
+          title.includes(buybackTitleText) ||
+          buybackTitleText.includes(title);
+        const contextMatches =
+          liveContext.fromShipID === parsedFromShipID &&
+          liveContext.toShipID === parsedToShipID &&
+          liveContext.toSkuID === parsedToSkuID;
+
+        return titleMatches && contextMatches;
+      });
+    }
+
+    const selectedArticleTitle = articleTitleForButton(selectedButton);
+    const selectedItemLooksLikeUpgrade = looksLikeUpgradeBuyback([buybackTitleText, selectedArticleTitle].join(' '));
+    let selectedUpgradeAPIURL = '';
+
+    if (selectedButton) {
+      const livePledgeID = buybackButtonID(selectedButton);
+      if (Number.isFinite(livePledgeID) && livePledgeID > 0) {
+        parsedBuybackPledgeID = livePledgeID;
+      }
+
+      const liveAPIURL = normalizeText(selectedButton.getAttribute('data-apiurl') || '');
+      if (liveAPIURL) {
+        selectedUpgradeAPIURL = liveAPIURL;
+      }
+
+      const liveContext = upgradeContextForButton(selectedButton);
+      if (liveContext.hasLiveUpgradeContext && selectedItemLooksLikeUpgrade) {
+        parsedFromShipID = liveContext.fromShipID;
+        parsedToShipID = liveContext.toShipID;
+        parsedToSkuID = liveContext.toSkuID;
         shouldUseUpgradeBuybackFlow = true;
       }
     }
@@ -8018,23 +8234,79 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       }
     }`;
 
-    const graphQLResponse = await fetch('/pledge-store/api/upgrade/graphql', {
-      method: 'POST',
-      credentials: 'include',
-      headers: requestHeaders,
-      body: JSON.stringify({
-        query: upgradeAddToCartQuery,
-        variables: {
-          from: parsedFromShipID,
-          to: parsedToSkuID
-        }
-      })
-    });
-    const graphQLBody = await readJSONResponse(graphQLResponse);
-    const graphQLErrors = Array.isArray(graphQLBody.payload?.errors)
-      ? graphQLBody.payload.errors.map((entry) => normalizeText(entry?.message || JSON.stringify(entry))).filter(Boolean)
-      : [];
-    const upgradeToken = graphQLBody.payload?.data?.addToCart?.jwt || '';
+    const upgradeGraphQLEndpoint = (() => {
+      const base = (selectedUpgradeAPIURL || '/pledge-store/api/upgrade/v2').replace(/\\/+$/, '');
+      return base.endsWith('/graphql') ? base : `${base}/graphql`;
+    })();
+
+    const requestUpgradeCartToken = async (targetID, targetLabel) => {
+      const response = await fetch(upgradeGraphQLEndpoint, {
+        method: 'POST',
+        credentials: 'include',
+        headers: requestHeaders,
+        body: JSON.stringify({
+          query: upgradeAddToCartQuery,
+          variables: {
+            from: parsedFromShipID,
+            to: targetID
+          }
+        })
+      });
+      const body = await readJSONResponse(response);
+      const errors = Array.isArray(body.payload?.errors)
+        ? body.payload.errors.map((entry) => normalizeText(entry?.message || JSON.stringify(entry))).filter(Boolean)
+        : [];
+
+      return {
+        response,
+        body,
+        errors,
+        token: body.payload?.data?.addToCart?.jwt || '',
+        targetID,
+        targetLabel
+      };
+    };
+
+    const upgradeTargetCandidates = [
+      { id: parsedToSkuID, label: 'toSkuID' },
+      { id: parsedToShipID, label: 'toShipID' }
+    ]
+      .filter((candidate) => Number.isFinite(candidate.id) && candidate.id > 0)
+      .filter((candidate, index, candidates) => candidates.findIndex((entry) => entry.id === candidate.id) === index);
+    const graphQLAttemptSummaries = [];
+    let graphQLAttempt = null;
+
+    for (const candidate of upgradeTargetCandidates) {
+      graphQLAttempt = await requestUpgradeCartToken(candidate.id, candidate.label);
+      graphQLAttemptSummaries.push(
+        `${candidate.label}:${candidate.id}->${graphQLAttempt.response.status}/${graphQLAttempt.token ? 'token' : 'no-token'}`
+      );
+
+      if (graphQLAttempt.response.status === 401 || graphQLAttempt.response.status === 403) {
+        break;
+      }
+
+      if (graphQLAttempt.response.ok && graphQLAttempt.errors.length === 0 && graphQLAttempt.token) {
+        break;
+      }
+    }
+
+    if (!graphQLAttempt) {
+      return {
+        accessDenied: false,
+        status: 'failed',
+        checkoutURL: null,
+        failureMessage: 'Hangar Express could not determine the target ship metadata for this buy-back upgrade.',
+        debugSummary: `upgradeGraphQL: noTargetCandidates, pledge=${parsedBuybackPledgeID}, requestedPledge=${requestedBuybackPledgeID}, endpoint=${upgradeGraphQLEndpoint}, fromShipID=${parsedFromShipID}, toShipID=${parsedToShipID}, toSkuID=${parsedToSkuID}`
+      };
+    }
+
+    const graphQLResponse = graphQLAttempt.response;
+    const graphQLBody = graphQLAttempt.body;
+    const graphQLErrors = graphQLAttempt.errors;
+    const upgradeToken = graphQLAttempt.token;
+    const graphQLTargetSummary = `${graphQLAttempt.targetLabel}:${graphQLAttempt.targetID}`;
+    const graphQLAttemptsSummary = graphQLAttemptSummaries.join(', ');
 
     if (graphQLResponse.status === 401 || graphQLResponse.status === 403) {
       return {
@@ -8042,7 +8314,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         status: 'access-denied',
         checkoutURL: null,
         failureMessage: normalizeText(graphQLBody.responseText || 'RSI rejected the buy-back upgrade cart request.'),
-        debugSummary: `upgradeGraphQL: httpStatus=${graphQLResponse.status}`
+        debugSummary: `upgradeGraphQL: httpStatus=${graphQLResponse.status}, pledge=${parsedBuybackPledgeID}, requestedPledge=${requestedBuybackPledgeID}, endpoint=${upgradeGraphQLEndpoint}, target=${graphQLTargetSummary}, attempts=${graphQLAttemptsSummary}`
       };
     }
 
@@ -8052,7 +8324,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         status: 'failed',
         checkoutURL: null,
         failureMessage: normalizeText(graphQLErrors.join(' ') || graphQLBody.responseText || 'RSI did not return the buy-back upgrade cart token.'),
-        debugSummary: `upgradeGraphQL: httpStatus=${graphQLResponse.status}, tokenPresent=${upgradeToken ? 'yes' : 'no'}, responsePreview=${normalizeText(graphQLBody.responseText).slice(0, 280) || 'n/a'}`
+        debugSummary: `upgradeGraphQL: httpStatus=${graphQLResponse.status}, pledge=${parsedBuybackPledgeID}, requestedPledge=${requestedBuybackPledgeID}, endpoint=${upgradeGraphQLEndpoint}, target=${graphQLTargetSummary}, attempts=${graphQLAttemptsSummary}, tokenPresent=${upgradeToken ? 'yes' : 'no'}, responsePreview=${normalizeText(graphQLBody.responseText).slice(0, 280) || 'n/a'}`
       };
     }
 
@@ -10063,6 +10335,7 @@ private nonisolated struct RemoteBillingSummary: Decodable {
 private nonisolated struct RemoteReferralOverview: Decodable {
     let accessDenied: Bool
     let campaignId: String
+    let inviteCode: String?
     let currentLadderCount: Int?
     let counterText: String?
 }
@@ -10095,6 +10368,7 @@ private nonisolated struct PrimaryOrganizationOverview {
 nonisolated enum ReferralStatsResolver {
     static func resolve(
         currentLadderCount: Int?,
+        inviteCode: String? = nil,
         legacyGraphQLCount: Int?,
         legacyParsedCount: Int?,
         legacyPageUnavailable: Bool
@@ -10102,7 +10376,8 @@ nonisolated enum ReferralStatsResolver {
         ReferralStats(
             currentLadderCount: currentLadderCount,
             legacyLadderCount: legacyPageUnavailable ? nil : (legacyGraphQLCount ?? legacyParsedCount),
-            hasLegacyLadder: !legacyPageUnavailable
+            hasLegacyLadder: !legacyPageUnavailable,
+            inviteCode: inviteCode
         )
     }
 }

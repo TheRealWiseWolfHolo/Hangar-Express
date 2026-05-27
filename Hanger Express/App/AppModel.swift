@@ -33,6 +33,8 @@ enum DisplayPreferences {
     static let earlyAccessBadgeEnabledByDefault = true
     static let sharePictureAutoCopiesDebugLogKey = "display.sharePictureAutoCopiesDebugLog"
     static let sharePictureAutoCopiesDebugLogEnabledByDefault = false
+    static let hangarBulkSelectionKey = "display.hangarBulkSelection"
+    static let hangarBulkSelectionEnabledByDefault = false
 }
 
 @MainActor
@@ -885,6 +887,87 @@ final class AppModel {
         }
     }
 
+    func melt(packageGroups: [GroupedHangarPackage]) async throws {
+        guard !isRefreshing else {
+            throw HangarAccountActionError.actionInProgress
+        }
+
+        let packages = packageGroups.flatMap(\.packages)
+        guard !packages.isEmpty else {
+            throw HangarAccountActionError.emptyPledgeSelection
+        }
+
+        guard packages.allSatisfy(\.canReclaim) else {
+            throw HangarAccountActionError.ineligibleMeltSelection
+        }
+
+        guard let session else {
+            throw HangarAccountActionError.missingSession
+        }
+
+        let preMeltSnapshot = snapshot
+
+        guard let credentials = session.credentials,
+              !credentials.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw HangarAccountActionError.missingStoredPassword
+        }
+
+        try await sensitiveActionAuthorizer.authorize(
+            reason: bulkMeltAuthorizationReason(for: packages)
+        )
+
+        let pledgeIDs = packages.map(\.id)
+        let timeoutSeconds = Self.meltRequestTimeoutSeconds
+        let result = try await withTimeout(seconds: timeoutSeconds) { [self] in
+            try await self.hangarRepository.meltPackages(
+                for: session,
+                pledgeIDs: pledgeIDs,
+                password: credentials.password
+            )
+        } onTimeout: {
+            HangarAccountActionError.meltTimedOut(timeoutSeconds: timeoutSeconds)
+        }
+
+        if !result.updatedCookies.isEmpty {
+            let updatedSession = session.updatingCookies(result.updatedCookies)
+            applyStoredSessions(await sessionStore.save(updatedSession, makeActive: true), resetContent: false)
+        }
+
+        if result.wasSuccessful {
+            let affectedPledgeIDs = result.completedPledgeIDs.isEmpty
+                ? result.requestedPledgeIDs
+                : result.completedPledgeIDs
+            applyOptimisticRemovalUpdate(
+                affectedPledgeIDs: affectedPledgeIDs,
+                session: self.session ?? session
+            )
+            let reconciliationSession = self.session ?? session
+            scheduleSilentHangarActionReconciliation(
+                using: reconciliationSession,
+                previousSnapshotForHangarRefresh: preMeltSnapshot,
+                affectedPledgeIDs: affectedPledgeIDs,
+                logInitialDetail: AppLocalizer.string("Waiting for RSI to post the new melt entries to your hangar log."),
+                logRetryDetail: AppLocalizer.string("RSI has not posted the new melt log entries yet. Checking again."),
+                refreshFailurePrefix: AppLocalizer.string("The bulk melt completed, but the background hangar refresh could not finish.")
+            )
+            showCompletedActionBanner(
+                title: AppLocalizer.string("Melt Complete"),
+                message: AppLocalizer.format("%lld pledges were successfully reclaimed.", packages.count)
+            )
+            return
+        }
+
+        await refresh(scope: .hangar)
+
+        guard result.wasSuccessful else {
+            throw HangarAccountActionError.partialMelt(
+                completedCount: result.completedCount,
+                requestedCount: result.requestedPledgeIDs.count,
+                message: result.failureMessage ?? AppLocalizer.string("RSI stopped the bulk melt request before all selected pledges were reclaimed.")
+            )
+        }
+    }
+
     func gift(
         packageGroup: GroupedHangarPackage,
         quantity: Int,
@@ -980,6 +1063,106 @@ final class AppModel {
                 completedCount: result.completedCount,
                 requestedCount: result.requestedPledgeIDs.count,
                 message: result.failureMessage ?? AppLocalizer.string("RSI stopped the gift request before all selected copies were sent.")
+            )
+        }
+    }
+
+    func gift(
+        packageGroups: [GroupedHangarPackage],
+        recipientName: String,
+        recipientEmail: String
+    ) async throws {
+        guard !isRefreshing else {
+            throw HangarAccountActionError.actionInProgress
+        }
+
+        let packages = packageGroups.flatMap(\.packages)
+        guard !packages.isEmpty else {
+            throw HangarAccountActionError.emptyPledgeSelection
+        }
+
+        guard packages.allSatisfy(\.canGift) else {
+            throw HangarAccountActionError.ineligibleGiftSelection
+        }
+
+        guard let session else {
+            throw HangarAccountActionError.missingSession
+        }
+
+        let trimmedRecipientEmail = recipientEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedRecipientEmail.isEmpty else {
+            throw HangarAccountActionError.missingGiftRecipientEmail
+        }
+
+        guard Self.isValidGiftRecipientEmail(trimmedRecipientEmail) else {
+            throw HangarAccountActionError.invalidGiftRecipientEmail
+        }
+
+        let resolvedRecipientName = resolvedGiftRecipientName(from: recipientName, session: session)
+        let preGiftSnapshot = snapshot
+
+        guard let credentials = session.credentials,
+              !credentials.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw HangarAccountActionError.missingStoredPassword
+        }
+
+        try await sensitiveActionAuthorizer.authorize(
+            reason: bulkGiftAuthorizationReason(
+                for: packages,
+                recipientEmail: trimmedRecipientEmail
+            )
+        )
+
+        let pledgeIDs = packages.map(\.id)
+        let timeoutSeconds = Self.giftRequestTimeoutSeconds
+        let result = try await withTimeout(seconds: timeoutSeconds) { [self] in
+            try await self.hangarRepository.giftPackages(
+                for: session,
+                pledgeIDs: pledgeIDs,
+                password: credentials.password,
+                recipientEmail: trimmedRecipientEmail,
+                recipientName: resolvedRecipientName
+            )
+        } onTimeout: {
+            HangarAccountActionError.giftTimedOut(timeoutSeconds: timeoutSeconds)
+        }
+
+        if !result.updatedCookies.isEmpty {
+            let updatedSession = session.updatingCookies(result.updatedCookies)
+            applyStoredSessions(await sessionStore.save(updatedSession, makeActive: true), resetContent: false)
+        }
+
+        if result.wasSuccessful {
+            let affectedPledgeIDs = result.completedPledgeIDs.isEmpty
+                ? result.requestedPledgeIDs
+                : result.completedPledgeIDs
+            applyOptimisticRemovalUpdate(
+                affectedPledgeIDs: affectedPledgeIDs,
+                session: self.session ?? session
+            )
+            let reconciliationSession = self.session ?? session
+            scheduleSilentHangarActionReconciliation(
+                using: reconciliationSession,
+                previousSnapshotForHangarRefresh: preGiftSnapshot,
+                affectedPledgeIDs: affectedPledgeIDs,
+                logInitialDetail: AppLocalizer.string("Waiting for RSI to post the new gift entries to your hangar log."),
+                logRetryDetail: AppLocalizer.string("RSI has not posted the new gift log entries yet. Checking again."),
+                refreshFailurePrefix: AppLocalizer.string("The bulk gift completed, but the background hangar refresh could not finish.")
+            )
+            showCompletedActionBanner(
+                title: AppLocalizer.string("Gift Complete"),
+                message: AppLocalizer.format("%lld pledges were successfully gifted.", packages.count)
+            )
+            return
+        }
+
+        await refresh(scope: .hangar)
+
+        guard result.wasSuccessful else {
+            throw HangarAccountActionError.partialGift(
+                completedCount: result.completedCount,
+                requestedCount: result.requestedPledgeIDs.count,
+                message: result.failureMessage ?? AppLocalizer.string("RSI stopped the bulk gift request before all selected pledges were sent.")
             )
         }
     }
@@ -2254,18 +2437,33 @@ final class AppModel {
         )
     }
 
+    private func bulkMeltAuthorizationReason(for packages: [HangarPackage]) -> String {
+        let selectionLabel = AppLocalizer.format("%lld selected pledge(s)", packages.count)
+        return AppLocalizer.format(
+            "Confirm melting %@. This action cannot be undone.",
+            selectionLabel
+        )
+    }
+
+    private func bulkGiftAuthorizationReason(
+        for packages: [HangarPackage],
+        recipientEmail: String
+    ) -> String {
+        let selectionLabel = AppLocalizer.format("%lld selected pledge(s)", packages.count)
+        return AppLocalizer.format(
+            "Confirm gifting %@ to %@. RSI will send the gift email after this verification.",
+            selectionLabel,
+            recipientEmail
+        )
+    }
+
     private func resolvedGiftRecipientName(from rawValue: String, session: UserSession) -> String {
         let trimmedValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedValue.isEmpty {
             return trimmedValue
         }
 
-        let fallbackDisplayName = session.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !fallbackDisplayName.isEmpty {
-            return fallbackDisplayName
-        }
-
-        return AppLocalizer.string("Hangar Express User")
+        return AppLocalizer.string("User")
     }
 
     private static func isValidGiftRecipientEmail(_ value: String) -> Bool {

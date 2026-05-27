@@ -4,6 +4,9 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
     case actionInProgress
     case missingSession
     case missingStoredPassword
+    case emptyPledgeSelection
+    case ineligibleMeltSelection
+    case ineligibleGiftSelection
     case invalidMeltQuantity(maximum: Int)
     case meltTimedOut(timeoutSeconds: Int)
     case partialMelt(completedCount: Int, requestedCount: Int, message: String)
@@ -34,6 +37,12 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
             return AppLocalizer.string("No signed-in RSI session is currently available for this account action.")
         case .missingStoredPassword:
             return AppLocalizer.string("This RSI account no longer has a saved password. Sign in again before Hangar Express can send melt or gift requests.")
+        case .emptyPledgeSelection:
+            return AppLocalizer.string("Select at least one pledge before starting a bulk action.")
+        case .ineligibleMeltSelection:
+            return AppLocalizer.string("Every selected pledge must be meltable before Hangar Express can reclaim them together.")
+        case .ineligibleGiftSelection:
+            return AppLocalizer.string("Every selected pledge must be giftable before Hangar Express can gift them together.")
         case let .invalidMeltQuantity(maximum):
             return AppLocalizer.format("Choose a melt quantity between 1 and %lld.", maximum)
         case let .meltTimedOut(timeoutSeconds):

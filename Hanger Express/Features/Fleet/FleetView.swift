@@ -438,7 +438,9 @@ enum FleetTool: String, CaseIterable, Identifiable {
             return AppLocalizer.string("Auto-add a timed limited ship to the RSI cart")
         case .authorizedDevices:
             return AppLocalizer.string("Review and remove logged-in RSI devices")
-        case .ccuChainCalculator, .resetCharacter:
+        case .ccuChainCalculator:
+            return AppLocalizer.string("Find the lowest-cost upgrade chain")
+        case .resetCharacter:
             return AppLocalizer.string("To be implemented")
         }
     }
@@ -459,7 +461,10 @@ enum FleetTool: String, CaseIterable, Identifiable {
     }
 
     var isAvailable: Bool {
-        self == .allShips || self == .limitedShipPurchase || self == .authorizedDevices
+        self == .allShips
+            || self == .limitedShipPurchase
+            || self == .authorizedDevices
+            || self == .ccuChainCalculator
     }
 }
 

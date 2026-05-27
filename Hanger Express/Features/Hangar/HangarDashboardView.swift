@@ -42,21 +42,35 @@ struct HangarDashboardView: View {
 
     let appModel: AppModel
     let snapshot: HangarSnapshot
+    private let allPackageGroups: [GroupedHangarPackage]
 
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage(DisplayPreferences.hangarGiftedHighlightKey) private var highlightsGiftedHangarRows = DisplayPreferences.hangarGiftedHighlightEnabledByDefault
     @AppStorage(DisplayPreferences.hangarUpgradedHighlightKey) private var highlightsUpgradedHangarRows = DisplayPreferences.hangarUpgradedHighlightEnabledByDefault
     @AppStorage(DisplayPreferences.sharePictureAutoCopiesDebugLogKey) private var autoCopiesSharePictureDebugLog = DisplayPreferences.sharePictureAutoCopiesDebugLogEnabledByDefault
+    @AppStorage(DisplayPreferences.hangarBulkSelectionKey) private var enablesBulkSelection = DisplayPreferences.hangarBulkSelectionEnabledByDefault
     @State private var filter: PackageFilter = .all
     @State private var searchText = ""
     @State private var searchFilters: Set<SearchFilter> = []
     @State private var isSearchPresented = false
     @State private var isLogPresented = false
+    @State private var isSelectingPackages = false
+    @State private var selectedPackageGroupIDs: Set<String> = []
+    @State private var presentedBulkAction: HangarBulkActionRequest?
     @State private var sharePicturePayload: HangarSharePicturePayload?
     @State private var sharePictureError: HangarSharePictureError?
     @State private var isGeneratingSharePicture = false
 
+    init(appModel: AppModel, snapshot: HangarSnapshot) {
+        self.appModel = appModel
+        self.snapshot = snapshot
+        allPackageGroups = snapshot.packages.groupedForInventoryDisplay
+    }
+
     var body: some View {
+        let visiblePackageGroups = filteredPackageGroups
+        let selection = selectionState(for: visiblePackageGroups)
+
         NavigationStack {
             List {
                 Section {
@@ -98,47 +112,86 @@ struct HangarDashboardView: View {
                     }
                 }
 
+                if isSelectingPackages {
+                    Section {
+                        HangarBulkSelectionSummaryView(
+                            selectedRowCount: selection.selectedRowCount,
+                            selectedPledgeCount: selection.selectedPledgeCount,
+                            canGift: selection.canGift,
+                            canReclaim: selection.canReclaim,
+                            onClear: clearSelection,
+                            onGift: presentBulkGift,
+                            onReclaim: presentBulkReclaim
+                        )
+                    } header: {
+                        Text("Selection")
+                    } footer: {
+                        Text(selectionFooterText(for: selection))
+                    }
+                }
+
                 Section {
-                    ForEach(filteredPackageGroups) { packageGroup in
-                        NavigationLink {
-                            HangarPackageDetailView(
-                                appModel: appModel,
-                                packageGroup: packageGroup,
-                                reloadToken: appModel.hangarFleetImageReloadToken
-                            )
-                        } label: {
-                            HangarPackageGroupRow(
-                                packageGroup: packageGroup,
-                                reloadToken: appModel.hangarFleetImageReloadToken
-                            )
-                        }
-                        .contextMenu {
+                    ForEach(visiblePackageGroups) { packageGroup in
+                        let isSelected = selectedPackageGroupIDs.contains(packageGroup.id)
+
+                        if isSelectingPackages {
                             Button {
-                                Task {
-                                    await presentSharePicture(for: packageGroup)
+                                toggleSelection(for: packageGroup)
+                            } label: {
+                                HangarSelectablePackageGroupRow(
+                                    packageGroup: packageGroup,
+                                    isSelected: isSelected,
+                                    reloadToken: appModel.hangarFleetImageReloadToken
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .listRowBackground(
+                                hangarRowBackground(
+                                    for: packageGroup.representative,
+                                    isSelected: isSelected
+                                )
+                            )
+                        } else {
+                            NavigationLink {
+                                HangarPackageDetailView(
+                                    appModel: appModel,
+                                    packageGroup: packageGroup,
+                                    reloadToken: appModel.hangarFleetImageReloadToken
+                                )
+                            } label: {
+                                HangarPackageGroupRow(
+                                    packageGroup: packageGroup,
+                                    reloadToken: appModel.hangarFleetImageReloadToken
+                                )
+                            }
+                            .contextMenu {
+                                Button {
+                                    Task {
+                                        await presentSharePicture(for: packageGroup)
+                                    }
+                                } label: {
+                                    Label("Share Picture", systemImage: "photo.on.rectangle.angled")
                                 }
-                            } label: {
-                                Label("Share Picture", systemImage: "photo.on.rectangle.angled")
-                            }
-                            .disabled(isGeneratingSharePicture)
+                                .disabled(isGeneratingSharePicture)
 
-                            Divider()
+                                Divider()
 
-                            Button {
-                                UIPasteboard.general.string = hangarCardDebugExport(for: packageGroup)
-                            } label: {
-                                Label("Copy Raw Card Data", systemImage: "doc.on.doc")
-                            }
+                                Button {
+                                    UIPasteboard.general.string = hangarCardDebugExport(for: packageGroup)
+                                } label: {
+                                    Label("Copy Raw Card Data", systemImage: "doc.on.doc")
+                                }
 
-                            ShareLink(
-                                item: hangarCardDebugExport(for: packageGroup),
-                                subject: Text("Hangar Card Debug Export"),
-                                message: Text("Raw Hangar Express card data")
-                            ) {
-                                Label("Share Raw Card Data", systemImage: "square.and.arrow.up")
+                                ShareLink(
+                                    item: hangarCardDebugExport(for: packageGroup),
+                                    subject: Text("Hangar Card Debug Export"),
+                                    message: Text("Raw Hangar Express card data")
+                                ) {
+                                    Label("Share Raw Card Data", systemImage: "square.and.arrow.up")
+                                }
                             }
+                            .listRowBackground(hangarRowBackground(for: packageGroup.representative))
                         }
-                        .listRowBackground(hangarRowBackground(for: packageGroup.representative))
                     }
                 } header: {
                     Text("Pledges")
@@ -157,9 +210,41 @@ struct HangarDashboardView: View {
 
                 searchFilters.removeAll()
             }
+            .onChange(of: enablesBulkSelection) { _, isEnabled in
+                if !isEnabled {
+                    endSelection()
+                }
+            }
+            .onChange(of: filter) { _, _ in
+                pruneSelectionToVisibleGroups()
+            }
+            .onChange(of: searchText) { _, _ in
+                pruneSelectionToVisibleGroups()
+            }
+            .onChange(of: searchFilters) { _, _ in
+                pruneSelectionToVisibleGroups()
+            }
             .navigationTitle("Hangar")
             .sheet(isPresented: $isLogPresented) {
                 HangarLogView(appModel: appModel)
+            }
+            .sheet(item: $presentedBulkAction) { request in
+                NavigationStack {
+                    switch request.action {
+                    case .gift:
+                        HangarBulkGiftConfirmationView(
+                            appModel: appModel,
+                            packageGroups: request.packageGroups,
+                            onCompleted: completeBulkAction
+                        )
+                    case .reclaim:
+                        HangarBulkMeltConfirmationView(
+                            appModel: appModel,
+                            packageGroups: request.packageGroups,
+                            onCompleted: completeBulkAction
+                        )
+                    }
+                }
             }
             .sheet(item: $sharePicturePayload) { payload in
                 HangarShareSheet(activityItems: [payload.fileURL])
@@ -177,6 +262,19 @@ struct HangarDashboardView: View {
                 }
             }
             .toolbar {
+                if enablesBulkSelection {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(isSelectingPackages ? "Done" : "Select") {
+                            if isSelectingPackages {
+                                endSelection()
+                            } else {
+                                isSelectingPackages = true
+                            }
+                        }
+                        .disabled(appModel.isRefreshing)
+                    }
+                }
+
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button("Log") {
                         isLogPresented = true
@@ -195,8 +293,65 @@ struct HangarDashboardView: View {
         }
     }
 
+    private var hasStoredCredentials: Bool {
+        appModel.session?.hasStoredCredentials == true
+    }
+
+    private func selectionState(for visiblePackageGroups: [GroupedHangarPackage]) -> HangarBulkSelectionState {
+        let packageGroups = visiblePackageGroups.filter { selectedPackageGroupIDs.contains($0.id) }
+        let packages = packageGroups.flatMap(\.packages)
+        let hasSelection = !packages.isEmpty
+        let allPackagesCanGift = hasSelection && packages.allSatisfy(\.canGift)
+        let allPackagesCanReclaim = hasSelection && packages.allSatisfy(\.canReclaim)
+        let canGift = allPackagesCanGift
+            && hasStoredCredentials
+            && !appModel.isRefreshing
+        let canReclaim = allPackagesCanReclaim
+            && hasStoredCredentials
+            && !appModel.isRefreshing
+
+        return HangarBulkSelectionState(
+            packageGroups: packageGroups,
+            packages: packages,
+            allPackagesCanGift: allPackagesCanGift,
+            allPackagesCanReclaim: allPackagesCanReclaim,
+            canGift: canGift,
+            canReclaim: canReclaim
+        )
+    }
+
+    private func selectionFooterText(for selection: HangarBulkSelectionState) -> String {
+        if selection.packages.isEmpty {
+            return AppLocalizer.string("Select one or more pledge rows to unlock bulk actions.")
+        }
+
+        if !hasStoredCredentials {
+            return AppLocalizer.string("Bulk gift and reclaim need a fresh sign-in with saved credentials.")
+        }
+
+        if appModel.isRefreshing {
+            return AppLocalizer.string("Bulk actions are unavailable while Hangar Express is refreshing.")
+        }
+
+        if !selection.allPackagesCanGift && !selection.allPackagesCanReclaim {
+            return AppLocalizer.string("Gift and reclaim only unlock when every selected pledge is eligible for that action.")
+        }
+
+        if !selection.allPackagesCanGift {
+            return AppLocalizer.string("Gift is disabled because at least one selected pledge cannot be gifted.")
+        }
+
+        if !selection.allPackagesCanReclaim {
+            return AppLocalizer.string("Reclaim is disabled because at least one selected pledge cannot be melted.")
+        }
+
+        return AppLocalizer.string("Actions apply to every pledge represented by the selected rows.")
+    }
+
     private var filteredPackageGroups: [GroupedHangarPackage] {
-        snapshot.packages.groupedForInventoryDisplay.filter { packageGroup in
+        let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
+
+        return allPackageGroups.filter { packageGroup in
             let package = packageGroup.representative
             let matchesFilter: Bool
             switch filter {
@@ -216,7 +371,7 @@ struct HangarDashboardView: View {
                 return false
             }
 
-            guard !searchText.isEmpty else {
+            guard !normalizedSearchText.isEmpty else {
                 return true
             }
 
@@ -227,7 +382,7 @@ struct HangarDashboardView: View {
                 package.contents.map(\.title).joined(separator: " ")
             ].joined(separator: " ").localizedLowercase
 
-            return haystack.contains(searchText.localizedLowercase)
+            return haystack.contains(normalizedSearchText)
         }
     }
 
@@ -250,6 +405,61 @@ struct HangarDashboardView: View {
         } else {
             searchFilters.insert(searchFilter)
         }
+    }
+
+    private func toggleSelection(for packageGroup: GroupedHangarPackage) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+
+        withTransaction(transaction) {
+            if selectedPackageGroupIDs.contains(packageGroup.id) {
+                selectedPackageGroupIDs.remove(packageGroup.id)
+            } else {
+                selectedPackageGroupIDs.insert(packageGroup.id)
+            }
+        }
+    }
+
+    private func clearSelection() {
+        selectedPackageGroupIDs.removeAll()
+    }
+
+    private func endSelection() {
+        isSelectingPackages = false
+        clearSelection()
+    }
+
+    private func pruneSelectionToVisibleGroups() {
+        guard isSelectingPackages else {
+            return
+        }
+
+        let visibleIDs = Set(filteredPackageGroups.map(\.id))
+        selectedPackageGroupIDs = selectedPackageGroupIDs.intersection(visibleIDs)
+    }
+
+    private func presentBulkGift() {
+        let packageGroups = selectionState(for: filteredPackageGroups).packageGroups
+        guard !packageGroups.isEmpty else {
+            return
+        }
+
+        presentedBulkAction = HangarBulkActionRequest(action: .gift, packageGroups: packageGroups)
+    }
+
+    private func presentBulkReclaim() {
+        let packageGroups = selectionState(for: filteredPackageGroups).packageGroups
+        guard !packageGroups.isEmpty else {
+            return
+        }
+
+        presentedBulkAction = HangarBulkActionRequest(action: .reclaim, packageGroups: packageGroups)
+    }
+
+    @MainActor
+    private func completeBulkAction() {
+        presentedBulkAction = nil
+        endSelection()
     }
 
     private func hangarCardDebugExport(for packageGroup: GroupedHangarPackage) -> String {
@@ -286,18 +496,111 @@ struct HangarDashboardView: View {
     }
 
     @ViewBuilder
-    private func hangarRowBackground(for package: HangarPackage) -> some View {
+    private func hangarRowBackground(for package: HangarPackage, isSelected: Bool = false) -> some View {
         let baseColor = Color(uiColor: .secondarySystemGroupedBackground)
 
         ZStack {
             baseColor
 
-            if highlightsGiftedHangarRows && package.status.localizedLowercase.contains("gifted") {
+            if isSelected {
+                Color.accentColor.opacity(0.18)
+            } else if highlightsGiftedHangarRows && package.status.localizedLowercase.contains("gifted") {
                 Color.green.opacity(0.16)
             } else if highlightsUpgradedHangarRows && package.isUpgradedShipPledge {
                 Color.accentColor.opacity(0.16)
             }
         }
+    }
+}
+
+private struct HangarBulkActionRequest: Identifiable {
+    enum Action {
+        case gift
+        case reclaim
+    }
+
+    let id = UUID()
+    let action: Action
+    let packageGroups: [GroupedHangarPackage]
+}
+
+private struct HangarBulkSelectionState {
+    let packageGroups: [GroupedHangarPackage]
+    let packages: [HangarPackage]
+    let allPackagesCanGift: Bool
+    let allPackagesCanReclaim: Bool
+    let canGift: Bool
+    let canReclaim: Bool
+
+    var selectedRowCount: Int {
+        packageGroups.count
+    }
+
+    var selectedPledgeCount: Int {
+        packages.count
+    }
+}
+
+private struct HangarBulkSelectionSummaryView: View {
+    let selectedRowCount: Int
+    let selectedPledgeCount: Int
+    let canGift: Bool
+    let canReclaim: Bool
+    let onClear: () -> Void
+    let onGift: () -> Void
+    let onReclaim: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(selectionTitle)
+                        .font(.headline)
+
+                    Text(selectionSubtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 12)
+
+                Button("Clear", action: onClear)
+                    .disabled(selectedPledgeCount == 0)
+            }
+
+            HStack(spacing: 12) {
+                Button(action: onGift) {
+                    Label("Gift", systemImage: "gift.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!canGift)
+
+                Button(role: .destructive, action: onReclaim) {
+                    Label("Reclaim", systemImage: "arrow.3.trianglepath")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!canReclaim)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var selectionTitle: String {
+        if selectedPledgeCount == 0 {
+            return AppLocalizer.string("No pledges selected")
+        }
+
+        return AppLocalizer.format("%lld pledge(s) selected", selectedPledgeCount)
+    }
+
+    private var selectionSubtitle: String {
+        if selectedRowCount == selectedPledgeCount {
+            return AppLocalizer.string("Tap pledge rows to include them.")
+        }
+
+        return AppLocalizer.format("%lld selected row(s), including grouped copies.", selectedRowCount)
     }
 }
 
@@ -597,6 +900,35 @@ struct HangarPackageGroupRow: View {
         formatter.dateFormat = "MM/dd/yyyy"
         return formatter
     }()
+}
+
+private struct HangarSelectablePackageGroupRow: View {
+    let packageGroup: GroupedHangarPackage
+    let isSelected: Bool
+    let reloadToken: UUID?
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .font(.title3.weight(.semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                .frame(width: 28)
+                .accessibilityHidden(true)
+
+            HangarPackageGroupRow(
+                packageGroup: packageGroup,
+                reloadToken: reloadToken
+            )
+        }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            isSelected
+                ? Text("Selected \(packageGroup.representative.title)")
+                : Text("Not selected \(packageGroup.representative.title)")
+        )
+    }
 }
 
 private struct HangarInsuranceBadge: View {
@@ -2603,7 +2935,7 @@ private struct HangarGiftConfirmationView: View {
     let onCompleted: @MainActor @Sendable () -> Void
 
     @State private var quantityToGift = 1
-    @State private var recipientName = ""
+    @State private var recipientName = AppLocalizer.string("User")
     @State private var recipientEmail = ""
     @State private var isGifting = false
     @State private var errorMessage: String?
@@ -2617,8 +2949,7 @@ private struct HangarGiftConfirmationView: View {
     }
 
     private var fallbackRecipientName: String {
-        let displayName = appModel.session?.displayName.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return displayName.isEmpty ? AppLocalizer.string("Hangar Express User") : displayName
+        AppLocalizer.string("User")
     }
 
     private var recipientNamePreview: String {
@@ -2771,6 +3102,185 @@ private struct HangarGiftConfirmationView: View {
     }
 }
 
+private struct HangarBulkGiftConfirmationView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let appModel: AppModel
+    let packageGroups: [GroupedHangarPackage]
+    let onCompleted: @MainActor @Sendable () -> Void
+
+    @State private var recipientName = AppLocalizer.string("User")
+    @State private var recipientEmail = ""
+    @State private var isGifting = false
+    @State private var errorMessage: String?
+
+    private var selectedPackages: [HangarPackage] {
+        packageGroups.flatMap(\.packages)
+    }
+
+    private var fallbackRecipientName: String {
+        AppLocalizer.string("User")
+    }
+
+    private var recipientNamePreview: String {
+        let trimmedValue = recipientName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedValue.isEmpty ? fallbackRecipientName : trimmedValue
+    }
+
+    var body: some View {
+        List {
+            Section {
+                HangarBulkSelectedPledgesSummaryView(packageGroups: packageGroups)
+            } header: {
+                Text("Selected Pledges")
+            } footer: {
+                Text("Hangar Express will gift every pledge represented by these selected rows to the same recipient.")
+            }
+
+            Section {
+                TextField("Recipient name (optional)", text: $recipientName)
+                    .textInputAutocapitalization(.words)
+                    .disableAutocorrection(true)
+
+                TextField("Recipient email", text: $recipientEmail)
+                    .textInputAutocapitalization(.never)
+                    .disableAutocorrection(true)
+                    .keyboardType(.emailAddress)
+                    .textContentType(.emailAddress)
+            } header: {
+                Text("Recipient")
+            } footer: {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("If the name is left blank, Hangar Express will use \(recipientNamePreview).")
+                    Text("Hangar Express will reuse the saved RSI password for this account after Face ID or device passcode confirmation.")
+                }
+            }
+
+            Section {
+                Text("Double-check the recipient email before continuing. RSI will send the selected item(s) to that address through the live gifting flow.")
+                    .foregroundStyle(.orange)
+                    .font(.body.weight(.medium))
+            } header: {
+                Text("Warning")
+            }
+
+            Section {
+                Button {
+                    submitGift()
+                } label: {
+                    HStack {
+                        Spacer()
+                        if isGifting {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(.white)
+                            Text("Gifting...")
+                                .fontWeight(.semibold)
+                        } else {
+                            Text("Gift \(selectedPackages.count) Pledges")
+                                .fontWeight(.semibold)
+                        }
+                        Spacer()
+                    }
+                }
+                .disabled(isGifting || appModel.isRefreshing || selectedPackages.isEmpty)
+            }
+        }
+        .navigationTitle("Confirm Gift")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") {
+                    dismiss()
+                }
+                .disabled(isGifting)
+            }
+        }
+        .alert(
+            "Unable to Gift Items",
+            isPresented: Binding(
+                get: { errorMessage != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        errorMessage = nil
+                    }
+                }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage ?? "")
+        }
+    }
+
+    private func submitGift() {
+        guard !isGifting else {
+            return
+        }
+
+        errorMessage = nil
+        isGifting = true
+
+        Task {
+            do {
+                try await appModel.gift(
+                    packageGroups: packageGroups,
+                    recipientName: recipientName,
+                    recipientEmail: recipientEmail
+                )
+                await MainActor.run {
+                    isGifting = false
+                    onCompleted()
+                }
+            } catch let error as SensitiveActionAuthorizationError where error.isCancellation {
+                await MainActor.run {
+                    isGifting = false
+                }
+            } catch {
+                await MainActor.run {
+                    isGifting = false
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+}
+
+private struct HangarBulkSelectedPledgesSummaryView: View {
+    let packageGroups: [GroupedHangarPackage]
+
+    private var selectedPledgeCount: Int {
+        packageGroups.reduce(0) { partialResult, packageGroup in
+            partialResult + packageGroup.quantity
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            LabeledContent("Total Pledges", value: "\(selectedPledgeCount)")
+            LabeledContent("Selected Rows", value: "\(packageGroups.count)")
+
+            Divider()
+
+            ForEach(packageGroups) { packageGroup in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(packageGroup.representative.title)
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(2)
+
+                    Spacer(minLength: 8)
+
+                    if packageGroup.containsMultipleCopies {
+                        Text("x\(packageGroup.quantity)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+            }
+        }
+    }
+}
+
 private struct HangarActionTile: View {
     let title: LocalizedStringKey
     let systemImage: String
@@ -2871,6 +3381,7 @@ private struct HangarMeltConfirmationView: View {
     @State private var isMelting = false
     @State private var errorMessage: String?
     @State private var squadron42Acknowledgement = ""
+    @State private var acknowledgesGiftableMelt = false
 
     private var package: HangarPackage {
         packageGroup.representative
@@ -2884,12 +3395,20 @@ private struct HangarMeltConfirmationView: View {
         package.originalValueUSD * Decimal(quantityToMelt)
     }
 
+    private var selectedPackagesToMelt: [HangarPackage] {
+        Array(packageGroup.packages.prefix(quantityToMelt))
+    }
+
     private var requiresSquadron42Acknowledgement: Bool {
-        packageGroup.containsSquadron42Content
+        selectedPackagesToMelt.contains { $0.containsSquadron42Content }
     }
 
     private var hasMetSquadron42Acknowledgement: Bool {
         squadron42Acknowledgement.trimmingCharacters(in: .whitespacesAndNewlines) == "I understand"
+    }
+
+    private var requiresGiftableMeltAcknowledgement: Bool {
+        selectedPackagesToMelt.contains(where: \.canGift)
     }
 
     var body: some View {
@@ -2925,6 +3444,20 @@ private struct HangarMeltConfirmationView: View {
                 }
             } header: {
                 Text("Quantity")
+            }
+
+            if requiresGiftableMeltAcknowledgement {
+                Section {
+                    Text("One or more selected pledges can still be gifted. Melting them permanently gives up the option to send those pledges to another account.")
+                        .foregroundStyle(.orange)
+                        .font(.body.weight(.semibold))
+
+                    Toggle("I understand I am melting giftable pledge(s)", isOn: $acknowledgesGiftableMelt)
+                } header: {
+                    Text("Giftable Pledge Warning")
+                } footer: {
+                    Text("Confirm this warning before Hangar Express unlocks Face ID and sends the live RSI melt request.")
+                }
             }
 
             if requiresSquadron42Acknowledgement {
@@ -2973,6 +3506,7 @@ private struct HangarMeltConfirmationView: View {
                 .disabled(
                     isMelting
                         || appModel.isRefreshing
+                        || (requiresGiftableMeltAcknowledgement && !acknowledgesGiftableMelt)
                         || (requiresSquadron42Acknowledgement && !hasMetSquadron42Acknowledgement)
                 )
             }
@@ -3009,6 +3543,11 @@ private struct HangarMeltConfirmationView: View {
             return
         }
 
+        guard !requiresGiftableMeltAcknowledgement || acknowledgesGiftableMelt else {
+            errorMessage = AppLocalizer.string("One or more selected pledges are giftable. Confirm that warning before Hangar Express can continue to Face ID and submit the melt request.")
+            return
+        }
+
         guard !requiresSquadron42Acknowledgement || hasMetSquadron42Acknowledgement else {
             errorMessage = AppLocalizer.string("This package contains Squadron 42. Type I understand before Hangar Express can continue to Face ID and submit the melt request.")
             return
@@ -3020,6 +3559,183 @@ private struct HangarMeltConfirmationView: View {
         Task {
             do {
                 try await appModel.melt(packageGroup: packageGroup, quantity: quantityToMelt)
+                await MainActor.run {
+                    isMelting = false
+                    onCompleted()
+                }
+            } catch let error as SensitiveActionAuthorizationError where error.isCancellation {
+                await MainActor.run {
+                    isMelting = false
+                }
+            } catch {
+                await MainActor.run {
+                    isMelting = false
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+}
+
+private struct HangarBulkMeltConfirmationView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let appModel: AppModel
+    let packageGroups: [GroupedHangarPackage]
+    let onCompleted: @MainActor @Sendable () -> Void
+
+    @State private var isMelting = false
+    @State private var errorMessage: String?
+    @State private var squadron42Acknowledgement = ""
+    @State private var acknowledgesGiftableMelt = false
+
+    private var selectedPackages: [HangarPackage] {
+        packageGroups.flatMap(\.packages)
+    }
+
+    private var estimatedCreditValue: Decimal {
+        selectedPackages.reduce(into: Decimal.zero) { partialResult, package in
+            partialResult += package.originalValueUSD
+        }
+    }
+
+    private var requiresGiftableMeltAcknowledgement: Bool {
+        selectedPackages.contains(where: \.canGift)
+    }
+
+    private var requiresSquadron42Acknowledgement: Bool {
+        selectedPackages.contains { $0.containsSquadron42Content }
+    }
+
+    private var hasMetSquadron42Acknowledgement: Bool {
+        squadron42Acknowledgement.trimmingCharacters(in: .whitespacesAndNewlines) == "I understand"
+    }
+
+    var body: some View {
+        List {
+            Section {
+                HangarBulkSelectedPledgesSummaryView(packageGroups: packageGroups)
+                LabeledContent("Estimated Credit", value: estimatedCreditValue.usdString)
+            } header: {
+                Text("Selected Pledges")
+            } footer: {
+                Text("Hangar Express will reclaim every pledge represented by these selected rows.")
+            }
+
+            if requiresGiftableMeltAcknowledgement {
+                Section {
+                    Text("One or more selected pledges can still be gifted. Melting them permanently gives up the option to send those pledges to another account.")
+                        .foregroundStyle(.orange)
+                        .font(.body.weight(.semibold))
+
+                    Toggle("I understand I am melting giftable pledge(s)", isOn: $acknowledgesGiftableMelt)
+                } header: {
+                    Text("Giftable Pledge Warning")
+                } footer: {
+                    Text("Confirm this warning before Hangar Express unlocks Face ID and sends the live RSI melt request.")
+                }
+            }
+
+            if requiresSquadron42Acknowledgement {
+                Section {
+                    Text("One or more selected pledges contain Squadron 42. If you melt them, RSI does not allow this entitlement to be bought back later.")
+                        .foregroundStyle(.orange)
+                        .font(.body.weight(.semibold))
+
+                    TextField("Type \"I understand\"", text: $squadron42Acknowledgement)
+                        .textInputAutocapitalization(.words)
+                        .disableAutocorrection(true)
+                } header: {
+                    Text("Squadron 42 Warning")
+                } footer: {
+                    Text("Type I understand exactly before Hangar Express unlocks Face ID and sends the live RSI melt request.")
+                }
+            }
+
+            Section {
+                Text("This action cannot be undone. Once RSI confirms the melt, the selected item(s) are permanently converted into store credit.")
+                    .foregroundStyle(.orange)
+                    .font(.body.weight(.medium))
+            } header: {
+                Text("Warning")
+            }
+
+            Section {
+                Button(role: .destructive) {
+                    submitMelt()
+                } label: {
+                    HStack {
+                        Spacer()
+                        if isMelting {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(.white)
+                            Text("Melting...")
+                                .fontWeight(.semibold)
+                        } else {
+                            Text("Melt \(selectedPackages.count) Pledges")
+                                .fontWeight(.semibold)
+                        }
+                        Spacer()
+                    }
+                }
+                .disabled(
+                    isMelting
+                        || appModel.isRefreshing
+                        || selectedPackages.isEmpty
+                        || (requiresGiftableMeltAcknowledgement && !acknowledgesGiftableMelt)
+                        || (requiresSquadron42Acknowledgement && !hasMetSquadron42Acknowledgement)
+                )
+            }
+        }
+        .navigationTitle("Confirm Melt")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") {
+                    dismiss()
+                }
+                .disabled(isMelting)
+            }
+        }
+        .alert(
+            "Unable to Melt Items",
+            isPresented: Binding(
+                get: { errorMessage != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        errorMessage = nil
+                    }
+                }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage ?? "")
+        }
+    }
+
+    private func submitMelt() {
+        guard !isMelting else {
+            return
+        }
+
+        guard !requiresGiftableMeltAcknowledgement || acknowledgesGiftableMelt else {
+            errorMessage = AppLocalizer.string("One or more selected pledges are giftable. Confirm that warning before Hangar Express can continue to Face ID and submit the melt request.")
+            return
+        }
+
+        guard !requiresSquadron42Acknowledgement || hasMetSquadron42Acknowledgement else {
+            errorMessage = AppLocalizer.string("One or more selected pledges contain Squadron 42. Type I understand before Hangar Express can continue to Face ID and submit the melt request.")
+            return
+        }
+
+        errorMessage = nil
+        isMelting = true
+
+        Task {
+            do {
+                try await appModel.melt(packageGroups: packageGroups)
                 await MainActor.run {
                     isMelting = false
                     onCompleted()
