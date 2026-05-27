@@ -13,6 +13,7 @@ struct SettingsView: View {
     @AppStorage(DisplayPreferences.hangarUpgradedHighlightKey) private var highlightsUpgradedHangarRows = DisplayPreferences.hangarUpgradedHighlightEnabledByDefault
     @AppStorage(DisplayPreferences.earlyAccessBadgeKey) private var showsEarlyAccessBadge = DisplayPreferences.earlyAccessBadgeEnabledByDefault
     @AppStorage(DisplayPreferences.sharePictureAutoCopiesDebugLogKey) private var autoCopiesSharePictureDebugLog = DisplayPreferences.sharePictureAutoCopiesDebugLogEnabledByDefault
+    @AppStorage(DisplayPreferences.hangarBulkSelectionKey) private var enablesHangarBulkSelection = DisplayPreferences.hangarBulkSelectionEnabledByDefault
     @State private var isShowingClearCacheAlert = false
     @State private var isShowingProPlans = false
 
@@ -153,11 +154,12 @@ struct SettingsView: View {
                     Toggle("Show Final Upgraded Ship in Hangar", isOn: $showsUpgradedShipInHangar)
                     Toggle("Highlight Gifted Hangar Rows", isOn: $highlightsGiftedHangarRows)
                     Toggle("Highlight Upgraded Hangar Rows", isOn: $highlightsUpgradedHangarRows)
+                    Toggle("Hangar Multi-Select Actions", isOn: $enablesHangarBulkSelection)
                     Toggle("Auto Copy Share Picture Log", isOn: $autoCopiesSharePictureDebugLog)
                 } header: {
                     Text("Advanced")
                 } footer: {
-                    Text("Control hangar artwork, row highlights, and share-picture diagnostics.")
+                    Text("Control hangar artwork, row highlights, optional multi-select actions, and share-picture diagnostics.")
                 }
 
                 Section {

@@ -872,11 +872,29 @@ nonisolated struct ReferralStats: Hashable, Sendable, Codable {
     let currentLadderCount: Int?
     let legacyLadderCount: Int?
     let hasLegacyLadder: Bool
+    let inviteCode: String?
+
+    init(
+        currentLadderCount: Int?,
+        legacyLadderCount: Int?,
+        hasLegacyLadder: Bool,
+        inviteCode: String? = nil
+    ) {
+        self.currentLadderCount = currentLadderCount
+        self.legacyLadderCount = legacyLadderCount
+        self.hasLegacyLadder = hasLegacyLadder
+
+        let normalizedInviteCode = inviteCode?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+        self.inviteCode = normalizedInviteCode?.isEmpty == false ? normalizedInviteCode : nil
+    }
 
     static let unavailable = ReferralStats(
         currentLadderCount: nil,
         legacyLadderCount: nil,
-        hasLegacyLadder: false
+        hasLegacyLadder: false,
+        inviteCode: nil
     )
 
     var currentSummary: String {
@@ -1303,20 +1321,18 @@ nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
 }
 
 nonisolated struct GroupedHangarPackage: Identifiable, Hashable, Sendable {
+    let id: String
     let representative: HangarPackage
     let packages: [HangarPackage]
 
     init(representative: HangarPackage, packages: [HangarPackage]) {
-        self.representative = representative
-        self.packages = packages
-    }
-
-    var id: String {
-        packages
+        id = packages
             .map(\.id)
             .sorted()
             .map(String.init)
             .joined(separator: "-")
+        self.representative = representative
+        self.packages = packages
     }
 
     var quantity: Int {

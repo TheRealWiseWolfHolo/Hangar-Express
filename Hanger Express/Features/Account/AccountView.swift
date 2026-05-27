@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct AccountView: View {
     let appModel: AppModel
@@ -16,6 +17,9 @@ struct AccountView: View {
     @State private var presentedTool: FleetTool?
     @State private var limitedShipAccessPrompt: LimitedShipAccessPrompt?
     @State private var isCheckingLimitedShipAccess = false
+    @State private var isLoadingReferralInviteCode = false
+    @State private var copiedReferralInviteCode = false
+    @State private var referralInviteCopyErrorMessage: String?
 
     var body: some View {
         NavigationStack {
@@ -73,7 +77,11 @@ struct AccountView: View {
                         MetricCard(
                             title: "Referrals",
                             primaryValue: snapshot.referralStats.currentSummary,
-                            secondaryValue: snapshot.referralStats.legacySummary
+                            secondaryValue: snapshot.referralStats.legacySummary,
+                            accessorySystemImage: referralMetricAccessorySystemImage,
+                            accessoryColor: referralMetricAccessoryColor,
+                            longPressAction: referralInviteCopyAction,
+                            accessibilityActionName: "Copy Referral Code"
                         )
                     }
                     .padding(.vertical, 4)
@@ -185,9 +193,14 @@ struct AccountView: View {
                         snapshot: snapshot,
                         reloadToken: appModel.hangarFleetImageReloadToken
                     )
+                case .ccuChainCalculator:
+                    CCUUpgradeCalculatorView(
+                        snapshot: snapshot,
+                        reloadToken: appModel.hangarFleetImageReloadToken
+                    )
                 case .authorizedDevices:
                     AuthorizedDevicesView(appModel: appModel)
-                case .ccuChainCalculator, .resetCharacter:
+                case .resetCharacter:
                     EmptyView()
                 }
             }
@@ -195,6 +208,11 @@ struct AccountView: View {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(accountTotalValueExplanation)
+            }
+            .alert("Referral Code Unavailable", isPresented: referralInviteCopyErrorBinding) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(referralInviteCopyErrorMessage ?? "")
             }
             .overlay {
                 if isCheckingLimitedShipAccess {
@@ -243,6 +261,60 @@ struct AccountView: View {
         }
     }
 
+    private func copyReferralInviteCode() {
+        if let referralInviteCode {
+            copyReferralInviteCode(referralInviteCode)
+            return
+        }
+
+        guard !appModel.isRefreshing, !isLoadingReferralInviteCode else {
+            referralInviteCopyErrorMessage = AppLocalizer.string(
+                "Referral code is still loading. Try again after the current refresh finishes."
+            )
+            return
+        }
+
+        isLoadingReferralInviteCode = true
+        Task {
+            await appModel.refresh(scope: .account)
+
+            await MainActor.run {
+                isLoadingReferralInviteCode = false
+
+                if let refreshedInviteCode = currentReferralInviteCode {
+                    copyReferralInviteCode(refreshedInviteCode)
+                } else {
+                    referralInviteCopyErrorMessage = AppLocalizer.string(
+                        "Refresh Account did not find a referral code yet. Open the RSI referral page once, then refresh Account and try again."
+                    )
+                }
+            }
+        }
+    }
+
+    private func copyReferralInviteCode(_ inviteCode: String) {
+        UIPasteboard.general.string = inviteCode
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        copiedReferralInviteCode = true
+
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await MainActor.run {
+                copiedReferralInviteCode = false
+            }
+        }
+    }
+
+    private var referralInviteCopyErrorBinding: Binding<Bool> {
+        Binding {
+            referralInviteCopyErrorMessage != nil
+        } set: { isPresented in
+            if !isPresented {
+                referralInviteCopyErrorMessage = nil
+            }
+        }
+    }
+
     private var refreshLabel: String {
         guard let lastRefreshAt = appModel.lastRefreshAt else {
             return AppLocalizer.string("Not yet synced")
@@ -256,6 +328,45 @@ struct AccountView: View {
             GridItem(.flexible(), spacing: 12),
             GridItem(.flexible(), spacing: 12)
         ]
+    }
+
+    private var referralInviteCode: String? {
+        sanitizedReferralInviteCode(from: snapshot)
+    }
+
+    private var currentReferralInviteCode: String? {
+        if let snapshot = appModel.snapshot {
+            return sanitizedReferralInviteCode(from: snapshot)
+        }
+
+        return referralInviteCode
+    }
+
+    private func sanitizedReferralInviteCode(from snapshot: HangarSnapshot) -> String? {
+        let trimmedCode = snapshot.referralStats.inviteCode?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedCode.isEmpty ? nil : trimmedCode
+    }
+
+    private var referralMetricAccessorySystemImage: String? {
+        if isLoadingReferralInviteCode {
+            return "arrow.clockwise"
+        }
+
+        return copiedReferralInviteCode ? "checkmark.circle.fill" : "doc.on.doc"
+    }
+
+    private var referralMetricAccessoryColor: Color {
+        if copiedReferralInviteCode {
+            return .green
+        }
+
+        return isLoadingReferralInviteCode ? .blue : .secondary
+    }
+
+    private var referralInviteCopyAction: (() -> Void)? {
+        return {
+            copyReferralInviteCode()
+        }
     }
 
     private var profileDisplayName: String {
@@ -591,12 +702,59 @@ private struct MetricCard: View {
     let title: LocalizedStringKey
     let primaryValue: String
     let secondaryValue: String
+    let accessorySystemImage: String?
+    let accessoryColor: Color
+    let longPressAction: (() -> Void)?
+    let accessibilityActionName: String?
+
+    init(
+        title: LocalizedStringKey,
+        primaryValue: String,
+        secondaryValue: String,
+        accessorySystemImage: String? = nil,
+        accessoryColor: Color = .secondary,
+        longPressAction: (() -> Void)? = nil,
+        accessibilityActionName: String? = nil
+    ) {
+        self.title = title
+        self.primaryValue = primaryValue
+        self.secondaryValue = secondaryValue
+        self.accessorySystemImage = accessorySystemImage
+        self.accessoryColor = accessoryColor
+        self.longPressAction = longPressAction
+        self.accessibilityActionName = accessibilityActionName
+    }
 
     var body: some View {
+        if let longPressAction {
+            cardContent
+                .contentShape(cardShape)
+                .onLongPressGesture(minimumDuration: 0.45, perform: longPressAction)
+                .accessibilityAction(named: Text(accessibilityActionName ?? "Copy")) {
+                    longPressAction()
+                }
+        } else {
+            cardContent
+        }
+    }
+
+    private var cardContent: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+
+                if let accessorySystemImage {
+                    Image(systemName: accessorySystemImage)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(accessoryColor)
+                        .frame(width: 16, height: 16)
+                }
+            }
+
             Text(primaryValue)
                 .font(.headline.weight(.semibold))
                 .monospacedDigit()
@@ -610,7 +768,11 @@ private struct MetricCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 12)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Color(.secondarySystemGroupedBackground), in: cardShape)
+    }
+
+    private var cardShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
     }
 }
 

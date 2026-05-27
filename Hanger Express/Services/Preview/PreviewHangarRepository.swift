@@ -345,7 +345,8 @@ struct PreviewHangarRepository: HangarRepository {
     private static let sampleReferralStats = ReferralStats(
         currentLadderCount: 18,
         legacyLadderCount: 7,
-        hasLegacyLadder: true
+        hasLegacyLadder: true,
+        inviteCode: "STAR-TEST-CODE"
     )
 
     private static let sampleHangarLogs: [HangarLogEntry] = [

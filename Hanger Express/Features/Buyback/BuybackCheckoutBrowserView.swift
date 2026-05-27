@@ -553,6 +553,8 @@ private struct RSICheckoutWebView: UIViewRepresentable {
                 summaryExpandedAt: 0,
                 duplicateRemovalCount: 0,
                 lastStatusLogAt: 0,
+                graphQLCreditUpdateAttempted: false,
+                graphQLCreditApplied: false,
                 graphQLCheckoutAttempted: false,
                 graphQLCheckoutCompleted: false,
                 graphQLCheckoutStartedAt: 0,
@@ -585,6 +587,17 @@ private struct RSICheckoutWebView: UIViewRepresentable {
                   style.visibility !== 'hidden' &&
                   style.display !== 'none' &&
                   style.opacity !== '0';
+              };
+              const inViewport = (node) => {
+                if (!node?.getBoundingClientRect) {
+                  return false;
+                }
+
+                const rect = node.getBoundingClientRect();
+                return rect.bottom > 0 &&
+                  rect.top < window.innerHeight &&
+                  rect.right > 0 &&
+                  rect.left < window.innerWidth;
               };
 
               const disabled = (node) => Boolean(
@@ -793,6 +806,25 @@ private struct RSICheckoutWebView: UIViewRepresentable {
                 const amount = match ? Number(match[0]) : Number.NaN;
                 return Number.isFinite(amount) ? amount : null;
               };
+              const parseMoneyValue = (value) => {
+                if (typeof value === 'number' && Number.isFinite(value)) {
+                  if (expectedCartTotal > 0 && Math.abs((value / 100) - expectedCartTotal) <= 0.01) {
+                    return value / 100;
+                  }
+
+                  return value;
+                }
+
+                if (typeof value === 'string') {
+                  return parseUSD(value);
+                }
+
+                if (value && typeof value === 'object') {
+                  return parseMoneyValue(value.amount ?? value.value ?? value.formatted ?? value.raw);
+                }
+
+                return null;
+              };
               const visibleCartTotal = () => {
                 const nodes = Array.from(document.querySelectorAll([
                   '.m-cartActionBar',
@@ -846,6 +878,10 @@ private struct RSICheckoutWebView: UIViewRepresentable {
                 return totals.length ? Math.min(...totals) : null;
               };
               const storeCreditApplied = () => {
+                if (state.graphQLCreditApplied) {
+                  return true;
+                }
+
                 const finalTotal = visibleFinalTotal();
                 if (finalTotal !== null && finalTotal <= 0.01) {
                   return true;
@@ -1307,6 +1343,53 @@ private struct RSICheckoutWebView: UIViewRepresentable {
                   shipping: cart.shippingRequired === false ? null : (idFor(cart.shippingAddress) || fallbackAddressID || null)
                 };
               };
+              const graphQLCreditTotals = (data) => data?.store?.cart?.totals || data?.cart?.totals || {};
+              const graphQLCreditUpdateConfirmed = (data) => {
+                const totals = graphQLCreditTotals(data);
+                const finalTotal = parseMoneyValue(totals.total);
+                if (finalTotal !== null && finalTotal <= 0.01) {
+                  return true;
+                }
+
+                const credits = Array.isArray(totals.credits)
+                  ? totals.credits
+                  : (totals.credits ? [totals.credits] : []);
+                const creditAmounts = credits
+                  .flatMap((credit) => [
+                    credit?.amount,
+                    credit?.applied,
+                    credit?.used,
+                    credit?.value
+                  ])
+                  .map(parseMoneyValue)
+                  .filter((amount) => amount !== null);
+
+                return creditAmounts.some((amount) => Math.abs(amount - expectedCartTotal) <= 0.01);
+              };
+              const updateStoreCreditWithGraphQLIfPossible = async () => {
+                if (state.graphQLCreditUpdateAttempted || expectedCartTotal <= 0) {
+                  return false;
+                }
+
+                state.graphQLCreditUpdateAttempted = true;
+                try {
+                  const data = await updateStoreCreditGraphQL(expectedCartTotal);
+                  const totals = graphQLCreditTotals(data);
+                  const finalTotal = parseMoneyValue(totals.total);
+                  if (graphQLCreditUpdateConfirmed(data)) {
+                    state.graphQLCreditApplied = true;
+                    state.creditAddedAt = Date.now();
+                    postLog(`GraphQL store credit update confirmed for $${expectedCartTotal.toFixed(2)} USD. finalTotal=${finalTotal === null ? 'unknown' : `$${finalTotal.toFixed(2)}`}.`);
+                    return true;
+                  }
+
+                  postLog(`GraphQL store credit update sent, but RSI did not confirm the applied credit in the response. finalTotal=${finalTotal === null ? 'unknown' : `$${finalTotal.toFixed(2)}`}. Continuing with page controls.`);
+                } catch (error) {
+                  postLog(`GraphQL store credit update failed: ${errorMessage(error)}. Continuing with page controls.`);
+                }
+
+                return false;
+              };
               const pageAppearsPastCartStep = () => {
                 const text = lowerText(document.body?.innerText || '');
                 return text.includes('billing information') ||
@@ -1335,8 +1418,14 @@ private struct RSICheckoutWebView: UIViewRepresentable {
                   postLog(`GraphQL cart state before checkout: ${cartFlowLabel(initialState)}.`);
 
                   if (!storeCreditApplied() && expectedCartTotal > 0) {
-                    await updateStoreCreditGraphQL(expectedCartTotal);
-                    postLog(`GraphQL store credit update sent for $${expectedCartTotal.toFixed(2)} USD.`);
+                    const creditData = await updateStoreCreditGraphQL(expectedCartTotal);
+                    state.graphQLCreditUpdateAttempted = true;
+                    if (graphQLCreditUpdateConfirmed(creditData)) {
+                      state.graphQLCreditApplied = true;
+                      postLog(`GraphQL store credit update confirmed for $${expectedCartTotal.toFixed(2)} USD.`);
+                    } else {
+                      postLog(`GraphQL store credit update sent for $${expectedCartTotal.toFixed(2)} USD, but the response did not confirm the applied credit.`);
+                    }
                     await wait(350);
                   } else {
                     postLog('Store credit already appears applied; skipping GraphQL credit update.');
@@ -1393,13 +1482,19 @@ private struct RSICheckoutWebView: UIViewRepresentable {
               const summaryCandidates = () => Array.from(document.querySelectorAll([
                 '[data-cy-id="summary"]',
                 '.cart-summary-unit',
-                '.c-summary'
+                '.c-summary',
+                '.l-cart__summary',
+                '[class*="summary" i]'
               ].join(',')));
 
               const findOrderSummary = () => {
                 const summaries = summaryCandidates()
                   .filter((node) => lowerText(node.innerText || node.textContent).includes('order summary'));
-                return summaries.find((node) => visible(node)) || summaries[0] || null;
+                const visibleSummaries = summaries.filter((node) => visible(node));
+                return visibleSummaries.find((node) => inViewport(node)) ||
+                  visibleSummaries[0] ||
+                  summaries[0] ||
+                  null;
               };
 
               const summaryIsOpen = (summary) => Boolean(
@@ -1413,6 +1508,32 @@ private struct RSICheckoutWebView: UIViewRepresentable {
                 'button'
               ].join(',')) || [])
                 .find((button) => visible(button) && !disabled(button)) || null;
+              const findVisibleOrderSummaryExpandButton = (summary = null) => {
+                const candidateRoots = [summary, document].filter(Boolean);
+                for (const root of candidateRoots) {
+                  const candidates = uniqueNodes(Array.from(root.querySelectorAll?.('button, [role="button"]') || []))
+                    .filter((button) => {
+                      if (!visible(button) || disabled(button)) {
+                        return false;
+                      }
+
+                      const label = lowerText(textFor(button));
+                      const ariaLabel = lowerText(button.getAttribute?.('aria-label'));
+                      if (!label.includes('expand') && !ariaLabel.includes('expand')) {
+                        return false;
+                      }
+
+                      const context = button.closest?.('[data-cy-id="summary"], .c-summary, .cart-summary-unit, .l-cart__summary, [data-cy-id="__header"], .m-cartHeader, section, div');
+                      return lowerText(context?.innerText || context?.textContent).includes('order summary');
+                    })
+                    .sort((first, second) => Number(inViewport(second)) - Number(inViewport(first)));
+                  if (candidates.length) {
+                    return candidates[0];
+                  }
+                }
+
+                return null;
+              };
 
               const expandOrderSummaryIfNeeded = () => {
                 const summary = findOrderSummary();
@@ -1424,6 +1545,15 @@ private struct RSICheckoutWebView: UIViewRepresentable {
                 const visibleCreditInput = findStoreCreditInput(findStoreCreditSection());
                 if (visibleCreditInput) {
                   return false;
+                }
+
+                const visibleExpandButton = findVisibleOrderSummaryExpandButton(summary);
+                if (visibleExpandButton) {
+                  if (clickOnce('order-summary-expand', visibleExpandButton, 'Order Summary expand')) {
+                    state.summaryExpandedAt = Date.now();
+                  }
+
+                  return true;
                 }
 
                 if (summaryIsOpen(summary) && lowerText(summary.innerText || summary.textContent).includes('add store credits')) {
@@ -1723,6 +1853,10 @@ private struct RSICheckoutWebView: UIViewRepresentable {
 
               const applyStoreCreditIfAvailable = async () => {
                 if (storeCreditApplied()) {
+                  return true;
+                }
+
+                if (await updateStoreCreditWithGraphQLIfPossible()) {
                   return true;
                 }
 

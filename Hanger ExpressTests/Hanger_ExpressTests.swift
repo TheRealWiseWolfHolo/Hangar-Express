@@ -197,6 +197,287 @@ struct Hanger_ExpressTests {
         #expect(entry.targetPledgeID == "1003")
     }
 
+    @Test func ccuPlannerBuildsLowestNewPurchaseChainFromHangarAndBuyback() throws {
+        let catalogShips = CCUUpgradeCatalogShip.makeShips(from: makeCCUTestCatalog())
+        let snapshot = makeCCUTestSnapshot(
+            storeCreditUSD: 50,
+            packages: [
+                makeCCUTestUpgradePackage(
+                    id: 100,
+                    title: "Aurora MR to 300i Standard Upgrade",
+                    source: "Aurora MR",
+                    target: "300i",
+                    currentValueUSD: 30,
+                    meltValueUSD: 35
+                ),
+                makeCCUTestUpgradePackage(
+                    id: 101,
+                    title: "300i to Cutlass Black Warbond Upgrade",
+                    source: "300i",
+                    target: "Cutlass Black",
+                    currentValueUSD: 50,
+                    meltValueUSD: 20
+                )
+            ],
+            buyback: [
+                BuybackPledge(
+                    id: 200,
+                    title: "Cutlass Black to Zeus Mk II MR CCU",
+                    recoveredValueUSD: 70,
+                    addedToBuybackAt: Date(timeIntervalSince1970: 1_800),
+                    notes: "Recovered from buy back."
+                )
+            ]
+        )
+
+        let source = try #require(catalogShips.first { $0.name == "Aurora MR" })
+        let destination = try #require(catalogShips.first { $0.name == "Zeus Mk II MR" })
+        let route = try #require(
+            CCUUpgradePlanner.bestRoute(
+                from: source,
+                to: destination,
+                snapshot: snapshot,
+                catalogShips: catalogShips
+            )
+        )
+
+        #expect(route.steps.map(\.kind) == [
+            .hangarStandardMeltAboveCurrent,
+            .hangarWarbond,
+            .buyback
+        ])
+        #expect(route.totalNewPurchaseCostUSD == 70)
+        #expect(route.totalStoreCreditNeededUSD == 50)
+        #expect(route.totalNewMoneyNeededUSD == 20)
+        #expect(route.totalEffectiveCostUSD == 125)
+        #expect(route.totalSavingsUSD == 35)
+        #expect(!route.hasUnavailableStoreStep)
+
+        let buybackStep = try #require(route.steps.first { $0.kind == .buyback })
+        let buybackPayment = try #require(route.paymentRequirement(for: buybackStep))
+        #expect(buybackPayment.purchaseCostUSD == 70)
+        #expect(buybackPayment.storeCreditUSD == 50)
+        #expect(buybackPayment.newMoneyUSD == 20)
+    }
+
+    @Test func ccuPlannerChoosesHighestSavingOwnedWarbondUpgrade() throws {
+        let catalogShips = CCUUpgradeCatalogShip.makeShips(from: makeCCUTestCatalog())
+        let snapshot = makeCCUTestSnapshot(
+            packages: [
+                makeCCUTestUpgradePackage(
+                    id: 100,
+                    title: "300i to Cutlass Black Warbond Upgrade",
+                    source: "300i",
+                    target: "Cutlass Black",
+                    currentValueUSD: 50,
+                    meltValueUSD: 30
+                ),
+                makeCCUTestUpgradePackage(
+                    id: 101,
+                    title: "300i to Cutlass Black Warbond Upgrade - Best",
+                    source: "300i",
+                    target: "Cutlass Black",
+                    currentValueUSD: 50,
+                    meltValueUSD: 20
+                )
+            ],
+            buyback: []
+        )
+
+        let source = try #require(catalogShips.first { $0.name == "300i" })
+        let destination = try #require(catalogShips.first { $0.name == "Cutlass Black" })
+        let route = try #require(
+            CCUUpgradePlanner.bestRoute(
+                from: source,
+                to: destination,
+                snapshot: snapshot,
+                catalogShips: catalogShips
+            )
+        )
+
+        #expect(route.steps.count == 1)
+        #expect(route.steps.first?.title == "300i to Cutlass Black Warbond Upgrade - Best")
+        #expect(route.steps.first?.effectiveCostUSD == 20)
+        #expect(route.totalSavingsUSD == 30)
+    }
+
+    @Test func ccuPlannerWarnsWhenOnlyUnavailableStoreCCUCompletesRoute() throws {
+        let catalogShips = CCUUpgradeCatalogShip.makeShips(from: makeCCUTestCatalog())
+        let snapshot = makeCCUTestSnapshot(packages: [], buyback: [])
+
+        let source = try #require(catalogShips.first { $0.name == "Aurora MR" })
+        let destination = try #require(catalogShips.first { $0.name == "Zeus Mk II MR" })
+        let route = try #require(
+            CCUUpgradePlanner.bestRoute(
+                from: source,
+                to: destination,
+                snapshot: snapshot,
+                catalogShips: catalogShips
+            )
+        )
+
+        #expect(route.steps.count == 1)
+        #expect(route.steps.first?.kind == .unavailableStore)
+        #expect(route.hasUnavailableStoreStep)
+        #expect(route.totalNewPurchaseCostUSD == 160)
+    }
+
+    @Test func ccuPlannerUsesStoreInsteadOfNoSavingBuybackWhenStoreAvailable() throws {
+        let catalogShips = CCUUpgradeCatalogShip.makeShips(from: makeCCUTestCatalog())
+        let snapshot = makeCCUTestSnapshot(
+            storeCreditUSD: 10,
+            packages: [],
+            buyback: [
+                BuybackPledge(
+                    id: 201,
+                    title: "300i to Cutlass Black CCU",
+                    recoveredValueUSD: 50,
+                    addedToBuybackAt: Date(timeIntervalSince1970: 1_900),
+                    notes: "Recovered from buy back."
+                )
+            ]
+        )
+
+        let source = try #require(catalogShips.first { $0.name == "300i" })
+        let destination = try #require(catalogShips.first { $0.name == "Cutlass Black" })
+        let route = try #require(
+            CCUUpgradePlanner.bestRoute(
+                from: source,
+                to: destination,
+                snapshot: snapshot,
+                catalogShips: catalogShips
+            )
+        )
+
+        #expect(route.steps.map(\.kind) == [.store])
+        #expect(route.totalNewPurchaseCostUSD == 50)
+        #expect(route.totalStoreCreditNeededUSD == 10)
+        #expect(route.totalNewMoneyNeededUSD == 40)
+
+        let storeStep = try #require(route.steps.first)
+        let storePayment = try #require(route.paymentRequirement(for: storeStep))
+        #expect(storePayment.purchaseCostUSD == 50)
+        #expect(storePayment.storeCreditUSD == 10)
+        #expect(storePayment.newMoneyUSD == 40)
+    }
+
+    @Test func ccuPlannerUsesStoreWarbondCCUAsNewMoneyOnlyPurchase() throws {
+        let catalog = makeCCUTestCatalog(
+            storeUpgradeOffers: [
+                RSIShipCatalog.StoreUpgradeOffer(
+                    id: "rsi-upgrade-sku-9001",
+                    skuID: 9001,
+                    title: "Warbond Edition",
+                    targetShipID: 3,
+                    targetShipName: "Cutlass Black",
+                    targetShipMSRPUSD: 110,
+                    priceUSD: 95,
+                    savingsUSD: 15,
+                    available: true,
+                    unlimitedStock: true,
+                    availableStock: 0
+                )
+            ]
+        )
+        let catalogShips = CCUUpgradeCatalogShip.makeShips(from: catalog)
+        let snapshot = makeCCUTestSnapshot(storeCreditUSD: 100, packages: [], buyback: [])
+
+        let source = try #require(catalogShips.first { $0.name == "Aurora MR" })
+        let destination = try #require(catalogShips.first { $0.name == "Cutlass Black" })
+        let route = try #require(
+            CCUUpgradePlanner.bestRoute(
+                from: source,
+                to: destination,
+                snapshot: snapshot,
+                catalogShips: catalogShips,
+                storeUpgradeOffers: catalog.storeUpgradeOffers
+            )
+        )
+
+        #expect(route.steps.map(\.kind) == [.storeWarbond])
+        #expect(route.totalNewPurchaseCostUSD == 65)
+        #expect(route.totalStoreCreditNeededUSD == 0)
+        #expect(route.totalNewMoneyNeededUSD == 65)
+        #expect(route.totalEffectiveCostUSD == 65)
+        #expect(route.totalSavingsUSD == 15)
+
+        let storeWarbondStep = try #require(route.steps.first)
+        let payment = try #require(route.paymentRequirement(for: storeWarbondStep))
+        #expect(payment.purchaseCostUSD == 65)
+        #expect(payment.storeCreditUSD == 0)
+        #expect(payment.newMoneyUSD == 65)
+    }
+
+    @Test func ccuPlannerSuppressesStandardStoreCCUWhenStoreWarbondExistsForSamePath() throws {
+        let catalog = makeCCUTestCatalog(
+            additionalShips: [
+                makeCCUTestCatalogShip(
+                    id: 5,
+                    name: "Hercules Starlifter A2",
+                    manufacturer: "Crusader",
+                    msrpUSD: 750,
+                    storeAvailable: true
+                ),
+                makeCCUTestCatalogShip(
+                    id: 6,
+                    name: "Polaris",
+                    manufacturer: "RSI",
+                    msrpUSD: 975,
+                    storeAvailable: true
+                )
+            ],
+            storeUpgradeOffers: [
+                RSIShipCatalog.StoreUpgradeOffer(
+                    id: "rsi-upgrade-sku-9901",
+                    skuID: 9901,
+                    title: "Warbond Edition",
+                    targetShipID: 6,
+                    targetShipName: "Polaris",
+                    targetShipMSRPUSD: 975,
+                    priceUSD: 950,
+                    savingsUSD: 25,
+                    available: true,
+                    unlimitedStock: true,
+                    availableStock: 0
+                )
+            ]
+        )
+        let catalogShips = CCUUpgradeCatalogShip.makeShips(from: catalog)
+        let snapshot = makeCCUTestSnapshot(storeCreditUSD: 500, packages: [], buyback: [])
+
+        let source = try #require(catalogShips.first { $0.name == "Hercules Starlifter A2" })
+        let destination = try #require(catalogShips.first { $0.name == "Polaris" })
+        let shipIndex = CCUUpgradeShipIndex(ships: catalogShips)
+        let samePathStoreCandidates = CCUUpgradePlanner.allCandidates(
+            snapshot: snapshot,
+            shipIndex: shipIndex,
+            storeUpgradeOffers: catalog.storeUpgradeOffers
+        )
+            .filter {
+                $0.sourceShip.key == source.key
+                    && $0.targetShip.key == destination.key
+                    && ($0.kind == .storeWarbond || $0.kind == .store)
+            }
+
+        #expect(samePathStoreCandidates.map(\.kind) == [.storeWarbond])
+
+        let route = try #require(
+            CCUUpgradePlanner.bestRoute(
+                from: source,
+                to: destination,
+                snapshot: snapshot,
+                catalogShips: catalogShips,
+                storeUpgradeOffers: catalog.storeUpgradeOffers
+            )
+        )
+
+        #expect(route.steps.map(\.kind) == [.storeWarbond])
+        #expect(route.totalNewPurchaseCostUSD == 200)
+        #expect(route.totalStoreCreditNeededUSD == 0)
+        #expect(route.totalNewMoneyNeededUSD == 200)
+        #expect(route.totalSavingsUSD == 25)
+    }
+
     @Test func fileSnapshotStorePersistsSnapshotsByAccountKey() async throws {
         let tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -906,6 +1187,7 @@ struct Hanger_ExpressTests {
         #expect(snapshot.referralStats.currentLadderCount == nil)
         #expect(snapshot.referralStats.legacyLadderCount == nil)
         #expect(snapshot.referralStats.hasLegacyLadder == false)
+        #expect(snapshot.referralStats.inviteCode == nil)
     }
 
     @Test func hangarPackageRecognizesMultiShipPackages() async throws {
@@ -1922,6 +2204,53 @@ struct Hanger_ExpressTests {
                 for: URL(string: "https://robertsspaceindustries.com/media/polaris.webp")
             ) == URL(string: "https://mirror.example.com/polaris.webp")
         )
+    }
+
+    @Test func hostedShipCatalogDecodesStoreWarbondUpgradeOffers() async throws {
+        let data = Data(
+            """
+            {
+              "generatedAt": "2026-05-16T20:00:00.000Z",
+              "ships": [
+                {
+                  "id": "3",
+                  "name": "Cutlass Black",
+                  "manufacturer": "Drake Interplanetary",
+                  "msrpUsd": 110,
+                  "storeAvailable": true
+                }
+              ],
+              "storeUpgradeOffers": [
+                {
+                  "id": "rsi-upgrade-sku-9001",
+                  "skuId": 9001,
+                  "title": "Warbond Edition",
+                  "targetShipId": "3",
+                  "targetShipName": "Cutlass Black",
+                  "targetShipMsrpUsd": 110,
+                  "priceUsd": 95,
+                  "savingsUsd": 15,
+                  "available": true,
+                  "unlimitedStock": true,
+                  "availableStock": 0
+                }
+              ]
+            }
+            """.utf8
+        )
+
+        let catalog = try HostedShipCatalogClient.decodeCatalog(from: data)
+        let offer = try #require(catalog.storeUpgradeOffers.first)
+
+        #expect(offer.id == "rsi-upgrade-sku-9001")
+        #expect(offer.skuID == 9001)
+        #expect(offer.title == "Warbond Edition")
+        #expect(offer.targetShipID == 3)
+        #expect(offer.targetShipName == "Cutlass Black")
+        #expect(offer.targetShipMSRPUSD == 110)
+        #expect(offer.priceUSD == 95)
+        #expect(offer.savingsUSD == 15)
+        #expect(offer.available)
     }
 
     @Test func hostedShipCatalogSplitsMultiRoleShipsIntoDistinctCategories() async throws {
@@ -3045,6 +3374,7 @@ struct Hanger_ExpressTests {
         #expect(stats.currentLadderCount == 42)
         #expect(stats.legacyLadderCount == 12)
         #expect(stats.hasLegacyLadder)
+        #expect(stats.inviteCode == nil)
     }
 
     @Test func referralStatsResolverMarksLegacyLadderUnavailableWhenPageIsMissing() async throws {
@@ -3058,6 +3388,18 @@ struct Hanger_ExpressTests {
         #expect(stats.currentLadderCount == 7)
         #expect(stats.legacyLadderCount == nil)
         #expect(!stats.hasLegacyLadder)
+    }
+
+    @Test func referralStatsResolverPreservesNormalizedInviteCode() async throws {
+        let stats = ReferralStatsResolver.resolve(
+            currentLadderCount: 7,
+            inviteCode: " star-test-code ",
+            legacyGraphQLCount: nil,
+            legacyParsedCount: nil,
+            legacyPageUnavailable: true
+        )
+
+        #expect(stats.inviteCode == "STAR-TEST-CODE")
     }
 
     @Test func successfulMeltRemovesPackagesImmediatelyWithoutVisibleRefreshState() async throws {
@@ -3157,6 +3499,114 @@ struct Hanger_ExpressTests {
         #expect(!appModel.isRefreshing)
 
         await appModel.refresh(scope: .hangar)
+    }
+
+    @Test func bulkMeltRemovesAllSelectedPledgesAndSubmitsAllIDs() async throws {
+        let session = makeUserSession(
+            handle: "bulk-melt-action",
+            email: "bulk-melt-action@example.com",
+            loginIdentifier: "bulk-melt-action@example.com",
+            password: "secret-bulk-melt",
+            createdAt: Date(timeIntervalSince1970: 907)
+        )
+        let firstPackage = makeHangarActionPackage(
+            id: 4201,
+            title: "Gladius Pack",
+            canGift: true,
+            canReclaim: true,
+            originalValueUSD: 90
+        )
+        let secondPackage = makeHangarActionPackage(
+            id: 4202,
+            title: "Cutter Pack",
+            canGift: false,
+            canReclaim: true,
+            originalValueUSD: 50
+        )
+        let cachedSnapshot = PreviewHangarRepository.sampleSnapshot.updatingHangar(
+            packages: [firstPackage, secondPackage],
+            fleet: [],
+            lastSyncedAt: Date(timeIntervalSince1970: 908)
+        )
+        let repository = FakeHangarRepository(hangarSnapshot: cachedSnapshot)
+        let appModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: cachedSnapshot),
+                hangarRepository: repository
+            )
+        )
+        appModel.session = session
+        appModel.savedSessions = [session]
+        appModel.loadState = .loaded(cachedSnapshot)
+
+        let packageGroups = [firstPackage, secondPackage].groupedForInventoryDisplay
+
+        try await appModel.melt(packageGroups: packageGroups)
+        await Task.yield()
+
+        let updatedSnapshot = try #require(appModel.snapshot)
+        #expect(updatedSnapshot.packages.isEmpty)
+        #expect(await repository.meltRequests() == [[firstPackage.id, secondPackage.id]])
+    }
+
+    @Test func bulkGiftRejectsSelectionWhenAnySelectedPledgeCannotBeGifted() async throws {
+        let session = makeUserSession(
+            handle: "bulk-gift-action",
+            email: "bulk-gift-action@example.com",
+            loginIdentifier: "bulk-gift-action@example.com",
+            password: "secret-bulk-gift",
+            createdAt: Date(timeIntervalSince1970: 909)
+        )
+        let giftablePackage = makeHangarActionPackage(
+            id: 4301,
+            title: "Giftable Pledge",
+            canGift: true,
+            canReclaim: true,
+            originalValueUSD: 90
+        )
+        let lockedPackage = makeHangarActionPackage(
+            id: 4302,
+            title: "Locked Pledge",
+            canGift: false,
+            canReclaim: true,
+            originalValueUSD: 50
+        )
+        let cachedSnapshot = PreviewHangarRepository.sampleSnapshot.updatingHangar(
+            packages: [giftablePackage, lockedPackage],
+            fleet: [],
+            lastSyncedAt: Date(timeIntervalSince1970: 910)
+        )
+        let repository = FakeHangarRepository(hangarSnapshot: cachedSnapshot)
+        let appModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: cachedSnapshot),
+                hangarRepository: repository
+            )
+        )
+        appModel.session = session
+        appModel.savedSessions = [session]
+        appModel.loadState = .loaded(cachedSnapshot)
+
+        do {
+            try await appModel.gift(
+                packageGroups: [giftablePackage, lockedPackage].groupedForInventoryDisplay,
+                recipientName: "",
+                recipientEmail: "recipient@example.com"
+            )
+            Issue.record("Expected bulk gift to reject a mixed giftable and non-giftable selection.")
+        } catch let error as HangarAccountActionError {
+            #expect(error == .ineligibleGiftSelection)
+        } catch {
+            Issue.record("Expected HangarAccountActionError, got \(error).")
+        }
+
+        #expect(await repository.giftRequests().isEmpty)
     }
 
     @Test func successfulUpgradeRemovesConsumedUpgradeImmediatelyWithoutVisibleRefreshState() async throws {
@@ -3535,6 +3985,95 @@ struct Hanger_ExpressTests {
     }
 }
 
+private func makeCCUTestCatalog(
+    additionalShips: [RSIShipCatalog.Ship] = [],
+    storeUpgradeOffers: [RSIShipCatalog.StoreUpgradeOffer] = []
+) -> RSIShipCatalog {
+    RSIShipCatalog(
+        ships: [
+            makeCCUTestCatalogShip(id: 1, name: "Aurora MR", manufacturer: "RSI", msrpUSD: 30, storeAvailable: true),
+            makeCCUTestCatalogShip(id: 2, name: "300i", manufacturer: "Origin", msrpUSD: 60, storeAvailable: true),
+            makeCCUTestCatalogShip(id: 3, name: "Cutlass Black", manufacturer: "Drake", msrpUSD: 110, storeAvailable: true),
+            makeCCUTestCatalogShip(id: 4, name: "Zeus Mk II MR", manufacturer: "RSI", msrpUSD: 190, storeAvailable: false)
+        ] + additionalShips,
+        storeUpgradeOffers: storeUpgradeOffers
+    )
+}
+
+private func makeCCUTestCatalogShip(
+    id: Int,
+    name: String,
+    manufacturer: String,
+    msrpUSD: Decimal,
+    storeAvailable: Bool
+) -> RSIShipCatalog.Ship {
+    RSIShipCatalog.Ship(
+        id: id,
+        name: name,
+        manufacturer: manufacturer,
+        msrpUSD: msrpUSD,
+        storeAvailability: storeAvailable ? "Available" : "Unavailable",
+        storeAvailable: storeAvailable,
+        imageURL: nil
+    )
+}
+
+private func makeCCUTestSnapshot(
+    storeCreditUSD: Decimal = 0,
+    packages: [HangarPackage],
+    buyback: [BuybackPledge]
+) -> HangarSnapshot {
+    HangarSnapshot(
+        accountHandle: "ccu-test",
+        lastSyncedAt: Date(timeIntervalSince1970: 1_000),
+        storeCreditUSD: storeCreditUSD,
+        packages: packages,
+        fleet: [],
+        buyback: buyback
+    )
+}
+
+private func makeCCUTestUpgradePackage(
+    id: Int,
+    title: String,
+    source: String,
+    target: String,
+    currentValueUSD: Decimal,
+    meltValueUSD: Decimal
+) -> HangarPackage {
+    HangarPackage(
+        id: id,
+        title: title,
+        status: "Attributed",
+        insurance: "",
+        acquiredAt: Date(timeIntervalSince1970: 1_100 + TimeInterval(id)),
+        originalValueUSD: meltValueUSD,
+        currentValueUSD: currentValueUSD,
+        canGift: true,
+        canReclaim: true,
+        canUpgrade: false,
+        contents: [
+            PackageItem(
+                id: "\(id)-upgrade",
+                title: title,
+                detail: "Ship Upgrade",
+                category: .upgrade,
+                imageURL: nil,
+                upgradePricing: PackageItem.UpgradePricing(
+                    sourceShipName: source,
+                    sourceShipMSRPUSD: nil,
+                    sourceShipImageURL: nil,
+                    targetShipName: target,
+                    targetShipMSRPUSD: nil,
+                    targetShipImageURL: nil,
+                    actualValueUSD: currentValueUSD,
+                    meltValueUSD: meltValueUSD
+                )
+            )
+        ]
+    )
+}
+
 private func makeUserSession(
     handle: String,
     email: String,
@@ -3579,6 +4118,37 @@ private func makeTestAppEnvironment(
         authDiagnostics: diagnostics,
         refreshDiagnostics: refreshDiagnostics,
         subscriptionStore: SubscriptionStore(storeKitEnabled: false)
+    )
+}
+
+private func makeHangarActionPackage(
+    id: Int,
+    title: String,
+    canGift: Bool,
+    canReclaim: Bool,
+    originalValueUSD: Decimal
+) -> HangarPackage {
+    HangarPackage(
+        id: id,
+        title: title,
+        status: "Attributed",
+        insurance: "LTI",
+        acquiredAt: Date(timeIntervalSince1970: 1_700 + TimeInterval(id)),
+        originalValueUSD: originalValueUSD,
+        currentValueUSD: originalValueUSD,
+        canGift: canGift,
+        canReclaim: canReclaim,
+        canUpgrade: true,
+        contents: [
+            PackageItem(
+                id: "\(id)-ship",
+                title: title,
+                detail: "Ship",
+                category: .ship,
+                imageURL: nil,
+                upgradePricing: nil
+            )
+        ]
     )
 }
 
@@ -3887,6 +4457,8 @@ private actor FakeHangarRepository: HangarRepository {
     private let buybackError: Error?
     private let accountError: Error?
     private var invokedScopes: [String] = []
+    private var recordedMeltRequests: [[Int]] = []
+    private var recordedGiftRequests: [[Int]] = []
 
     init(
         snapshot: HangarSnapshot? = nil,
@@ -3997,7 +4569,10 @@ private actor FakeHangarRepository: HangarRepository {
         pledgeIDs: [Int],
         password: String
     ) async throws -> MeltPackagesResult {
-        MeltPackagesResult(
+        invokedScopes.append("melt")
+        recordedMeltRequests.append(pledgeIDs)
+
+        return MeltPackagesResult(
             requestedPledgeIDs: pledgeIDs,
             completedPledgeIDs: pledgeIDs,
             failedPledgeID: nil,
@@ -4013,7 +4588,10 @@ private actor FakeHangarRepository: HangarRepository {
         recipientEmail: String,
         recipientName: String
     ) async throws -> GiftPackagesResult {
-        GiftPackagesResult(
+        invokedScopes.append("gift")
+        recordedGiftRequests.append(pledgeIDs)
+
+        return GiftPackagesResult(
             requestedPledgeIDs: pledgeIDs,
             completedPledgeIDs: pledgeIDs,
             failedPledgeID: nil,
@@ -4120,5 +4698,13 @@ private actor FakeHangarRepository: HangarRepository {
 
     func invocationLog() -> [String] {
         invokedScopes
+    }
+
+    func meltRequests() -> [[Int]] {
+        recordedMeltRequests
+    }
+
+    func giftRequests() -> [[Int]] {
+        recordedGiftRequests
     }
 }
