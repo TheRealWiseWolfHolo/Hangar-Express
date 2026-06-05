@@ -2,6 +2,11 @@ import StoreKit
 import SwiftUI
 import UIKit
 
+private enum LegalLinkDestinations {
+    static let privacyPolicyURL = URL(string: "https://github.com/TheRealWiseWolfHolo/Hangar-Express/blob/main/PRIVACY_POLICY.md")!
+    static let termsOfUseURL = URL(string: "https://github.com/TheRealWiseWolfHolo/Hangar-Express/blob/main/TERMS_OF_USE.md")!
+}
+
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
@@ -22,8 +27,6 @@ struct SettingsView: View {
 
     private let officialRSIURL = URL(string: "https://robertsspaceindustries.com/en/")!
     private let repositoryURL = URL(string: "https://github.com/TheRealWiseWolfHolo/Hangar-Express")!
-    private let privacyPolicyURL = URL(string: "https://github.com/TheRealWiseWolfHolo/Hangar-Express/blob/PreRelease-Polish/PRIVACY_POLICY.md")!
-    private let termsOfUseURL = URL(string: "https://github.com/TheRealWiseWolfHolo/Hangar-Express/blob/PreRelease-Polish/TERMS_OF_USE.md")!
     private let spviewerURL = URL(string: "https://www.spviewer.eu/")!
     private let starCitizenWikiURL = URL(string: "https://starcitizen.tools/")!
     private let anywhereExpURL = URL(string: "https://robertsspaceindustries.com/en/orgs/ANYWHEREXP")!
@@ -214,11 +217,11 @@ struct SettingsView: View {
                         Label("Official RSI Website", systemImage: "link")
                     }
 
-                    Link(destination: privacyPolicyURL) {
+                    Link(destination: LegalLinkDestinations.privacyPolicyURL) {
                         Label("Privacy Policy", systemImage: "lock.shield")
                     }
 
-                    Link(destination: termsOfUseURL) {
+                    Link(destination: LegalLinkDestinations.termsOfUseURL) {
                         Label("Terms of Use", systemImage: "doc.text")
                     }
 
@@ -682,6 +685,8 @@ private struct ProPlanActionsCard: View {
             Text("Purchases are managed by Apple. You can change, cancel, or restore subscriptions from your Apple Account at any time.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            SubscriptionLegalLinks()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
@@ -721,6 +726,27 @@ private struct ProPlanActionsCard: View {
         }
         .buttonStyle(.bordered)
         .disabled(statusIsBusy)
+    }
+}
+
+private struct SubscriptionLegalLinks: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider()
+
+            Text("Review before purchase")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Link(destination: LegalLinkDestinations.privacyPolicyURL) {
+                Label("Privacy Policy", systemImage: "lock.shield")
+            }
+
+            Link(destination: LegalLinkDestinations.termsOfUseURL) {
+                Label("Terms of Use (EULA)", systemImage: "doc.text")
+            }
+        }
+        .font(.caption)
     }
 }
 
