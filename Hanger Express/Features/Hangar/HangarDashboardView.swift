@@ -45,6 +45,8 @@ struct HangarDashboardView: View {
     private let allPackageGroups: [GroupedHangarPackage]
 
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
+    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
+    @AppStorage(DisplayPreferences.hangarUpgradedShipDisplayModeKey) private var showsUpgradedShipInHangar = DisplayPreferences.hangarUpgradedShipDisplayEnabledByDefault
     @AppStorage(DisplayPreferences.hangarGiftedHighlightKey) private var highlightsGiftedHangarRows = DisplayPreferences.hangarGiftedHighlightEnabledByDefault
     @AppStorage(DisplayPreferences.hangarUpgradedHighlightKey) private var highlightsUpgradedHangarRows = DisplayPreferences.hangarUpgradedHighlightEnabledByDefault
     @AppStorage(DisplayPreferences.sharePictureAutoCopiesDebugLogKey) private var autoCopiesSharePictureDebugLog = DisplayPreferences.sharePictureAutoCopiesDebugLogEnabledByDefault
@@ -60,6 +62,7 @@ struct HangarDashboardView: View {
     @State private var sharePicturePayload: HangarSharePicturePayload?
     @State private var sharePictureError: HangarSharePictureError?
     @State private var isGeneratingSharePicture = false
+    @State private var itemTranslationDictionary: HangarItemTranslationDictionary?
 
     init(appModel: AppModel, snapshot: HangarSnapshot) {
         self.appModel = appModel
@@ -68,6 +71,7 @@ struct HangarDashboardView: View {
     }
 
     var body: some View {
+        let currentItemTranslator = itemTranslator
         let visiblePackageGroups = filteredPackageGroups
         let selection = selectionState(for: visiblePackageGroups)
 
@@ -140,6 +144,7 @@ struct HangarDashboardView: View {
                             } label: {
                                 HangarSelectablePackageGroupRow(
                                     packageGroup: packageGroup,
+                                    itemTranslator: currentItemTranslator,
                                     isSelected: isSelected,
                                     reloadToken: appModel.hangarFleetImageReloadToken
                                 )
@@ -156,11 +161,13 @@ struct HangarDashboardView: View {
                                 HangarPackageDetailView(
                                     appModel: appModel,
                                     packageGroup: packageGroup,
+                                    itemTranslator: currentItemTranslator,
                                     reloadToken: appModel.hangarFleetImageReloadToken
                                 )
                             } label: {
                                 HangarPackageGroupRow(
                                     packageGroup: packageGroup,
+                                    itemTranslator: currentItemTranslator,
                                     reloadToken: appModel.hangarFleetImageReloadToken
                                 )
                             }
@@ -198,6 +205,9 @@ struct HangarDashboardView: View {
                 }
             }
             .id(appLanguageRawValue)
+            .task(id: hangarItemLanguageRawValue) {
+                await loadItemTranslationDictionary()
+            }
             .searchable(
                 text: $searchText,
                 isPresented: $isSearchPresented,
@@ -350,6 +360,7 @@ struct HangarDashboardView: View {
 
     private var filteredPackageGroups: [GroupedHangarPackage] {
         let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
+        let currentItemTranslator = itemTranslator
 
         return allPackageGroups.filter { packageGroup in
             let package = packageGroup.representative
@@ -376,14 +387,46 @@ struct HangarDashboardView: View {
             }
 
             let haystack = [
-                package.title,
+                currentItemTranslator.searchableText(for: package.title),
+                currentItemTranslator.searchableText(
+                    for: package.debugDisplayTitle(showsUpgradedShipInHangar: showsUpgradedShipInHangar)
+                ),
                 package.status,
                 package.searchableInsuranceText,
-                package.contents.map(\.title).joined(separator: " ")
+                currentItemTranslator.searchableText(
+                    for: package.contents.flatMap { item -> [String] in
+                        var titles = [item.title]
+                        if let pricing = item.upgradePricing {
+                            titles.append(pricing.sourceShipName)
+                            titles.append(pricing.targetShipName)
+                        }
+                        return titles
+                    }
+                )
             ].joined(separator: " ").localizedLowercase
 
             return haystack.contains(normalizedSearchText)
         }
+    }
+
+    private var itemTranslator: HangarItemTranslator {
+        HangarItemTranslator(
+            language: HangarItemLanguage.resolved(from: hangarItemLanguageRawValue),
+            dictionary: itemTranslationDictionary
+        )
+    }
+
+    private func loadItemTranslationDictionary() async {
+        let language = HangarItemLanguage.resolved(from: hangarItemLanguageRawValue)
+        guard language.translationLocaleIdentifier != nil else {
+            itemTranslationDictionary = nil
+            return
+        }
+
+        itemTranslationDictionary = await HostedHangarItemTranslationStore.shared.dictionary(
+            for: language,
+            using: HostedHangarItemTranslationClient(language: language)
+        )
     }
 
     private func matchesSearchFilters(for package: HangarPackage) -> Bool {
@@ -726,6 +769,7 @@ private enum HangarCouponParser {
 struct HangarPackageGroupRow: View {
     @AppStorage(DisplayPreferences.hangarUpgradedShipDisplayModeKey) private var showsUpgradedShipInHangar = DisplayPreferences.hangarUpgradedShipDisplayEnabledByDefault
     let packageGroup: GroupedHangarPackage
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
 
     private var package: HangarPackage {
@@ -758,7 +802,8 @@ struct HangarPackageGroupRow: View {
             rawTitle = package.title
         }
 
-        return HangarCouponParser.info(from: rawTitle)?.cardTitle ?? rawTitle
+        let displayTitle = HangarCouponParser.info(from: rawTitle)?.cardTitle ?? rawTitle
+        return itemTranslator.translated(displayTitle)
     }
 
     private var insuranceBadgeText: String? {
@@ -904,6 +949,7 @@ struct HangarPackageGroupRow: View {
 
 private struct HangarSelectablePackageGroupRow: View {
     let packageGroup: GroupedHangarPackage
+    let itemTranslator: HangarItemTranslator
     let isSelected: Bool
     let reloadToken: UUID?
 
@@ -918,6 +964,7 @@ private struct HangarSelectablePackageGroupRow: View {
 
             HangarPackageGroupRow(
                 packageGroup: packageGroup,
+                itemTranslator: itemTranslator,
                 reloadToken: reloadToken
             )
         }
@@ -925,8 +972,8 @@ private struct HangarSelectablePackageGroupRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
             isSelected
-                ? Text("Selected \(packageGroup.representative.title)")
-                : Text("Not selected \(packageGroup.representative.title)")
+                ? Text("Selected \(itemTranslator.translated(packageGroup.representative.title))")
+                : Text("Not selected \(itemTranslator.translated(packageGroup.representative.title))")
         )
     }
 }
@@ -1071,6 +1118,7 @@ struct HangarPackageDetailView: View {
 
     let appModel: AppModel
     let packageGroup: GroupedHangarPackage
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
 
     @State private var presentedActionSheet: PresentedActionSheet?
@@ -1113,6 +1161,11 @@ struct HangarPackageDetailView: View {
 
     private var couponInfo: HangarCouponInfo? {
         HangarCouponParser.info(from: package.title)
+    }
+
+    private var displayTitle: String {
+        let title = couponInfo?.cardTitle ?? package.title
+        return itemTranslator.translated(title)
     }
 
     private var displayThumbnailURL: URL? {
@@ -1186,6 +1239,7 @@ struct HangarPackageDetailView: View {
                     ForEach(primaryContents) { item in
                         PackageItemRow(
                             item: item,
+                            itemTranslator: itemTranslator,
                             reloadToken: reloadToken
                         )
                     }
@@ -1198,7 +1252,10 @@ struct HangarPackageDetailView: View {
                 Section {
                     VStack(alignment: .leading, spacing: 12) {
                         ForEach(alsoContainsContents) { item in
-                            PackageAlsoContainsRow(item: item)
+                            PackageAlsoContainsRow(
+                                item: item,
+                                itemTranslator: itemTranslator
+                            )
                         }
                     }
                     .padding(.vertical, 4)
@@ -1266,7 +1323,7 @@ struct HangarPackageDetailView: View {
                 }
             }
         }
-        .navigationTitle(package.title)
+        .navigationTitle(displayTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -4122,6 +4179,7 @@ private struct HangarUpgradeConfirmationView: View {
 
 private struct PackageItemRow: View {
     let item: PackageItem
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
 
     var body: some View {
@@ -4141,7 +4199,7 @@ private struct PackageItemRow: View {
             )
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(item.title)
+                Text(itemTranslator.translated(item.title))
                     .font(.headline)
 
                 Text("\(item.category.rawValue) • \(item.detail)")
@@ -4149,7 +4207,10 @@ private struct PackageItemRow: View {
                     .foregroundStyle(.secondary)
 
                 if let pricing = item.upgradePricing {
-                    UpgradePricingSummary(pricing: pricing)
+                    UpgradePricingSummary(
+                        pricing: pricing,
+                        itemTranslator: itemTranslator
+                    )
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -4166,7 +4227,7 @@ private struct PackageItemRow: View {
                 .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(item.title)
+                Text(itemTranslator.translated(item.title))
                     .font(.headline)
 
                 Text("\(item.category.rawValue) • \(item.detail)")
@@ -4174,7 +4235,10 @@ private struct PackageItemRow: View {
                     .foregroundStyle(.secondary)
 
                 if let pricing = item.upgradePricing {
-                    UpgradePricingSummary(pricing: pricing)
+                    UpgradePricingSummary(
+                        pricing: pricing,
+                        itemTranslator: itemTranslator
+                    )
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -4252,6 +4316,7 @@ private struct PackageDetailItemThumbnailView: View {
 
 private struct PackageAlsoContainsRow: View {
     let item: PackageItem
+    let itemTranslator: HangarItemTranslator
 
     private var detailText: String? {
         let detail = item.detail.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4271,7 +4336,7 @@ private struct PackageAlsoContainsRow: View {
                 .frame(width: 9, height: 5)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(item.title)
+                Text(itemTranslator.translated(item.title))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
 
@@ -4288,6 +4353,7 @@ private struct PackageAlsoContainsRow: View {
 
 private struct UpgradePricingSummary: View {
     let pricing: PackageItem.UpgradePricing
+    let itemTranslator: HangarItemTranslator
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -4295,11 +4361,11 @@ private struct UpgradePricingSummary: View {
             LabeledValueRow(label: "Actual Value", value: pricing.actualValueUSD?.usdString ?? "Unavailable")
             LabeledValueRow(
                 label: "From",
-                value: "\(pricing.sourceShipName) • MSRP \(pricing.sourceShipMSRPUSD?.usdString ?? "Unavailable")"
+                value: "\(itemTranslator.translated(pricing.sourceShipName)) • MSRP \(pricing.sourceShipMSRPUSD?.usdString ?? "Unavailable")"
             )
             LabeledValueRow(
                 label: "To",
-                value: "\(pricing.targetShipName) • MSRP \(pricing.targetShipMSRPUSD?.usdString ?? "Unavailable")"
+                value: "\(itemTranslator.translated(pricing.targetShipName)) • MSRP \(pricing.targetShipMSRPUSD?.usdString ?? "Unavailable")"
             )
         }
         .padding(.top, 4)

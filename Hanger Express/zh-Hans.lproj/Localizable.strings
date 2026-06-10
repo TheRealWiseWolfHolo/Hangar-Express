@@ -651,3 +651,6 @@
 "RSI did not remove %@ within %lld seconds." = "RSI 未在 %lld 秒内移除 %@。";
 "Auto Copy Share Picture Log" = "自动复制分享图片日志";
 "Control hangar artwork, row highlights, and share-picture diagnostics." = "控制机库图像、行高亮和分享图片诊断。";
+"Item Language" = "物品语言";
+"Original" = "原文";
+"Choose the app language, item name language, and appearance." = "选择应用语言、物品名称语言和外观。";

@@ -335,6 +335,7 @@ struct HangarLogView: View {
             HangarPackageDetailView(
                 appModel: appModel,
                 packageGroup: packageGroup,
+                itemTranslator: .original,
                 reloadToken: appModel.hangarFleetImageReloadToken
             )
         case let .ship(shipGroup):

@@ -2379,6 +2379,151 @@ struct Hanger_ExpressTests {
                 URL(string: "https://therealwisewolfholo.github.io/StarCitizen-Info/ship-details.json")!
             ]
         )
+        #expect(
+            HostedShipFeedEndpoints.itemTranslationURLs(for: .simplifiedChinese) == [
+                URL(string: "https://starcitizen-info.pages.dev/item-translations/zh-Hans.json")!,
+                URL(string: "https://therealwisewolfholo.github.io/StarCitizen-Info/item-translations/zh-Hans.json")!
+            ]
+        )
+        #expect(HostedShipFeedEndpoints.itemTranslationURLs(for: .original).isEmpty)
+    }
+
+    @Test func hostedHangarItemTranslationFeedDecodesStrictDictionary() throws {
+        let dictionary = try HostedHangarItemTranslationClient.decodeDictionary(
+            from: makeHangarItemTranslationPayload(),
+            expectedLocale: "zh-Hans"
+        )
+
+        #expect(dictionary.translation(for: "F8C Lightning") == "F8C 闪电")
+        #expect(dictionary.translation(for: "Anvil F8C Lightning") == "F8C 闪电")
+        #expect(dictionary.translation(for: "  f8c   lightning  ") == "F8C 闪电")
+        #expect(dictionary.translation(for: "Gladius") == nil)
+    }
+
+    @Test func hostedHangarItemTranslationFeedRejectsDuplicateKeys() throws {
+        let data = Data(
+            #"""
+            {
+              "locale": "zh-Hans",
+              "version": 1,
+              "count": 2,
+              "entries": [
+                {
+                  "source": "F8C Lightning",
+                  "translation": "F8C 闪电",
+                  "kind": "ship",
+                  "aliases": []
+                },
+                {
+                  "source": "Other",
+                  "translation": "其他",
+                  "kind": "ship",
+                  "aliases": ["f8c lightning"]
+                }
+              ]
+            }
+            """#.utf8
+        )
+
+        var didThrowInvalidFeedError = false
+        do {
+            _ = try HostedHangarItemTranslationClient.decodeDictionary(
+                from: data,
+                expectedLocale: "zh-Hans"
+            )
+        } catch let error as HostedShipCatalogError {
+            didThrowInvalidFeedError = true
+            #expect(error.errorDescription?.contains("Duplicate translation key") == true)
+        }
+
+        #expect(didThrowInvalidFeedError)
+    }
+
+    @Test func hostedHangarItemTranslationClientFallsBackAcrossURLs() async throws {
+        let testID = UUID().uuidString
+        let primaryURL = try #require(URL(string: "https://translation.example.com/\(testID)/primary.json"))
+        let fallbackURL = try #require(URL(string: "https://translation.example.com/\(testID)/fallback.json"))
+        TranslationMockURLProtocol.register(.response(statusCode: 503, data: Data()), for: primaryURL)
+        TranslationMockURLProtocol.register(.response(statusCode: 200, data: makeHangarItemTranslationPayload()), for: fallbackURL)
+        let session = makeTranslationMockURLSession()
+
+        let fetchedDictionary = try await HostedHangarItemTranslationClient(
+            language: .simplifiedChinese,
+            urls: [primaryURL, fallbackURL],
+            urlSession: session
+        ).fetchDictionary()
+
+        #expect(fetchedDictionary.dictionary.translation(for: "Anvil F8C Lightning") == "F8C 闪电")
+    }
+
+    @Test func hostedHangarItemTranslationStoreFallsBackToDiskCache() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let testID = UUID().uuidString
+        let feedURL = try #require(URL(string: "https://translation.example.com/\(testID)/zh-Hans.json"))
+        let offlineURL = try #require(URL(string: "https://translation.example.com/\(testID)/offline-zh-Hans.json"))
+        TranslationMockURLProtocol.register(.response(statusCode: 200, data: makeHangarItemTranslationPayload()), for: feedURL)
+        TranslationMockURLProtocol.register(.error(URLError(.notConnectedToInternet)), for: offlineURL)
+        let onlineSession = makeTranslationMockURLSession()
+        let firstStore = HostedHangarItemTranslationStore(directoryURL: tempDirectory)
+        let fetchedDictionary = await firstStore.dictionary(
+            for: .simplifiedChinese,
+            using: HostedHangarItemTranslationClient(
+                language: .simplifiedChinese,
+                urls: [feedURL],
+                urlSession: onlineSession
+            )
+        )
+
+        #expect(fetchedDictionary?.translation(for: "F8C Lightning") == "F8C 闪电")
+
+        let offlineSession = makeTranslationMockURLSession()
+        let secondStore = HostedHangarItemTranslationStore(directoryURL: tempDirectory)
+        let cachedDictionary = await secondStore.dictionary(
+            for: .simplifiedChinese,
+            using: HostedHangarItemTranslationClient(
+                language: .simplifiedChinese,
+                urls: [offlineURL],
+                urlSession: offlineSession
+            )
+        )
+
+        #expect(cachedDictionary?.translation(for: "Anvil F8C Lightning") == "F8C 闪电")
+        await secondStore.clear()
+    }
+
+    @Test func hangarItemTranslatorUsesExactDictionaryAndBilingualSearchText() throws {
+        let dictionary = try HostedHangarItemTranslationClient.decodeDictionary(
+            from: makeHangarItemTranslationPayload(),
+            expectedLocale: "zh-Hans"
+        )
+        let translator = HangarItemTranslator(language: .simplifiedChinese, dictionary: dictionary)
+        let originalTranslator = HangarItemTranslator(language: .original, dictionary: dictionary)
+
+        #expect(translator.translated("F8C Lightning") == "F8C 闪电")
+        #expect(translator.translated("Anvil F8C Lightning") == "F8C 闪电")
+        #expect(translator.translated("Unknown Ship") == "Unknown Ship")
+        #expect(originalTranslator.translated("F8C Lightning") == "F8C Lightning")
+
+        let searchableText = translator.searchableText(for: "F8C Lightning")
+        #expect(searchableText.localizedLowercase.contains("f8c lightning"))
+        #expect(searchableText.contains("F8C 闪电"))
+    }
+
+    @Test func appLanguageAndHangarItemLanguageUseIndependentPreferences() throws {
+        let suiteName = "HangarItemLanguageTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        defaults.set(AppLanguage.english.rawValue, forKey: AppLanguage.storageKey)
+        defaults.set(HangarItemLanguage.simplifiedChinese.rawValue, forKey: HangarItemLanguage.storageKey)
+
+        #expect(AppLanguage.storageKey != HangarItemLanguage.storageKey)
+        #expect(defaults.string(forKey: AppLanguage.storageKey) == AppLanguage.english.rawValue)
+        #expect(defaults.string(forKey: HangarItemLanguage.storageKey) == HangarItemLanguage.simplifiedChinese.rawValue)
+        #expect(HangarItemLanguage.resolved(from: "") == .original)
     }
 
     @Test func hostedShipDetailCatalogDecodesCurrentHostedPayloadShape() async throws {
@@ -3039,8 +3184,8 @@ struct Hanger_ExpressTests {
             sourcePackageID: 102,
             sourcePackageName: "Fleet Bundle",
             meltValueUSD: 825,
-            canGift: true,
-            canReclaim: true
+            canGift: false,
+            canReclaim: false
         )
         let insuranceVariant = FleetShip(
             id: 3,
@@ -4204,6 +4349,33 @@ private func makeHostedShipDetailPayload(description: String, technicalValue: St
     )
 }
 
+private func makeHangarItemTranslationPayload() -> Data {
+    Data(
+        #"""
+        {
+          "locale": "zh-Hans",
+          "version": 1,
+          "generatedAt": "2026-06-10T00:00:00.000Z",
+          "count": 2,
+          "entries": [
+            {
+              "source": "F8C Lightning",
+              "translation": "F8C 闪电",
+              "kind": "ship",
+              "aliases": ["Anvil F8C Lightning"]
+            },
+            {
+              "source": "Package - Praetorian Pack",
+              "translation": "组合包 - 执政官包",
+              "kind": "package",
+              "aliases": []
+            }
+          ]
+        }
+        """#.utf8
+    )
+}
+
 private func jsonStringLiteral(_ value: String) -> String {
     let data = try? JSONSerialization.data(withJSONObject: [value])
     let arrayLiteral = data.flatMap { String(data: $0, encoding: .utf8) } ?? "[\"\"]"
@@ -4293,6 +4465,12 @@ private func makeMockURLSession(
     return URLSession(configuration: configuration)
 }
 
+private func makeTranslationMockURLSession() -> URLSession {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [TranslationMockURLProtocol.self]
+    return URLSession(configuration: configuration)
+}
+
 private final class FakeAuthenticationWebSession: AuthenticationWebSessionProviding, @unchecked Sendable {
     let signInResponse: BrowserGraphQLResponse
     let twoFactorResponse: BrowserGraphQLResponse
@@ -4369,6 +4547,71 @@ private final class MockURLProtocol: URLProtocol, @unchecked Sendable {
     }
 
     override func stopLoading() {}
+}
+
+private enum TranslationMockURLResponse: @unchecked Sendable {
+    case response(statusCode: Int, data: Data)
+    case error(Error)
+}
+
+private final class TranslationMockURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var responses: [URL: TranslationMockURLResponse] = [:]
+
+    static func register(_ response: TranslationMockURLResponse, for url: URL) {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+
+        responses[url] = response
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "translation.example.com"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let url = request.url,
+              let response = Self.registeredResponse(for: url) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+
+        switch response {
+        case let .response(statusCode, data):
+            guard let httpResponse = HTTPURLResponse(
+                url: url,
+                statusCode: statusCode,
+                httpVersion: nil,
+                headerFields: nil
+            ) else {
+                client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+                return
+            }
+
+            client?.urlProtocol(self, didReceive: httpResponse, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        case let .error(error):
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+
+    private static func registeredResponse(for url: URL) -> TranslationMockURLResponse? {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+
+        return responses[url]
+    }
 }
 
 private final class MutableImageDataBox: @unchecked Sendable {
