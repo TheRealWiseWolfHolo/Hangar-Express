@@ -791,6 +791,7 @@ final class AppModel {
         await imageCache.clear()
         await HostedShipCatalogStore.shared.clear()
         await HostedShipDetailCatalogStore.shared.clear()
+        await HostedHangarItemTranslationStore.shared.clear()
         hangarFleetImageReloadToken = UUID()
         buybackImageReloadToken = UUID()
         accountImageReloadToken = UUID()

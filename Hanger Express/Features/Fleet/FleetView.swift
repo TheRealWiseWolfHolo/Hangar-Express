@@ -1431,11 +1431,13 @@ private struct FleetShipPledgeSheet: View {
                             HangarPackageDetailView(
                                 appModel: appModel,
                                 packageGroup: packageGroup,
+                                itemTranslator: .original,
                                 reloadToken: reloadToken
                             )
                         } label: {
                             HangarPackageGroupRow(
                                 packageGroup: packageGroup,
+                                itemTranslator: .original,
                                 reloadToken: reloadToken
                             )
                         }

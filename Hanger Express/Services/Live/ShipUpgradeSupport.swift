@@ -535,6 +535,7 @@ nonisolated enum HostedShipCatalogError: Error, LocalizedError {
     case httpStatus(Int)
     case emptyLimitedShipSaleFeed
     case invalidLimitedShipSaleFeed(String)
+    case invalidItemTranslationFeed(String)
 
     var errorDescription: String? {
         switch self {
@@ -544,6 +545,8 @@ nonisolated enum HostedShipCatalogError: Error, LocalizedError {
             return "Hosted limited ship sale feed is empty."
         case let .invalidLimitedShipSaleFeed(reason):
             return "Hosted limited ship sale feed is invalid. \(reason)"
+        case let .invalidItemTranslationFeed(reason):
+            return "Hosted item translation feed is invalid. \(reason)"
         }
     }
 }
@@ -1158,6 +1161,21 @@ public nonisolated enum HostedShipFeedEndpoints {
         primaryBaseURL.appendingPathComponent("limited-ships.json"),
         fallbackBaseURL.appendingPathComponent("limited-ships.json")
     ]
+
+    static func itemTranslationURLs(for language: HangarItemLanguage) -> [URL] {
+        guard let locale = language.translationLocaleIdentifier else {
+            return []
+        }
+
+        return [
+            primaryBaseURL
+                .appendingPathComponent("item-translations")
+                .appendingPathComponent("\(locale).json"),
+            fallbackBaseURL
+                .appendingPathComponent("item-translations")
+                .appendingPathComponent("\(locale).json")
+        ]
+    }
 }
 
 private nonisolated struct RemoteHostedLimitedShipSalePayload: Decodable {

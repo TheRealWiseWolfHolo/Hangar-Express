@@ -1598,9 +1598,7 @@ nonisolated struct FleetShip: Identifiable, Hashable, Sendable, Codable {
             displayName: displayName,
             manufacturer: manufacturer,
             role: role,
-            insurance: insurance,
-            canGift: canGift,
-            canReclaim: canReclaim
+            insurance: insurance
         )
     }
 
@@ -1609,8 +1607,6 @@ nonisolated struct FleetShip: Identifiable, Hashable, Sendable, Codable {
         let manufacturer: String
         let role: String
         let insurance: String
-        let canGift: Bool
-        let canReclaim: Bool
     }
 }
 

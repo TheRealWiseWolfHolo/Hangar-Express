@@ -10,6 +10,7 @@ private enum LegalLinkDestinations {
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
+    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
     @AppStorage(AppAppearance.storageKey) private var appAppearanceRawValue = AppAppearance.system.rawValue
     @AppStorage(SyncPreferences.workerCountKey) private var syncWorkerCount = Double(SyncPreferences.defaultWorkerCount)
     @AppStorage(DisplayPreferences.compositeUpgradeThumbnailModeKey) private var usesCompositeUpgradeThumbnails = DisplayPreferences.compositeUpgradeThumbnailsEnabledByDefault
@@ -51,6 +52,14 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.menu)
 
+                    Picker("Item Language", selection: $hangarItemLanguageRawValue) {
+                        ForEach(HangarItemLanguage.allCases) { language in
+                            language.label
+                                .tag(language.rawValue)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
                     Picker("Appearance", selection: $appAppearanceRawValue) {
                         ForEach(AppAppearance.allCases) { appearance in
                             appearance.label
@@ -61,7 +70,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Display")
                 } footer: {
-                    Text("Choose the app language and appearance.")
+                    Text("Choose the app language, item name language, and appearance.")
                 }
 
                 Section {
