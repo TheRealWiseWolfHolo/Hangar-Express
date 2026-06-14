@@ -69,12 +69,12 @@ nonisolated enum LimitedShipAccessError: LocalizedError, Sendable {
         case .deviceMismatch:
             return "That access code is not assigned to this device ID."
         case let .codeAlreadyRedeemed(redeemedAt):
-            return "That access code was already used on this device at \(redeemedAt.formatted(date: .abbreviated, time: .shortened))."
+            return "That access code was already used on this device at \(AppLocalizer.displayDateTime(redeemedAt))."
         case .audienceMismatch:
             return "That access code is not assigned to the current RSI email."
         case let .timedCodeAlreadyUsed(expiresAt):
             if let expiresAt {
-                return "That 24-hour access code was already used on this device and expired at \(expiresAt.formatted(date: .abbreviated, time: .shortened))."
+                return "That 24-hour access code was already used on this device and expired at \(AppLocalizer.displayDateTime(expiresAt))."
             }
 
             return "That 24-hour access code was already used on this device."

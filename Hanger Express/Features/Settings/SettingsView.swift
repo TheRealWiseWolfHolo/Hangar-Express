@@ -21,6 +21,7 @@ struct SettingsView: View {
     @AppStorage(DisplayPreferences.sharePictureAutoCopiesDebugLogKey) private var autoCopiesSharePictureDebugLog = DisplayPreferences.sharePictureAutoCopiesDebugLogEnabledByDefault
     @AppStorage(DisplayPreferences.hangarBulkSelectionKey) private var enablesHangarBulkSelection = DisplayPreferences.hangarBulkSelectionEnabledByDefault
     @State private var isShowingClearCacheAlert = false
+    @State private var isShowingClearTranslationCacheAlert = false
     @State private var isShowingProPlans = false
 
     let appModel: AppModel
@@ -44,7 +45,7 @@ struct SettingsView: View {
                 )
 
                 Section {
-                    Picker("Language", selection: $appLanguageRawValue) {
+                    Picker("App Language", selection: $appLanguageRawValue) {
                         ForEach(AppLanguage.allCases) { language in
                             language.label
                                 .tag(language.rawValue)
@@ -59,6 +60,9 @@ struct SettingsView: View {
                         }
                     }
                     .pickerStyle(.menu)
+                    .onChange(of: hangarItemLanguageRawValue) { _, _ in
+                        appModel.requestItemTranslationPreprocessingForCurrentSnapshot()
+                    }
 
                     Picker("Appearance", selection: $appAppearanceRawValue) {
                         ForEach(AppAppearance.allCases) { appearance in
@@ -70,7 +74,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Display")
                 } footer: {
-                    Text("Choose the app language, item name language, and appearance.")
+                    Text("Choose the app language, item language, and appearance. Item language uses StarCitizen-Info terms first, then the on-device translation model when available.")
                 }
 
                 Section {
@@ -181,10 +185,16 @@ struct SettingsView: View {
                         Label("Clear Local Cache", systemImage: "trash")
                     }
                     .disabled(appModel.isRefreshing)
+
+                    Button(role: .destructive) {
+                        isShowingClearTranslationCacheAlert = true
+                    } label: {
+                        Label("Clear Translation Cache", systemImage: "character.book.closed")
+                    }
                 } header: {
                     Text("Storage")
                 } footer: {
-                    Text("Clears downloaded images and saved local hangar snapshots without removing saved accounts, cookies, or credentials. Confirming this will immediately perform a full account reload with the currently saved RSI session.")
+                    Text("Local cache clears downloaded images and saved hangar snapshots, then performs a full account reload. Translation cache clears only the hosted item dictionary and saved on-device translations. Neither action removes saved accounts, cookies, or credentials.")
                 }
 
                 Section {
@@ -268,7 +278,18 @@ struct SettingsView: View {
                     }
                 }
             } message: {
-                Text("Clearing local cache removes downloaded images and saved local snapshots. Hangar Express will then run a full reload to rebuild everything from RSI.")
+                Text("Clearing local cache removes downloaded images and saved local snapshots. Hangar Express will then run a full reload to rebuild account data from RSI. Translation cache is not affected.")
+            }
+            .alert("Clear Translation Cache?", isPresented: $isShowingClearTranslationCacheAlert) {
+                Button("Cancel", role: .cancel) {}
+                Button("Clear Translation Cache", role: .destructive) {
+                    dismiss()
+                    Task {
+                        await appModel.clearTranslationCache()
+                    }
+                }
+            } message: {
+                Text("Clearing translation cache removes the hosted item translation dictionary and saved on-device translations. Your hangar snapshots, images, accounts, cookies, and credentials are not affected.")
             }
             .sheet(isPresented: $isShowingProPlans) {
                 ProPlansSheet(subscriptionStore: appModel.subscriptionStore)
@@ -921,7 +942,7 @@ private func subscriptionStatusIsBusy(_ purchaseStatus: SubscriptionStore.Purcha
 }
 
 private func formattedSubscriptionDate(_ date: Date) -> String {
-    date.formatted(date: .abbreviated, time: .omitted)
+    AppLocalizer.displayDate(date)
 }
 
 @MainActor

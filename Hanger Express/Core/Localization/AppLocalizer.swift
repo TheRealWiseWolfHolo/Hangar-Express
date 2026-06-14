@@ -26,6 +26,39 @@ enum AppLocalizer {
         String(format: string(key), locale: currentLocale, arguments: arguments)
     }
 
+    nonisolated static func displayDate(_ date: Date) -> String {
+        if usesChineseDateFormat {
+            return fixedDateFormatter(format: "yyyy/MM/dd").string(from: date)
+        }
+
+        return date.formatted(
+            Date.FormatStyle(date: .abbreviated, time: .omitted)
+                .locale(currentLocale)
+        )
+    }
+
+    nonisolated static func displayDateTime(_ date: Date) -> String {
+        if usesChineseDateFormat {
+            return fixedDateFormatter(format: "yyyy/MM/dd HH:mm").string(from: date)
+        }
+
+        return date.formatted(
+            Date.FormatStyle(date: .abbreviated, time: .shortened)
+                .locale(currentLocale)
+        )
+    }
+
+    nonisolated static func displayDateTimeWithSeconds(_ date: Date) -> String {
+        if usesChineseDateFormat {
+            return fixedDateFormatter(format: "yyyy/MM/dd HH:mm:ss").string(from: date)
+        }
+
+        return date.formatted(
+            Date.FormatStyle(date: .abbreviated, time: .standard)
+                .locale(currentLocale)
+        )
+    }
+
     nonisolated private static var resolvedBundle: Bundle {
         guard let localizationIdentifier = currentLanguage.bundleLocalizationIdentifier,
               let path = defaultBundle.path(forResource: localizationIdentifier, ofType: "lproj"),
@@ -34,5 +67,17 @@ enum AppLocalizer {
         }
 
         return bundle
+    }
+
+    nonisolated private static var usesChineseDateFormat: Bool {
+        currentLocale.language.languageCode?.identifier == "zh"
+    }
+
+    nonisolated private static func fixedDateFormatter(format: String) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = format
+        return formatter
     }
 }

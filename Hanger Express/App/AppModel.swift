@@ -1,6 +1,21 @@
 import Foundation
 import Observation
 
+private nonisolated enum ItemTranslationDictionaryLoadResult: Sendable {
+    case loaded(HangarItemTranslationDictionary)
+    case unavailable
+    case timedOut
+
+    var dictionary: HangarItemTranslationDictionary? {
+        switch self {
+        case let .loaded(dictionary):
+            return dictionary
+        case .unavailable, .timedOut:
+            return nil
+        }
+    }
+}
+
 enum SyncPreferences {
     static let workerCountKey = "sync.workerCount"
     static let defaultWorkerCount = ProSubscriptionConfiguration.standardRefreshWorkerLimit
@@ -175,6 +190,233 @@ final class AppModel {
         }
     }
 
+    struct ItemTranslationPreprocessPrompt: Identifiable {
+        enum Reason {
+            case missingCache
+            case cacheCleared
+        }
+
+        let id = UUID()
+        let language: HangarItemLanguage
+        let reason: Reason
+
+        var title: String {
+            switch language {
+            case .original:
+                switch reason {
+                case .missingCache:
+                    return AppLocalizer.string("Pre-process Hangar Item Translations?")
+                case .cacheCleared:
+                    return AppLocalizer.string("Rebuild Hangar Item Translations?")
+                }
+            case .simplifiedChinese:
+                switch reason {
+                case .missingCache:
+                    return "预处理机库物品翻译？"
+                case .cacheCleared:
+                    return "重建机库物品翻译？"
+                }
+            }
+        }
+
+        var message: String {
+            switch language {
+            case .original:
+                switch reason {
+                case .missingCache:
+                    return AppLocalizer.string("Hangar Express could not find a saved translation cache for your selected hangar item language. Pre-process now to translate this hangar in the background and keep browsing smooth.")
+                case .cacheCleared:
+                    return AppLocalizer.string("Translation cache was cleared. Rebuild the translation cache now to keep browsing smooth.")
+                }
+            case .simplifiedChinese:
+                switch reason {
+                case .missingCache:
+                    return "未找到当前机库物品语言的已保存翻译缓存。现在预处理可在后台翻译此机库，并保持浏览流畅。"
+                case .cacheCleared:
+                    return "翻译缓存已清除。现在重建翻译缓存可保持浏览流畅。"
+                }
+            }
+        }
+
+        var primaryActionTitle: String {
+            switch language {
+            case .original:
+                switch reason {
+                case .missingCache:
+                    return AppLocalizer.string("Pre-process")
+                case .cacheCleared:
+                    return AppLocalizer.string("Rebuild")
+                }
+            case .simplifiedChinese:
+                switch reason {
+                case .missingCache:
+                    return "预处理"
+                case .cacheCleared:
+                    return "重建"
+                }
+            }
+        }
+
+        var secondaryActionTitle: String {
+            switch language {
+            case .original:
+                return AppLocalizer.string("Later")
+            case .simplifiedChinese:
+                return "稍后"
+            }
+        }
+    }
+
+    struct ItemTranslationPreloadProgress: Equatable {
+        enum Phase: Equatable {
+            case preparing
+            case translating
+            case finished
+            case unavailable
+            case failed
+            case timedOut
+        }
+
+        let language: HangarItemLanguage
+        let phase: Phase
+        let completedUnitCount: Int
+        let totalUnitCount: Int
+
+        var title: String {
+            switch language {
+            case .original:
+                return englishTitle
+            case .simplifiedChinese:
+                return simplifiedChineseTitle
+            }
+        }
+
+        var detail: String {
+            switch language {
+            case .original:
+                return englishDetail
+            case .simplifiedChinese:
+                return simplifiedChineseDetail
+            }
+        }
+
+        var fractionCompleted: Double? {
+            guard totalUnitCount > 0 else {
+                return nil
+            }
+
+            let boundedCompletedCount = min(max(completedUnitCount, 0), totalUnitCount)
+            return Double(boundedCompletedCount) / Double(totalUnitCount)
+        }
+
+        var isTerminal: Bool {
+            switch phase {
+            case .finished, .unavailable, .failed, .timedOut:
+                return true
+            case .preparing, .translating:
+                return false
+            }
+        }
+
+        var showsCancelAction: Bool {
+            switch phase {
+            case .unavailable, .failed, .timedOut:
+                return true
+            case .preparing, .translating, .finished:
+                return false
+            }
+        }
+
+        var cancelActionTitle: String {
+            switch language {
+            case .original:
+                return AppLocalizer.string("Cancel")
+            case .simplifiedChinese:
+                return "取消"
+            }
+        }
+
+        private var englishTitle: String {
+            switch phase {
+            case .preparing:
+                return "Preparing Hangar Item Translations"
+            case .translating:
+                return "Pre-processing Hangar Item Translations"
+            case .finished:
+                return "Hangar Item Translations Ready"
+            case .unavailable:
+                return "Translation Model Unavailable"
+            case .failed:
+                return "Hangar Item Translation Failed"
+            case .timedOut:
+                return "Hangar Item Translation Timed Out"
+            }
+        }
+
+        private var simplifiedChineseTitle: String {
+            switch phase {
+            case .preparing:
+                return "正在准备机库物品翻译"
+            case .translating:
+                return "正在预处理机库物品翻译"
+            case .finished:
+                return "机库物品翻译已准备好"
+            case .unavailable:
+                return "翻译模型未安装"
+            case .failed:
+                return "机库物品翻译失败"
+            case .timedOut:
+                return "机库物品翻译超时"
+            }
+        }
+
+        private var englishDetail: String {
+            switch phase {
+            case .preparing:
+                return "Checking the saved cache and on-device translation model."
+            case .translating:
+                return "Processed \(completedUnitCount) of \(totalUnitCount) items."
+            case .finished:
+                if totalUnitCount > 0 {
+                    return "Processed \(completedUnitCount) of \(totalUnitCount) items."
+                }
+                return "No new translations were needed."
+            case .unavailable:
+                return "Install the English to Chinese on-device translation model in iOS to pre-process hangar item translations."
+            case .failed:
+                return "Unable to finish pre-processing. You can try again later."
+            case .timedOut:
+                return "The translation preparation stopped responding. Try again after the on-device translation model is available."
+            }
+        }
+
+        private var simplifiedChineseDetail: String {
+            switch phase {
+            case .preparing:
+                return "正在检查已保存缓存和本机翻译模型。"
+            case .translating:
+                return "已处理 \(completedUnitCount) / \(totalUnitCount) 项。"
+            case .finished:
+                if totalUnitCount > 0 {
+                    return "已处理 \(completedUnitCount) / \(totalUnitCount) 项。"
+                }
+                return "没有新的翻译需要处理。"
+            case .unavailable:
+                return "请先在 iOS 中安装英语到简体中文的本机翻译模型。"
+            case .failed:
+                return "无法完成预处理。稍后可以再试。"
+            case .timedOut:
+                return "翻译准备没有响应。请确认本机翻译模型可用后再试。"
+            }
+        }
+    }
+
+    struct ItemTranslationPreloadLogEntry: Identifiable, Equatable {
+        let id = UUID()
+        let occurredAt: Date
+        let message: String
+    }
+
     struct StartupActivity: Identifiable, Equatable {
         let id = UUID()
         let title: String
@@ -296,6 +538,9 @@ final class AppModel {
     var authenticationFlowID = UUID()
     var reauthenticationPrompt: ReauthenticationPrompt?
     var versionRefreshPrompt: VersionRefreshPrompt?
+    var itemTranslationPreprocessPrompt: ItemTranslationPreprocessPrompt?
+    var itemTranslationPreloadProgress: ItemTranslationPreloadProgress?
+    var itemTranslationPreloadLogEntries: [ItemTranslationPreloadLogEntry] = []
     var startupActivity: StartupActivity?
     var transientBanner: TransientBanner?
 
@@ -315,6 +560,17 @@ final class AppModel {
     private var pendingAuthenticationDraft: AuthenticationDraft?
     private var silentHangarActionReconciliationTask: Task<Void, Never>?
     private var silentHangarActionReconciliationGeneration = 0
+    private var itemTranslationPreloadTask: Task<Void, Never>?
+    private var itemTranslationPreloadProgressDismissalTask: Task<Void, Never>?
+    private var itemTranslationPreloadStallTask: Task<Void, Never>?
+    private var itemTranslationPreloadGeneration = 0
+    private var suspendedItemTranslationAutoPreloadLanguages: Set<HangarItemLanguage> = []
+    private var dismissedItemTranslationPreprocessLanguages: Set<HangarItemLanguage> = []
+
+    private enum ItemTranslationPreloadPresentation {
+        case visible
+        case silent
+    }
 
     private static let lastLaunchedVersionDefaultsKey = "app.lastLaunchedVersion"
     private static let meltRequestTimeoutSeconds = 20
@@ -326,6 +582,10 @@ final class AppModel {
     private static let authorizedDevicesRequestTimeoutSeconds = 20
     private static let actionCompletionBannerDurationNanoseconds: UInt64 = 2_000_000_000
     private static let postRefreshImageInvalidationDelayNanoseconds: UInt64 = 250_000_000
+    private static let itemTranslationPreloadPreparingTimeoutNanoseconds: UInt64 = 35_000_000_000
+    private static let itemTranslationPreloadTranslatingTimeoutNanoseconds: UInt64 = 60_000_000_000
+    private static let itemTranslationDictionaryLoadTimeoutNanoseconds: UInt64 = 12_000_000_000
+    private static let itemTranslationPreloadMaximumLogEntries = 80
 
     init(environment: AppEnvironment) {
         sessionStore = environment.sessionStore
@@ -404,6 +664,47 @@ final class AppModel {
         }
 
         return activeRefreshScope == scope
+    }
+
+    func requestItemTranslationPreprocessingForCurrentSnapshot() {
+        guard let snapshot else {
+            return
+        }
+
+        requestItemTranslationPreload(for: snapshot, promptsWhenCacheIsMissing: true)
+    }
+
+    func beginItemTranslationPreprocessing() {
+        if let language = itemTranslationPreprocessPrompt?.language {
+            dismissedItemTranslationPreprocessLanguages.insert(language)
+        }
+        itemTranslationPreprocessPrompt = nil
+
+        guard let snapshot else {
+            return
+        }
+
+        scheduleItemTranslationPreload(for: snapshot, presentation: .visible)
+    }
+
+    func dismissItemTranslationPreprocessPrompt() {
+        if let language = itemTranslationPreprocessPrompt?.language {
+            dismissedItemTranslationPreprocessLanguages.insert(language)
+        }
+        itemTranslationPreprocessPrompt = nil
+    }
+
+    func cancelItemTranslationPreload() {
+        appendItemTranslationPreloadLog("User cancelled translation preload.")
+        itemTranslationPreloadTask?.cancel()
+        itemTranslationPreloadTask = nil
+        itemTranslationPreloadGeneration &+= 1
+        itemTranslationPreloadStallTask?.cancel()
+        itemTranslationPreloadStallTask = nil
+        itemTranslationPreloadProgressDismissalTask?.cancel()
+        itemTranslationPreloadProgressDismissalTask = nil
+        itemTranslationPreloadProgress = nil
+        resetItemTranslationPreloadLogs()
     }
 
     var quickLoginSessions: [UserSession] {
@@ -661,6 +962,7 @@ final class AppModel {
                 diagnosticsStage: "refresh.complete",
                 diagnosticsSummary: "\(refreshScopeDisplayName(resolvedScope)) refresh finished successfully."
             )
+            requestItemTranslationPreload(for: snapshot, promptsWhenCacheIsMissing: true)
             persistSnapshotInBackground(snapshot, for: session)
             schedulePostRefreshImageInvalidation(
                 for: resolvedScope,
@@ -726,6 +1028,380 @@ final class AppModel {
         }
     }
 
+    private func resetItemTranslationPreloadLogs() {
+        itemTranslationPreloadLogEntries.removeAll(keepingCapacity: true)
+    }
+
+    private func appendItemTranslationPreloadLog(_ message: String) {
+        itemTranslationPreloadLogEntries.append(
+            ItemTranslationPreloadLogEntry(
+                occurredAt: .now,
+                message: message
+            )
+        )
+
+        if itemTranslationPreloadLogEntries.count > Self.itemTranslationPreloadMaximumLogEntries {
+            itemTranslationPreloadLogEntries.removeFirst(
+                itemTranslationPreloadLogEntries.count - Self.itemTranslationPreloadMaximumLogEntries
+            )
+        }
+
+#if DEBUG
+        print("ItemTranslationPreload: \(message)")
+#endif
+    }
+
+    private func requestItemTranslationPreload(
+        for snapshot: HangarSnapshot,
+        promptsWhenCacheIsMissing: Bool
+    ) {
+        let language = HangarItemLanguage.resolved(
+            from: userDefaults.string(forKey: HangarItemLanguage.storageKey)
+                ?? HangarItemLanguage.original.rawValue
+        )
+        guard language.translationLocaleIdentifier != nil else {
+            itemTranslationPreloadTask?.cancel()
+            itemTranslationPreloadTask = nil
+            itemTranslationPreloadGeneration &+= 1
+            itemTranslationPreloadStallTask?.cancel()
+            itemTranslationPreloadStallTask = nil
+            itemTranslationPreloadProgressDismissalTask?.cancel()
+            itemTranslationPreloadProgressDismissalTask = nil
+            itemTranslationPreloadProgress = nil
+            resetItemTranslationPreloadLogs()
+            itemTranslationPreprocessPrompt = nil
+            return
+        }
+
+        guard !suspendedItemTranslationAutoPreloadLanguages.contains(language) else {
+            appendItemTranslationPreloadLog("Automatic translation preload skipped while waiting for cache-clear rebuild confirmation.")
+            return
+        }
+
+        if promptsWhenCacheIsMissing,
+           !OnDeviceHangarItemTranslationService.shared.hasAvailableCache(for: language) {
+            guard !dismissedItemTranslationPreprocessLanguages.contains(language) else {
+                appendItemTranslationPreloadLog(
+                    "Automatic translation preload skipped because missing-cache prompt was dismissed for language=\(language.rawValue)."
+                )
+                return
+            }
+
+            itemTranslationPreloadTask?.cancel()
+            itemTranslationPreloadTask = nil
+            itemTranslationPreloadGeneration &+= 1
+            itemTranslationPreloadStallTask?.cancel()
+            itemTranslationPreloadStallTask = nil
+            resetItemTranslationPreloadLogs()
+            appendItemTranslationPreloadLog("Saved preprocessed cache not found for language=\(language.rawValue); showing prompt.")
+            itemTranslationPreprocessPrompt = ItemTranslationPreprocessPrompt(
+                language: language,
+                reason: .missingCache
+            )
+            return
+        }
+
+        scheduleItemTranslationPreload(for: snapshot, presentation: .silent)
+    }
+
+    private func scheduleItemTranslationPreload(
+        for snapshot: HangarSnapshot,
+        presentation: ItemTranslationPreloadPresentation
+    ) {
+        let language = HangarItemLanguage.resolved(
+            from: userDefaults.string(forKey: HangarItemLanguage.storageKey)
+                ?? HangarItemLanguage.original.rawValue
+        )
+        guard language.translationLocaleIdentifier != nil else {
+            itemTranslationPreloadTask?.cancel()
+            itemTranslationPreloadTask = nil
+            itemTranslationPreloadGeneration &+= 1
+            itemTranslationPreloadStallTask?.cancel()
+            itemTranslationPreloadStallTask = nil
+            itemTranslationPreloadProgressDismissalTask?.cancel()
+            itemTranslationPreloadProgressDismissalTask = nil
+            itemTranslationPreloadProgress = nil
+            resetItemTranslationPreloadLogs()
+            return
+        }
+
+        let sources = itemTranslationPreloadSources(for: snapshot)
+        guard !sources.isEmpty else {
+            resetItemTranslationPreloadLogs()
+            appendItemTranslationPreloadLog("No preload source strings were found in the current snapshot.")
+            return
+        }
+
+        itemTranslationPreloadTask?.cancel()
+        itemTranslationPreloadGeneration &+= 1
+        let preloadGeneration = itemTranslationPreloadGeneration
+        let showsProgress = presentation == .visible
+        resetItemTranslationPreloadLogs()
+        itemTranslationPreloadStallTask?.cancel()
+        itemTranslationPreloadStallTask = nil
+        itemTranslationPreloadProgressDismissalTask?.cancel()
+        itemTranslationPreloadProgressDismissalTask = nil
+        let initialProgress = ItemTranslationPreloadProgress(
+            language: language,
+            phase: .preparing,
+            completedUnitCount: 0,
+            totalUnitCount: 0
+        )
+        itemTranslationPreloadProgress = showsProgress ? initialProgress : nil
+        appendItemTranslationPreloadLog(
+            "Scheduled \(showsProgress ? "visible" : "silent") preload. generation=\(preloadGeneration), language=\(language.rawValue), sourceCandidates=\(sources.count)."
+        )
+        appendItemTranslationPreloadLog("Fetching StarCitizen-Info item translation dictionary.")
+        if showsProgress {
+            scheduleItemTranslationPreloadStallTimeout(
+                for: initialProgress,
+                generation: preloadGeneration
+            )
+        }
+        itemTranslationPreloadTask = Task.detached(priority: .utility) { [weak self] in
+            guard let self else {
+                return
+            }
+
+            let dictionaryResult = await Self.loadItemTranslationDictionary(
+                for: language,
+                timeoutNanoseconds: Self.itemTranslationDictionaryLoadTimeoutNanoseconds
+            )
+
+            switch dictionaryResult {
+            case let .loaded(dictionary):
+                await self.appendItemTranslationPreloadLog(
+                    "Dictionary loaded. locale=\(dictionary.locale), version=\(dictionary.version), entries=\(dictionary.entries.count)."
+                )
+            case .unavailable:
+                await self.appendItemTranslationPreloadLog("Dictionary unavailable from network and disk cache.")
+            case .timedOut:
+                await self.appendItemTranslationPreloadLog("Dictionary lookup timed out before returning cached or remote data.")
+            }
+            let itemTranslator = HangarItemTranslator(
+                language: language,
+                dictionary: dictionaryResult.dictionary
+            )
+            if showsProgress {
+                await OnDeviceHangarItemTranslationService.shared.preloadTranslations(
+                    for: sources,
+                    using: itemTranslator,
+                    progressHandler: { progress in
+                        self.applyItemTranslationPreloadProgress(
+                            progress,
+                            language: language,
+                            generation: preloadGeneration
+                        )
+                    },
+                    logHandler: { message in
+                        self.appendItemTranslationPreloadLog(message)
+                    }
+                )
+            } else {
+                await OnDeviceHangarItemTranslationService.shared.preloadTranslations(
+                    for: sources,
+                    using: itemTranslator,
+                    logHandler: { message in
+                        self.appendItemTranslationPreloadLog(message)
+                    }
+                )
+            }
+        }
+    }
+
+    private nonisolated static func loadItemTranslationDictionary(
+        for language: HangarItemLanguage,
+        timeoutNanoseconds: UInt64
+    ) async -> ItemTranslationDictionaryLoadResult {
+        await withTaskGroup(of: ItemTranslationDictionaryLoadResult.self) { group in
+            group.addTask {
+                let dictionary = await HostedHangarItemTranslationStore.shared.dictionary(
+                    for: language,
+                    using: HostedHangarItemTranslationClient(language: language),
+                    preferCachedData: true
+                )
+
+                if let dictionary {
+                    return .loaded(dictionary)
+                }
+
+                return .unavailable
+            }
+
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                return .timedOut
+            }
+
+            let result = await group.next() ?? .unavailable
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private func applyItemTranslationPreloadProgress(
+        _ progress: OnDeviceHangarItemTranslationPreloadProgress,
+        language: HangarItemLanguage,
+        generation: Int
+    ) {
+        guard generation == itemTranslationPreloadGeneration else {
+            return
+        }
+
+        let displayProgress = ItemTranslationPreloadProgress(
+            language: language,
+            phase: ItemTranslationPreloadProgress.Phase(progress.phase),
+            completedUnitCount: progress.completedUnitCount,
+            totalUnitCount: progress.totalUnitCount
+        )
+
+        appendItemTranslationPreloadLog(
+            "Progress updated. phase=\(displayProgress.phase), completed=\(displayProgress.completedUnitCount), total=\(displayProgress.totalUnitCount)."
+        )
+        itemTranslationPreloadProgress = displayProgress
+        itemTranslationPreloadStallTask?.cancel()
+        itemTranslationPreloadStallTask = nil
+        itemTranslationPreloadProgressDismissalTask?.cancel()
+        itemTranslationPreloadProgressDismissalTask = nil
+
+        if displayProgress.isTerminal {
+            if displayProgress.phase == .finished {
+                scheduleItemTranslationPreloadProgressDismissal()
+            }
+            return
+        }
+
+        scheduleItemTranslationPreloadStallTimeout(
+            for: displayProgress,
+            generation: generation
+        )
+    }
+
+    private func scheduleItemTranslationPreloadStallTimeout(
+        for observedProgress: ItemTranslationPreloadProgress,
+        generation: Int
+    ) {
+        let timeoutNanoseconds: UInt64
+        switch observedProgress.phase {
+        case .preparing:
+            timeoutNanoseconds = Self.itemTranslationPreloadPreparingTimeoutNanoseconds
+        case .translating:
+            timeoutNanoseconds = Self.itemTranslationPreloadTranslatingTimeoutNanoseconds
+        case .finished, .unavailable, .failed, .timedOut:
+            return
+        }
+
+        itemTranslationPreloadStallTask?.cancel()
+        appendItemTranslationPreloadLog(
+            "Armed stall watchdog. phase=\(observedProgress.phase), timeoutSeconds=\(timeoutNanoseconds / 1_000_000_000)."
+        )
+        itemTranslationPreloadStallTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+            guard !Task.isCancelled else {
+                return
+            }
+
+            await MainActor.run {
+                guard let self,
+                      generation == self.itemTranslationPreloadGeneration,
+                      self.itemTranslationPreloadProgress == observedProgress else {
+                    return
+                }
+
+                self.itemTranslationPreloadTask?.cancel()
+                self.itemTranslationPreloadTask = nil
+                self.itemTranslationPreloadGeneration &+= 1
+                self.itemTranslationPreloadStallTask = nil
+                self.appendItemTranslationPreloadLog(
+                    "Stall watchdog fired. phase=\(observedProgress.phase), completed=\(observedProgress.completedUnitCount), total=\(observedProgress.totalUnitCount)."
+                )
+                self.itemTranslationPreloadProgress = ItemTranslationPreloadProgress(
+                    language: observedProgress.language,
+                    phase: .timedOut,
+                    completedUnitCount: observedProgress.completedUnitCount,
+                    totalUnitCount: observedProgress.totalUnitCount
+                )
+            }
+        }
+    }
+
+    private func scheduleItemTranslationPreloadProgressDismissal() {
+        itemTranslationPreloadProgressDismissalTask?.cancel()
+        itemTranslationPreloadProgressDismissalTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard !Task.isCancelled else {
+                return
+            }
+
+            await MainActor.run {
+                self?.itemTranslationPreloadProgress = nil
+                self?.itemTranslationPreloadProgressDismissalTask = nil
+            }
+        }
+    }
+
+    private func itemTranslationPreloadSources(for snapshot: HangarSnapshot) -> [String] {
+        var sources: [String] = []
+        var seenSources = Set<String>()
+
+        func add(_ source: String?) {
+            let trimmedSource = source?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !trimmedSource.isEmpty,
+                  seenSources.insert(trimmedSource).inserted else {
+                return
+            }
+
+            sources.append(trimmedSource)
+        }
+
+        for package in snapshot.packages {
+            add(package.title)
+            add(package.debugDisplayTitle(showsUpgradedShipInHangar: showsUpgradedShipInHangar))
+            for item in package.contents {
+                add(item.title)
+                add("\(item.category.rawValue) • \(item.detail)")
+
+                if let pricing = item.upgradePricing {
+                    add(pricing.sourceShipName)
+                    add(pricing.targetShipName)
+                }
+            }
+        }
+
+        for ship in snapshot.fleet {
+            add(ship.displayName)
+            add(ship.manufacturer)
+            add(FleetPresentationFormatter.manufacturerDisplayName(ship.manufacturer))
+            add(ship.role)
+            add(
+                FleetPresentationFormatter.roleSummary(
+                    role: ship.role,
+                    categories: ship.roleCategories
+                )
+            )
+            for roleCategory in ship.roleCategories {
+                add(roleCategory)
+            }
+            add(ship.sourcePackageName)
+        }
+
+        for buybackPledge in snapshot.buyback {
+            add(buybackPledge.title)
+            add(buybackPledge.displayedNotes)
+            add(buybackPledge.sourceRawInfo?.titleText)
+        }
+
+        for logEntry in snapshot.hangarLogs {
+            add(logEntry.itemName)
+            add(logEntry.reason)
+            add(logEntry.upgradeContext?.sourceShipName)
+            add(logEntry.upgradeContext?.targetShipName)
+            add(logEntry.upgradeContext?.upgradeName)
+        }
+
+        return sources
+    }
+
     private func schedulePostRefreshImageInvalidation(
         for scope: RefreshScope,
         previousSnapshot: HangarSnapshot?,
@@ -786,12 +1462,25 @@ final class AppModel {
     }
 
     func clearLocalCache() async {
+        let suspendedTranslationLanguage = HangarItemLanguage.resolved(
+            from: userDefaults.string(forKey: HangarItemLanguage.storageKey)
+                ?? HangarItemLanguage.original.rawValue
+        )
+        let shouldSuspendTranslationPreload = suspendedTranslationLanguage.translationLocaleIdentifier != nil
+        if shouldSuspendTranslationPreload {
+            suspendedItemTranslationAutoPreloadLanguages.insert(suspendedTranslationLanguage)
+        }
+        defer {
+            if shouldSuspendTranslationPreload {
+                suspendedItemTranslationAutoPreloadLanguages.remove(suspendedTranslationLanguage)
+            }
+        }
+
         await snapshotStore.clear()
         URLCache.shared.removeAllCachedResponses()
         await imageCache.clear()
         await HostedShipCatalogStore.shared.clear()
         await HostedShipDetailCatalogStore.shared.clear()
-        await HostedHangarItemTranslationStore.shared.clear()
         hangarFleetImageReloadToken = UUID()
         buybackImageReloadToken = UUID()
         accountImageReloadToken = UUID()
@@ -808,6 +1497,35 @@ final class AppModel {
         }
 
         await refresh(scope: .full)
+    }
+
+    func clearTranslationCache() async {
+        let rebuildPromptLanguage = HangarItemLanguage.resolved(
+            from: userDefaults.string(forKey: HangarItemLanguage.storageKey)
+                ?? HangarItemLanguage.original.rawValue
+        )
+
+        await HostedHangarItemTranslationStore.shared.clear()
+        itemTranslationPreloadTask?.cancel()
+        itemTranslationPreloadTask = nil
+        itemTranslationPreloadGeneration &+= 1
+        itemTranslationPreloadStallTask?.cancel()
+        itemTranslationPreloadStallTask = nil
+        itemTranslationPreloadProgressDismissalTask?.cancel()
+        itemTranslationPreloadProgressDismissalTask = nil
+        itemTranslationPreloadProgress = nil
+        resetItemTranslationPreloadLogs()
+        dismissedItemTranslationPreprocessLanguages.removeAll()
+        itemTranslationPreprocessPrompt = nil
+        OnDeviceHangarItemTranslationService.shared.clear()
+
+        if rebuildPromptLanguage.translationLocaleIdentifier != nil,
+           snapshot != nil {
+            itemTranslationPreprocessPrompt = ItemTranslationPreprocessPrompt(
+                language: rebuildPromptLanguage,
+                reason: .cacheCleared
+            )
+        }
     }
 
     func melt(packageGroup: GroupedHangarPackage, quantity: Int) async throws {
@@ -1905,6 +2623,7 @@ final class AppModel {
         lastRefreshErrorScope = nil
         activeRefreshScope = nil
         reauthenticationPrompt = nil
+        requestItemTranslationPreload(for: cachedSnapshot, promptsWhenCacheIsMissing: true)
         return true
     }
 
@@ -2686,5 +3405,22 @@ final class AppModel {
         }
 
         return urls
+    }
+}
+
+private extension AppModel.ItemTranslationPreloadProgress.Phase {
+    init(_ phase: OnDeviceHangarItemTranslationPreloadProgress.Phase) {
+        switch phase {
+        case .preparing:
+            self = .preparing
+        case .translating:
+            self = .translating
+        case .finished:
+            self = .finished
+        case .unavailable:
+            self = .unavailable
+        case .failed:
+            self = .failed
+        }
     }
 }

@@ -53,6 +53,7 @@ struct HangarLogView: View {
     let appModel: AppModel
 
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
     @State private var searchText = ""
     @State private var timeFilter: TimeFilter = .all
     @State private var actionFilter: ActionFilter = .all
@@ -60,6 +61,8 @@ struct HangarLogView: View {
     @State private var visibleEntryCount = HangarLogFetchMode.initial.entryLimit
     @State private var isRequestingOlderEntries = false
     @State private var lastRemoteExpansionBaselineCount: Int?
+    @State private var itemTranslationState = HangarItemTranslationViewState()
+    @State private var translationService = OnDeviceHangarItemTranslationService.shared
     @Namespace private var logNavigationNamespace
 
     private var hangarLogs: [HangarLogEntry] {
@@ -97,9 +100,17 @@ struct HangarLogView: View {
     }
 
     var body: some View {
+        let currentItemTranslator = itemTranslator
+
         NavigationStack {
             List {
                 Section {
+                    IMEAwareSearchRow(
+                        text: $searchText,
+                        prompt: AppLocalizer.string("Search log entries"),
+                        onCommittedTextChange: resetVisibleEntryCount
+                    )
+
                     HStack(spacing: 12) {
                         Menu {
                             Picker("Action", selection: $actionFilter) {
@@ -158,7 +169,7 @@ struct HangarLogView: View {
                 } else {
                     Section {
                         ForEach(displayedHangarLogs) { entry in
-                            logRow(for: entry)
+                            logRow(for: entry, itemTranslator: currentItemTranslator)
                         }
                     }
 
@@ -207,10 +218,6 @@ struct HangarLogView: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .searchable(
-                text: $searchText,
-                prompt: "Search log entries"
-            )
             .navigationTitle("Hangar Log")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -243,6 +250,10 @@ struct HangarLogView: View {
 
                 await appModel.refresh(scope: .hangarLog)
             }
+            .task(id: hangarItemLanguageRawValue) {
+                await loadItemTranslationDictionary()
+                resetVisibleEntryCount()
+            }
             .onChange(of: searchText) { _, _ in
                 resetVisibleEntryCount()
             }
@@ -264,6 +275,14 @@ struct HangarLogView: View {
         }
     }
 
+    private var itemTranslator: HangarItemTranslator {
+        itemTranslationState.translator(for: hangarItemLanguageRawValue)
+    }
+
+    private func loadItemTranslationDictionary() async {
+        await itemTranslationState.loadDictionary(for: hangarItemLanguageRawValue)
+    }
+
     private var shouldShowProLogLimitMessage: Bool {
         !appModel.isPro && hangarLogs.count >= appModel.hangarLogEntryLimit
     }
@@ -277,19 +296,20 @@ struct HangarLogView: View {
     }
 
     @ViewBuilder
-    private func logRow(for entry: HangarLogEntry) -> some View {
+    private func logRow(for entry: HangarLogEntry, itemTranslator: HangarItemTranslator) -> some View {
         let destination = resolvedDestination(for: entry)
         let upgradeContext = effectiveUpgradeContext(for: entry, destination: destination)
 
         switch destination {
         case let .package(packageGroup, pledgeID):
             NavigationLink {
-                destinationView(for: .package(packageGroup, pledgeID: pledgeID))
+                destinationView(for: .package(packageGroup, pledgeID: pledgeID), itemTranslator: itemTranslator)
             } label: {
                 HangarLogRow(
                     entry: entry,
                     upgradeContext: upgradeContext,
-                    destinationSummary: destination?.rowSummary
+                    itemTranslator: itemTranslator,
+                    destinationSummary: destination?.rowSummary(using: itemTranslator)
                 )
             }
             .onAppear {
@@ -297,12 +317,13 @@ struct HangarLogView: View {
             }
         case let .ship(shipGroup):
             NavigationLink {
-                destinationView(for: .ship(shipGroup))
+                destinationView(for: .ship(shipGroup), itemTranslator: itemTranslator)
             } label: {
                 HangarLogRow(
                     entry: entry,
                     upgradeContext: upgradeContext,
-                    destinationSummary: destination?.rowSummary
+                    itemTranslator: itemTranslator,
+                    destinationSummary: destination?.rowSummary(using: itemTranslator)
                 )
             }
             .matchedTransitionSource(
@@ -320,6 +341,7 @@ struct HangarLogView: View {
             HangarLogRow(
                 entry: entry,
                 upgradeContext: upgradeContext,
+                itemTranslator: itemTranslator,
                 destinationSummary: nil
             )
             .onAppear {
@@ -329,18 +351,22 @@ struct HangarLogView: View {
     }
 
     @ViewBuilder
-    private func destinationView(for destination: HangarLogResolvedDestination) -> some View {
+    private func destinationView(
+        for destination: HangarLogResolvedDestination,
+        itemTranslator: HangarItemTranslator
+    ) -> some View {
         switch destination {
         case let .package(packageGroup, _):
             HangarPackageDetailView(
                 appModel: appModel,
                 packageGroup: packageGroup,
-                itemTranslator: .original,
+                itemTranslator: itemTranslator,
                 reloadToken: appModel.hangarFleetImageReloadToken
             )
         case let .ship(shipGroup):
             FleetShipDetailView(
                 shipGroup: shipGroup,
+                itemTranslator: itemTranslator,
                 reloadToken: appModel.hangarFleetImageReloadToken,
                 transitionNamespace: logNavigationNamespace
             )
@@ -565,8 +591,11 @@ struct HangarLogView: View {
         }
 
         let normalizedSearchText = searchText.localizedLowercase
+        _ = translationService.cacheGeneration
 
-        if entry.searchableText.localizedLowercase.contains(normalizedSearchText) {
+        if translationService
+            .hangarLogSearchableText(for: entry, using: itemTranslator)
+            .contains(normalizedSearchText) {
             return true
         }
 
@@ -577,11 +606,14 @@ struct HangarLogView: View {
         let destination = resolvedDestination(for: entry)
         let upgradeContext = effectiveUpgradeContext(for: entry, destination: destination)
         let components = [
-            upgradeContext?.sourceShipName,
-            upgradeContext?.targetShipName,
-            upgradeContext?.upgradeName,
-            upgradeContext?.summaryText,
-            destination?.searchableText
+            translationService.searchableText(forOptional: upgradeContext?.sourceShipName, using: itemTranslator),
+            translationService.searchableText(forOptional: upgradeContext?.targetShipName, using: itemTranslator),
+            translationService.searchableText(forOptional: upgradeContext?.upgradeName, using: itemTranslator),
+            upgradeContext.flatMap { itemTranslator.hangarLogUpgradeSummary(for: $0) },
+            destination?.searchableText(
+                using: itemTranslator,
+                translationService: translationService
+            )
         ]
 
         return components
@@ -674,7 +706,7 @@ private enum HangarLogResolvedDestination {
     case package(GroupedHangarPackage, pledgeID: Int?)
     case ship(GroupedFleetShip)
 
-    var rowSummary: String {
+    func rowSummary(using itemTranslator: HangarItemTranslator) -> String {
         switch self {
         case let .package(packageGroup, pledgeID?):
             if packageGroup.containsMultipleCopies {
@@ -685,26 +717,39 @@ private enum HangarLogResolvedDestination {
         case .package:
             return AppLocalizer.string("Opens current package")
         case let .ship(shipGroup):
-            return AppLocalizer.format("Opens current ship %@", shipGroup.representative.displayName)
+            return AppLocalizer.format("Opens current ship %@", itemTranslator.translated(shipGroup.representative.displayName))
         }
     }
 
-    var searchableText: String {
+    func searchableText(
+        using itemTranslator: HangarItemTranslator,
+        translationService: OnDeviceHangarItemTranslationService
+    ) -> String {
         switch self {
         case let .package(packageGroup, _):
             return packageGroup.packages
                 .flatMap { package in
                     [
-                        package.title,
+                        translationService.searchableText(for: package.title, using: itemTranslator),
                         package.status,
                         package.searchableInsuranceText,
-                        package.contents.map(\.title).joined(separator: " ")
+                        translationService.searchableText(
+                            for: package.contents.flatMap { item -> [String] in
+                                var titles = [item.title]
+                                if let pricing = item.upgradePricing {
+                                    titles.append(pricing.sourceShipName)
+                                    titles.append(pricing.targetShipName)
+                                }
+                                return titles
+                            },
+                            using: itemTranslator
+                        )
                     ]
                 }
                 .joined(separator: " ")
         case let .ship(shipGroup):
             return shipGroup.ships
-                .map(\.searchHaystack)
+                .map { translationService.fleetSearchableText(for: $0, using: itemTranslator) }
                 .joined(separator: " ")
         }
     }
@@ -713,16 +758,20 @@ private enum HangarLogResolvedDestination {
 private struct HangarLogRow: View {
     let entry: HangarLogEntry
     let upgradeContext: HangarLogUpgradeContext?
+    let itemTranslator: HangarItemTranslator
     let destinationSummary: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(entry.itemName)
+                    HangarTranslatedText(
+                        source: entry.itemName,
+                        itemTranslator: itemTranslator
+                    )
                         .font(.headline)
 
-                    Text(entry.occurredAt.formatted(date: .abbreviated, time: .shortened))
+                    Text(AppLocalizer.displayDateTime(entry.occurredAt))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -789,15 +838,15 @@ private struct HangarLogRow: View {
             return joined(parts)
         case .appliedUpgrade:
             var parts: [String] = []
-            if let upgradeSummary = upgradeContext?.summaryText {
+            if let upgradeSummary = upgradeContext.flatMap({ itemTranslator.hangarLogUpgradeSummary(for: $0) }) {
                 parts.append(upgradeSummary)
             }
             if let sourcePledgeID = entry.sourcePledgeID {
                 parts.append("Upgrade from pledge #\(sourcePledgeID)")
             }
-            if upgradeContext?.summaryText == nil,
+            if upgradeContext.flatMap({ itemTranslator.hangarLogUpgradeSummary(for: $0) }) == nil,
                let reason = entry.reason {
-                parts.append(reason)
+                parts.append(itemTranslator.translated(reason))
             }
             if let priceUSD = entry.priceUSD {
                 parts.append("New value \(priceUSD.usdString)")

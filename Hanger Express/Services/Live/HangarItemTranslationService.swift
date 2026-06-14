@@ -98,7 +98,8 @@ actor HostedHangarItemTranslationStore {
 
     func dictionary(
         for language: HangarItemLanguage,
-        using client: HostedHangarItemTranslationClient
+        using client: HostedHangarItemTranslationClient,
+        preferCachedData: Bool = false
     ) async -> HangarItemTranslationDictionary? {
         guard language.translationLocaleIdentifier != nil else {
             cachedDictionaries[language] = nil
@@ -106,6 +107,12 @@ actor HostedHangarItemTranslationStore {
         }
 
         if let cachedDictionary = cachedDictionaries[language] {
+            return cachedDictionary
+        }
+
+        if preferCachedData,
+           let cachedDictionary = loadDictionaryFromDisk(for: language) {
+            cachedDictionaries[language] = cachedDictionary
             return cachedDictionary
         }
 

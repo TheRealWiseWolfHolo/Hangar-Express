@@ -6601,11 +6601,20 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       };
     }
 
-    const extractionRoots = [
+    const extractionRoots = [];
+    const pushUniqueRoot = (root) => {
+      if (root && !extractionRoots.includes(root)) {
+        extractionRoots.push(root);
+      }
+    };
+
+    [
       document.querySelector('.main-org .info'),
+      document.querySelector('.main-org'),
       document.querySelector('.box-content.org.main .info'),
+      document.querySelector('.box-content.org.main'),
       document.querySelector('.right-col')
-    ].filter(Boolean);
+    ].forEach(pushUniqueRoot);
 
     let organization = {
       name: '',
@@ -6663,6 +6672,14 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         }
       }
     });
+
+    if (!organization.name) {
+      const dossierOrgLink = dossierRoot.querySelector('a[href*="/orgs/"]');
+      const dossierOrgName = normalizeText(dossierOrgLink?.textContent);
+      if (dossierOrgName) {
+        organization.name = dossierOrgName;
+      }
+    }
 
     return {
       accessDenied,
