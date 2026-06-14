@@ -9,7 +9,7 @@ struct AppLanguageMenuButton: View {
 
     var body: some View {
         Menu {
-            Picker("Language", selection: $appLanguageRawValue) {
+            Picker("App Language", selection: $appLanguageRawValue) {
                 ForEach(AppLanguage.allCases) { language in
                     language.label
                         .tag(language.rawValue)
@@ -22,6 +22,6 @@ struct AppLanguageMenuButton: View {
                     .font(.caption.weight(.semibold))
             }
         }
-        .accessibilityLabel(Text("Language"))
+        .accessibilityLabel(Text("App Language"))
     }
 }

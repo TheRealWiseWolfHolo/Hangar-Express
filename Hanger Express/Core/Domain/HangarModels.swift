@@ -860,11 +860,15 @@ nonisolated struct AccountOrganization: Hashable, Sendable, Codable {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedRank = rank?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard let trimmedRank, !trimmedRank.isEmpty else {
-            return trimmedName
-        }
+        return [trimmedName, trimmedRank]
+            .compactMap { value in
+                guard let value, !value.isEmpty else {
+                    return nil
+                }
 
-        return "\(trimmedName) | \(trimmedRank)"
+                return value
+            }
+            .joined(separator: " | ")
     }
 }
 

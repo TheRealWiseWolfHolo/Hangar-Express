@@ -39,12 +39,27 @@ struct DashboardTabView: View {
         }
         .environment(\.locale, appLanguage.locale)
         .safeAreaInset(edge: .top) {
-            RefreshPresentationInset(
-                presentation: appModel.refreshPresentation,
-                transientBanner: appModel.transientBanner
-            )
+            VStack(spacing: 8) {
+                RefreshPresentationInset(
+                    presentation: appModel.refreshPresentation,
+                    transientBanner: appModel.transientBanner
+                )
+
+                if let itemTranslationPreloadProgress = appModel.itemTranslationPreloadProgress {
+                    ItemTranslationPreloadProgressCard(
+                        progress: itemTranslationPreloadProgress,
+                        logEntries: appModel.itemTranslationPreloadLogEntries,
+                        onCancel: {
+                            appModel.cancelItemTranslationPreload()
+                        }
+                    )
+                        .padding(.horizontal)
+                        .padding(.top, 4)
+                }
+            }
         }
         .animation(.snappy, value: appModel.transientBanner)
+        .animation(.snappy, value: appModel.itemTranslationPreloadProgress)
         .overlay {
             if let message = appModel.lastRefreshErrorMessage {
                 RefreshFailureOverlay(
@@ -74,6 +89,18 @@ struct DashboardTabView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text("The refresh diagnostics log was copied to the clipboard so the tester can send it to you.")
+        }
+        .alert(item: itemTranslationPreprocessPromptBinding) { prompt in
+            Alert(
+                title: Text(prompt.title),
+                message: Text(prompt.message),
+                primaryButton: .default(Text(prompt.primaryActionTitle)) {
+                    appModel.beginItemTranslationPreprocessing()
+                },
+                secondaryButton: .cancel(Text(prompt.secondaryActionTitle)) {
+                    appModel.dismissItemTranslationPreprocessPrompt()
+                }
+            )
         }
         .sheet(item: versionRefreshPromptBinding) { prompt in
             VersionRefreshPromptSheet(
@@ -113,6 +140,17 @@ struct DashboardTabView: View {
         )
     }
 
+    private var itemTranslationPreprocessPromptBinding: Binding<AppModel.ItemTranslationPreprocessPrompt?> {
+        Binding(
+            get: { appModel.itemTranslationPreprocessPrompt },
+            set: { newValue in
+                if newValue == nil {
+                    appModel.dismissItemTranslationPreprocessPrompt()
+                }
+            }
+        )
+    }
+
     private var versionRefreshPromptBinding: Binding<AppModel.VersionRefreshPrompt?> {
         Binding(
             get: { appModel.versionRefreshPrompt },
@@ -139,6 +177,116 @@ struct DashboardTabView: View {
 
         UIPasteboard.general.string = refreshDebugReport
         didCopyRefreshDebugReport = true
+    }
+}
+
+private struct ItemTranslationPreloadProgressCard: View {
+    let progress: AppModel.ItemTranslationPreloadProgress
+    let logEntries: [AppModel.ItemTranslationPreloadLogEntry]
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Label(progress.title, systemImage: iconName)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(iconColor)
+                    .lineLimit(1)
+
+                Spacer(minLength: 0)
+
+                if let fractionCompleted = progress.fractionCompleted {
+                    Text(fractionCompleted, format: .percent.precision(.fractionLength(0)))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            progressBar
+
+            Text(progress.detail)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !logEntries.isEmpty {
+                Divider()
+                    .opacity(0.5)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(logEntries.suffix(6)) { entry in
+                        HStack(alignment: .top, spacing: 6) {
+                            Text(entry.occurredAt, format: .dateTime.hour(.twoDigits(amPM: .omitted)).minute().second())
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 56, alignment: .leading)
+
+                            Text(entry.message)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .textSelection(.enabled)
+            }
+
+            if progress.showsCancelAction {
+                Button(role: .cancel, action: onCancel) {
+                    Label(progress.cancelActionTitle, systemImage: "xmark.circle")
+                }
+                .font(.caption.weight(.semibold))
+                .buttonStyle(.bordered)
+                .tint(iconColor)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(iconColor.opacity(0.22))
+        )
+        .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
+        .transition(.move(edge: .top).combined(with: .opacity))
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var progressBar: some View {
+        if let fractionCompleted = progress.fractionCompleted {
+            ProgressView(value: fractionCompleted, total: 1)
+                .tint(iconColor)
+        } else {
+            ProgressView()
+                .tint(iconColor)
+                .controlSize(.small)
+        }
+    }
+
+    private var iconName: String {
+        switch progress.phase {
+        case .finished:
+            return "checkmark.circle.fill"
+        case .unavailable, .failed, .timedOut:
+            return "exclamationmark.triangle.fill"
+        case .preparing, .translating:
+            return "arrow.triangle.2.circlepath"
+        }
+    }
+
+    private var iconColor: Color {
+        switch progress.phase {
+        case .finished:
+            return .green
+        case .unavailable, .failed, .timedOut:
+            return .orange
+        case .preparing, .translating:
+            return .blue
+        }
     }
 }
 

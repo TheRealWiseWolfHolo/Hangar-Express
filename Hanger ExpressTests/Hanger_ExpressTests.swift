@@ -22,6 +22,16 @@ struct Hanger_ExpressTests {
         #expect(snapshot.referralStats.hasLegacyLadder)
     }
 
+    @Test func accountOrganizationSummaryOmitsMissingRank() {
+        let orgOnly = AccountOrganization(name: " Skewers Gentlemen's Club ", rank: nil)
+        let blankRank = AccountOrganization(name: " Skewers Gentlemen's Club ", rank: "   ")
+        let ranked = AccountOrganization(name: " Skewers Gentlemen's Club ", rank: " President ")
+
+        #expect(orgOnly.summaryText == "Skewers Gentlemen's Club")
+        #expect(blankRank.summaryText == "Skewers Gentlemen's Club")
+        #expect(ranked.summaryText == "Skewers Gentlemen's Club | President")
+    }
+
     @Test func hostedLimitedShipFeedDecodesRequiredFields() throws {
         let data = Data(
             #"""
@@ -2504,10 +2514,234 @@ struct Hanger_ExpressTests {
         #expect(translator.translated("Anvil F8C Lightning") == "F8C 闪电")
         #expect(translator.translated("Unknown Ship") == "Unknown Ship")
         #expect(originalTranslator.translated("F8C Lightning") == "F8C Lightning")
+        #expect(translator.replacingProtectedTerms(in: "Standalone Ships - F8C Lightning Paint") == "独立舰船 - F8C 闪电 Paint")
 
         let searchableText = translator.searchableText(for: "F8C Lightning")
         #expect(searchableText.localizedLowercase.contains("f8c lightning"))
         #expect(searchableText.contains("F8C 闪电"))
+
+        let keywordSearchableText = translator.searchableText(for: "Standalone Ships - F8C Lightning Paint")
+        #expect(keywordSearchableText.localizedLowercase.contains("standalone ships"))
+        #expect(keywordSearchableText.contains("独立舰船"))
+    }
+
+    @Test func hangarItemTranslatorBuildsPhaseTwoDisplaySearchText() throws {
+        let dictionary = try HostedHangarItemTranslationClient.decodeDictionary(
+            from: makeHangarItemTranslationPayload(),
+            expectedLocale: "zh-Hans"
+        )
+        let translator = HangarItemTranslator(language: .simplifiedChinese, dictionary: dictionary)
+        let ship = FleetShip(
+            id: 101,
+            displayName: "F8C Lightning",
+            manufacturer: "Anvil Aerospace",
+            role: "Heavy Fighter",
+            insurance: "LTI",
+            sourcePackageID: 202,
+            sourcePackageName: "Package - Praetorian Pack",
+            meltValueUSD: 300,
+            canGift: false,
+            canReclaim: true
+        )
+        let shipGroup = GroupedFleetShip(representative: ship, ships: [ship])
+        let buybackPledge = BuybackPledge(
+            id: 303,
+            title: "F8C Lightning",
+            recoveredValueUSD: 300,
+            addedToBuybackAt: Date(timeIntervalSince1970: 1_800_000_000),
+            notes: "Recovered from buy back."
+        )
+        let logEntry = HangarLogEntry(
+            id: "log-1",
+            occurredAt: Date(timeIntervalSince1970: 1_800_000_000),
+            action: .created,
+            itemName: "F8C Lightning",
+            operatorName: nil,
+            priceUSD: 300,
+            sourcePledgeID: nil,
+            targetPledgeID: "202",
+            orderCode: "ABC123",
+            reason: "Package - Praetorian Pack",
+            rawText: "F8C Lightning created for pledge 202."
+        )
+
+        #expect(translator.fleetSourcePackageSummary(for: shipGroup) == "组合包 - 执政官包")
+        #expect(translator.fleetSearchableText(for: ship).contains("f8c lightning"))
+        #expect(translator.fleetSearchableText(for: ship).contains("f8c 闪电"))
+        #expect(translator.buybackSearchableText(for: buybackPledge).contains("f8c 闪电"))
+        #expect(translator.hangarLogSearchableText(for: logEntry).contains("f8c 闪电"))
+        #expect(translator.hangarLogSearchableText(for: logEntry).contains("组合包 - 执政官包"))
+    }
+
+    @Test func hangarItemTranslatorMasksDictionaryTermsForMachineTranslation() throws {
+        let dictionary = try HostedHangarItemTranslationClient.decodeDictionary(
+            from: makeHangarItemTranslationPayload(),
+            expectedLocale: "zh-Hans"
+        )
+        let translator = HangarItemTranslator(language: .simplifiedChinese, dictionary: dictionary)
+
+        let maskedText = translator.maskedForMachineTranslation(
+            "The Anvil F8C Lightning is included in Package - Praetorian Pack."
+        )
+
+        #expect(maskedText.maskedText.contains("HXTERM0000HX"))
+        #expect(maskedText.maskedText.contains("HXTERM0001HX"))
+        #expect(!maskedText.maskedText.contains("Anvil F8C Lightning"))
+        #expect(!maskedText.maskedText.contains("Package - Praetorian Pack"))
+        #expect(
+            maskedText.restoringTerms(in: "已翻译 HXTERM0000HX，来自 HXTERM0001HX。")
+                == "已翻译 F8C 闪电，来自 组合包 - 执政官包。"
+        )
+
+        let adjacentTermText = MaskedHangarItemText(
+            maskedText: "",
+            replacements: [
+                MaskedHangarItemText.Replacement(token: "HXTERM0000HX", translation: "升级"),
+                MaskedHangarItemText.Replacement(token: "HXTERM0001HX", translation: "防卫者"),
+                MaskedHangarItemText.Replacement(token: "HXTERM0002HX", translation: "瑞伦"),
+                MaskedHangarItemText.Replacement(token: "HXTERM0003HX", translation: "标准版")
+            ]
+        )
+        #expect(
+            adjacentTermText.restoringTerms(in: "HXTERM0000HX - HXTERM0001HX到HXTERM0002HXHXTERM0003HX")
+                == "升级 - 防卫者 到 瑞伦 标准版"
+        )
+
+        let spacingDictionary = try HangarItemTranslationDictionary(
+            locale: "zh-Hans",
+            version: 1,
+            generatedAt: nil,
+            entries: [
+                HangarItemTranslationDictionary.Entry(
+                    source: "Upgrade",
+                    translation: "升级",
+                    kind: "keyword",
+                    aliases: []
+                ),
+                HangarItemTranslationDictionary.Entry(
+                    source: "Defender",
+                    translation: "防卫者",
+                    kind: "ship",
+                    aliases: []
+                ),
+                HangarItemTranslationDictionary.Entry(
+                    source: "Railen",
+                    translation: "瑞伦",
+                    kind: "ship",
+                    aliases: []
+                ),
+                HangarItemTranslationDictionary.Entry(
+                    source: "Edition",
+                    translation: "版",
+                    kind: "keyword",
+                    aliases: []
+                )
+            ]
+        )
+        let spacingTranslator = HangarItemTranslator(
+            language: .simplifiedChinese,
+            dictionary: spacingDictionary
+        )
+        #expect(
+            spacingTranslator.normalizedMachineTranslationSpacing(
+                "升级 - 防卫者到瑞伦标准版",
+                source: "Upgrade - Defender to Railen Standard Edition"
+            ) == "升级 - 防卫者 到 瑞伦 标准版"
+        )
+    }
+
+    @Test func onDeviceTranslationPreloadPersistsCompletedLocaleWhenNoMachineWorkIsNeeded() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+        let dictionary = try HostedHangarItemTranslationClient.decodeDictionary(
+            from: makeHangarItemTranslationPayload(),
+            expectedLocale: "zh-Hans"
+        )
+        let translator = HangarItemTranslator(language: .simplifiedChinese, dictionary: dictionary)
+        let service = OnDeviceHangarItemTranslationService(directoryURL: tempDirectory)
+        var progressUpdates: [OnDeviceHangarItemTranslationPreloadProgress] = []
+
+        #expect(!service.hasAvailableCache(for: .simplifiedChinese))
+
+        await service.preloadTranslations(
+            for: ["F8C Lightning", "Anvil F8C Lightning", "Standalone Ships"],
+            using: translator,
+            progressHandler: { progress in
+                progressUpdates.append(progress)
+            }
+        )
+
+        #expect(service.hasAvailableCache(for: .simplifiedChinese))
+        #expect(progressUpdates.last?.phase == .finished)
+        #expect(progressUpdates.last?.completedUnitCount == 0)
+        #expect(progressUpdates.last?.totalUnitCount == 0)
+
+        let reloadedService = OnDeviceHangarItemTranslationService(directoryURL: tempDirectory)
+        #expect(reloadedService.hasAvailableCache(for: .simplifiedChinese))
+    }
+
+    @Test func onDeviceTranslationSearchTextIncludesEnglishAndCachedItemLanguageText() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+        try FileManager.default.createDirectory(
+            at: tempDirectory,
+            withIntermediateDirectories: true
+        )
+        let source = "Upgrade - Defender to Railen Standard Edition"
+        let cachePayload = """
+        {
+          "version": 1,
+          "preprocessedLocales": ["zh-Hans"],
+          "entries": [
+            {
+              "source": "\(source)",
+              "targetLocale": "zh-Hans",
+              "dictionaryVersion": 1,
+              "translation": "升级 - 防卫者到瑞伦标准版"
+            }
+          ]
+        }
+        """
+        try Data(cachePayload.utf8).write(
+            to: tempDirectory.appendingPathComponent("translations.json")
+        )
+        let dictionary = try HangarItemTranslationDictionary(
+            locale: "zh-Hans",
+            version: 1,
+            generatedAt: nil,
+            entries: [
+                HangarItemTranslationDictionary.Entry(
+                    source: "Upgrade",
+                    translation: "升级",
+                    kind: "keyword",
+                    aliases: []
+                ),
+                HangarItemTranslationDictionary.Entry(
+                    source: "Defender",
+                    translation: "防卫者",
+                    kind: "ship",
+                    aliases: []
+                ),
+                HangarItemTranslationDictionary.Entry(
+                    source: "Railen",
+                    translation: "瑞伦",
+                    kind: "ship",
+                    aliases: []
+                )
+            ]
+        )
+        let translator = HangarItemTranslator(language: .simplifiedChinese, dictionary: dictionary)
+        let service = OnDeviceHangarItemTranslationService(directoryURL: tempDirectory)
+        let haystack = service.searchableText(for: source, using: translator).localizedLowercase
+
+        #expect(haystack.contains("upgrade - defender to railen standard edition"))
+        #expect(haystack.contains("升级 - 防卫者 到 瑞伦 标准版"))
     }
 
     @Test func appLanguageAndHangarItemLanguageUseIndependentPreferences() throws {
@@ -4356,7 +4590,7 @@ private func makeHangarItemTranslationPayload() -> Data {
           "locale": "zh-Hans",
           "version": 1,
           "generatedAt": "2026-06-10T00:00:00.000Z",
-          "count": 2,
+          "count": 3,
           "entries": [
             {
               "source": "F8C Lightning",
@@ -4369,6 +4603,12 @@ private func makeHangarItemTranslationPayload() -> Data {
               "translation": "组合包 - 执政官包",
               "kind": "package",
               "aliases": []
+            },
+            {
+              "source": "Standalone Ships",
+              "translation": "独立舰船",
+              "kind": "keyword",
+              "aliases": ["Standalone Ship"]
             }
           ]
         }

@@ -54,7 +54,10 @@ struct FleetView: View {
     @State private var presentedPledgeSheet: FleetShipPledgeSheetContext?
     @Namespace private var shipCardTransitionNamespace
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
+    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
     @AppStorage("fleetDisplayMode") private var displayModeRawValue = DisplayMode.singleColumn.rawValue
+    @State private var itemTranslationState = HangarItemTranslationViewState()
+    @State private var translationService = OnDeviceHangarItemTranslationService.shared
 
     private var displayMode: DisplayMode {
         DisplayMode(rawValue: displayModeRawValue) ?? .singleColumn
@@ -66,13 +69,23 @@ struct FleetView: View {
     ]
 
     var body: some View {
+        let currentItemTranslator = itemTranslator
+
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 24) {
+                    IMEAwareSearchRow(
+                        text: $searchText,
+                        prompt: AppLocalizer.string("Search ships, manufacturers, functions")
+                    )
+
                     ForEach(displaySections) { section in
                         VStack(alignment: .leading, spacing: 14) {
                             if let title = section.title {
-                                Text(title)
+                                HangarTranslatedText(
+                                    source: title,
+                                    itemTranslator: currentItemTranslator
+                                )
                                     .font(.headline.weight(.semibold))
                                     .foregroundStyle(.secondary)
                                     .padding(.horizontal, 4)
@@ -87,10 +100,9 @@ struct FleetView: View {
                 .padding(.bottom, 22)
             }
             .id(appLanguageRawValue)
-            .searchable(
-                text: $searchText,
-                prompt: "Search ships, manufacturers, functions"
-            )
+            .task(id: hangarItemLanguageRawValue) {
+                await loadItemTranslationDictionary()
+            }
             .navigationTitle("Fleet")
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
@@ -124,6 +136,7 @@ struct FleetView: View {
             .navigationDestination(item: $selectedShipGroup) { shipGroup in
                 FleetShipDetailView(
                     shipGroup: shipGroup,
+                    itemTranslator: currentItemTranslator,
                     reloadToken: appModel.hangarFleetImageReloadToken,
                     transitionNamespace: shipCardTransitionNamespace
                 )
@@ -137,6 +150,7 @@ struct FleetView: View {
                 FleetShipPledgeSheet(
                     appModel: appModel,
                     context: context,
+                    itemTranslator: currentItemTranslator,
                     reloadToken: appModel.hangarFleetImageReloadToken
                 )
             }
@@ -173,6 +187,7 @@ struct FleetView: View {
                     shipGroup: shipGroup,
                     subtitle: subtitle,
                     msrpSummary: msrpSummary,
+                    itemTranslator: itemTranslator,
                     reloadToken: appModel.hangarFleetImageReloadToken
                 )
             case .twoColumn:
@@ -180,6 +195,7 @@ struct FleetView: View {
                     shipGroup: shipGroup,
                     subtitle: subtitle,
                     msrpSummary: msrpSummary,
+                    itemTranslator: itemTranslator,
                     reloadToken: appModel.hangarFleetImageReloadToken
                 )
             }
@@ -366,14 +382,27 @@ struct FleetView: View {
 
     private var filteredShipGroups: [GroupedFleetShip] {
         let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
+        _ = translationService.cacheGeneration
 
         guard !normalizedSearchText.isEmpty else {
             return snapshot.fleet.groupedForFleetDisplay
         }
 
         return snapshot.fleet.groupedForFleetDisplay.filter { shipGroup in
-            shipGroup.representative.searchHaystack.contains(normalizedSearchText)
+            shipGroup.ships.contains {
+                translationService
+                    .fleetSearchableText(for: $0, using: itemTranslator)
+                    .contains(normalizedSearchText)
+            }
         }
+    }
+
+    private var itemTranslator: HangarItemTranslator {
+        itemTranslationState.translator(for: hangarItemLanguageRawValue)
+    }
+
+    private func loadItemTranslationDictionary() async {
+        await itemTranslationState.loadDictionary(for: hangarItemLanguageRawValue)
     }
 
     private func cardSubtitle(for shipGroup: GroupedFleetShip) -> String? {
@@ -546,6 +575,9 @@ struct AllShipsBrowserView: View {
     @State private var loadState: AllShipsLoadState = .idle
     @State private var isRefreshingCatalog = false
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
+    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
+    @State private var itemTranslationState = HangarItemTranslationViewState()
+    @State private var translationService = OnDeviceHangarItemTranslationService.shared
 
     private var filteredItems: [AllShipsCatalogItem] {
         guard case let .loaded(items) = loadState else {
@@ -555,8 +587,12 @@ struct AllShipsBrowserView: View {
         let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
         let priceRange = activePriceRange
         let fullPriceRange = priceBounds
+        _ = translationService.cacheGeneration
         return items.filter { item in
-            let matchesSearch = normalizedSearchText.isEmpty || item.searchHaystack.contains(normalizedSearchText)
+            let matchesSearch = normalizedSearchText.isEmpty || item.searchHaystack(
+                using: itemTranslator,
+                translationService: translationService
+            ).contains(normalizedSearchText)
             return matchesSearch
                 && item.isWithinPriceRange(priceRange, fullRange: fullPriceRange)
                 && availabilityFilter.includes(item: item)
@@ -591,6 +627,8 @@ struct AllShipsBrowserView: View {
     }
 
     var body: some View {
+        let currentItemTranslator = itemTranslator
+
         NavigationStack {
             Group {
                 switch loadState {
@@ -599,6 +637,11 @@ struct AllShipsBrowserView: View {
                 case let .loaded(items):
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 14) {
+                            IMEAwareSearchRow(
+                                text: $searchText,
+                                prompt: AppLocalizer.string("Search all ships")
+                            )
+
                             AllShipsQuickFilters(
                                 priceRange: Binding(
                                     get: { activePriceRange },
@@ -614,7 +657,11 @@ struct AllShipsBrowserView: View {
                                 AllShipsEmptyView()
                             } else {
                                 ForEach(filteredItems) { item in
-                                    AllShipsCard(item: item, reloadToken: reloadToken)
+                                    AllShipsCard(
+                                        item: item,
+                                        itemTranslator: currentItemTranslator,
+                                        reloadToken: reloadToken
+                                    )
                                 }
                             }
                         }
@@ -633,10 +680,6 @@ struct AllShipsBrowserView: View {
             .id(appLanguageRawValue)
             .navigationTitle(AppLocalizer.string("All Ships"))
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(
-                text: $searchText,
-                prompt: AppLocalizer.string("Search all ships")
-            )
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
@@ -664,7 +707,18 @@ struct AllShipsBrowserView: View {
             .task {
                 await loadCatalog(force: false)
             }
+            .task(id: hangarItemLanguageRawValue) {
+                await loadItemTranslationDictionary()
+            }
         }
+    }
+
+    private var itemTranslator: HangarItemTranslator {
+        itemTranslationState.translator(for: hangarItemLanguageRawValue)
+    }
+
+    private func loadItemTranslationDictionary() async {
+        await itemTranslationState.loadDictionary(for: hangarItemLanguageRawValue)
     }
 
     private func refreshCatalog() async {
@@ -823,6 +877,21 @@ private struct AllShipsCatalogItem: Identifiable, Hashable {
         .compactMap { $0?.nilIfBlank }
         .joined(separator: " ")
         .localizedLowercase
+    }
+
+    func searchHaystack(
+        using itemTranslator: HangarItemTranslator,
+        translationService: OnDeviceHangarItemTranslationService
+    ) -> String {
+        translationService.allShipsCatalogSearchableText(
+            name: name,
+            manufacturer: manufacturer,
+            priceText: priceText,
+            storeAvailability: storeAvailability,
+            inGameStatus: inGameStatus,
+            aliases: aliases,
+            using: itemTranslator
+        )
     }
 
     func isWithinPriceRange(_ range: ClosedRange<Double>, fullRange: ClosedRange<Double>) -> Bool {
@@ -1225,6 +1294,7 @@ private struct AllShipsPriceRangeSlider: View {
 
 private struct AllShipsCard: View {
     let item: AllShipsCatalogItem
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
 
     var body: some View {
@@ -1239,7 +1309,10 @@ private struct AllShipsCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .top, spacing: 10) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(item.name)
+                        HangarTranslatedText(
+                            source: item.name,
+                            itemTranslator: itemTranslator
+                        )
                             .font(.headline)
                             .foregroundStyle(.primary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1419,6 +1492,7 @@ private struct FleetShipPledgeSheetContext: Identifiable {
 private struct FleetShipPledgeSheet: View {
     let appModel: AppModel
     let context: FleetShipPledgeSheetContext
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
     @Environment(\.dismiss) private var dismiss
 
@@ -1431,13 +1505,13 @@ private struct FleetShipPledgeSheet: View {
                             HangarPackageDetailView(
                                 appModel: appModel,
                                 packageGroup: packageGroup,
-                                itemTranslator: .original,
+                                itemTranslator: itemTranslator,
                                 reloadToken: reloadToken
                             )
                         } label: {
                             HangarPackageGroupRow(
                                 packageGroup: packageGroup,
-                                itemTranslator: .original,
+                                itemTranslator: itemTranslator,
                                 reloadToken: reloadToken
                             )
                         }
@@ -1446,7 +1520,7 @@ private struct FleetShipPledgeSheet: View {
                     Text(headerTitle)
                 }
             }
-            .navigationTitle(context.shipName)
+            .navigationTitle(itemTranslator.translated(context.shipName))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -1526,6 +1600,7 @@ private struct FleetShipHeroCard: View {
     let shipGroup: GroupedFleetShip
     let subtitle: String?
     let msrpSummary: String
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
     @State private var showsCatalogWarning = false
 
@@ -1541,7 +1616,10 @@ private struct FleetShipHeroCard: View {
                 VStack(alignment: .leading, spacing: 0) {
                     VStack(alignment: .leading, spacing: 0) {
                         HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Text(ship.displayName)
+                            HangarTranslatedText(
+                                source: ship.displayName,
+                                itemTranslator: itemTranslator
+                            )
                                 .font(.title3.weight(.heavy))
                                 .foregroundStyle(.white)
                                 .lineLimit(2)
@@ -1579,7 +1657,10 @@ private struct FleetShipHeroCard: View {
                         }
 
                         if let subtitle, !subtitle.isEmpty {
-                            Text(subtitle)
+                            HangarTranslatedText(
+                                source: subtitle,
+                                itemTranslator: itemTranslator
+                            )
                                 .font(.subheadline.weight(.medium))
                                 .foregroundStyle(Color.white.opacity(0.8))
                                 .lineLimit(1)
@@ -1592,7 +1673,10 @@ private struct FleetShipHeroCard: View {
 
                     HStack(alignment: .bottom, spacing: 12) {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text(shipGroup.sourcePackageSummary)
+                            FleetSourcePackageSummaryText(
+                                shipGroup: shipGroup,
+                                itemTranslator: itemTranslator
+                            )
                                 .font(.subheadline.weight(.medium))
                                 .foregroundStyle(Color.white.opacity(0.92))
                                 .lineLimit(2)
@@ -1675,6 +1759,7 @@ private struct FleetShipCompactCard: View {
     let shipGroup: GroupedFleetShip
     let subtitle: String?
     let msrpSummary: String
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
 
     @State private var showsCatalogWarning = false
@@ -1699,7 +1784,10 @@ private struct FleetShipCompactCard: View {
                 VStack(alignment: .leading, spacing: 0) {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(alignment: .top, spacing: 8) {
-                            Text(ship.displayName)
+                            HangarTranslatedText(
+                                source: ship.displayName,
+                                itemTranslator: itemTranslator
+                            )
                                 .font(.headline.weight(.heavy))
                                 .foregroundStyle(.white)
                                 .lineLimit(3)
@@ -1719,7 +1807,10 @@ private struct FleetShipCompactCard: View {
                         }
 
                         if let subtitle, !subtitle.isEmpty {
-                            Text(subtitle)
+                            HangarTranslatedText(
+                                source: subtitle,
+                                itemTranslator: itemTranslator
+                            )
                                 .font(.caption.weight(.medium))
                                 .foregroundStyle(Color.white.opacity(0.82))
                                 .lineLimit(2)
@@ -1732,7 +1823,10 @@ private struct FleetShipCompactCard: View {
 
                     VStack(alignment: .leading, spacing: 5) {
                         if shouldShowSourcePackageSummary {
-                            Text(shipGroup.sourcePackageSummary)
+                            FleetSourcePackageSummaryText(
+                                shipGroup: shipGroup,
+                                itemTranslator: itemTranslator
+                            )
                                 .font(.caption.weight(.medium))
                                 .foregroundStyle(Color.white.opacity(0.9))
                                 .lineLimit(2)
@@ -1826,8 +1920,38 @@ private struct FleetShipCompactCard: View {
     }
 }
 
+private struct FleetSourcePackageSummaryText: View {
+    let shipGroup: GroupedFleetShip
+    let itemTranslator: HangarItemTranslator
+
+    @State private var translationService = OnDeviceHangarItemTranslationService.shared
+
+    private var summary: String {
+        let distinctPackages = Array(Set(shipGroup.ships.map(\.sourcePackageName))).sorted()
+
+        if distinctPackages.count == 1, let packageName = distinctPackages.first {
+            return translationService.displayText(
+                for: packageName,
+                using: itemTranslator
+            )
+        }
+
+        if itemTranslator.language == .simplifiedChinese {
+            return "\(distinctPackages.count) 个组合包"
+        }
+
+        return AppLocalizer.format("%lld packages", distinctPackages.count)
+    }
+
+    var body: some View {
+        Text(summary)
+            .id(translationService.cacheGeneration)
+    }
+}
+
 struct FleetShipDetailView: View {
     let shipGroup: GroupedFleetShip
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
     let transitionNamespace: Namespace.ID
 
@@ -1844,6 +1968,7 @@ struct FleetShipDetailView: View {
                     FleetShipDetailHeroCard(
                         shipGroup: shipGroup,
                         detail: loadState.detail,
+                        itemTranslator: itemTranslator,
                         reloadToken: reloadToken
                     )
 
@@ -1862,7 +1987,10 @@ struct FleetShipDetailView: View {
                         }
 
                         if !detail.isUnavailable || detail.description?.nilIfBlank != nil {
-                            FleetShipDescriptionCard(description: detail.description)
+                            FleetShipDescriptionCard(
+                                description: detail.description,
+                                itemTranslator: itemTranslator
+                            )
                         }
 
                         if detail.hasSpecificationData {
@@ -1888,7 +2016,7 @@ struct FleetShipDetailView: View {
             .clipped()
         }
         .background(Color.black.ignoresSafeArea())
-        .navigationTitle(ship.displayName)
+        .navigationTitle(itemTranslator.translated(ship.displayName))
         .navigationBarTitleDisplayMode(.inline)
         .navigationTransition(
             .zoom(
@@ -1945,6 +2073,7 @@ private enum FleetShipDetailLoadState {
 private struct FleetShipDetailHeroCard: View {
     let shipGroup: GroupedFleetShip
     let detail: RSIShipDetailCatalog.ShipDetail?
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
 
     private var ship: FleetShip {
@@ -2030,7 +2159,10 @@ private struct FleetShipDetailHeroCard: View {
 
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(detail?.name ?? ship.displayName)
+                    HangarTranslatedText(
+                        source: detail?.name ?? ship.displayName,
+                        itemTranslator: itemTranslator
+                    )
                         .font(.system(size: 34, weight: .heavy, design: .default))
                         .foregroundStyle(.white)
                         .lineLimit(3)
@@ -2126,10 +2258,15 @@ private struct FleetShipOverviewCard: View {
 
 private struct FleetShipDescriptionCard: View {
     let description: String?
+    let itemTranslator: HangarItemTranslator
 
     var body: some View {
         FleetShipDetailPanel(title: "DESCRIPTION", subtitle: nil) {
-            Text(description?.nilIfBlank ?? AppLocalizer.string("Description unavailable."))
+            HangarTranslatedText(
+                source: description?.nilIfBlank ?? AppLocalizer.string("Description unavailable."),
+                itemTranslator: itemTranslator,
+                allowsOnDemandTranslation: true
+            )
                 .font(.body)
                 .foregroundStyle(Color.white.opacity(0.88))
                 .fixedSize(horizontal: false, vertical: true)

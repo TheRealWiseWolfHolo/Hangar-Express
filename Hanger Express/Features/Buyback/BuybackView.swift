@@ -4,6 +4,7 @@ import UIKit
 struct BuybackView: View {
     let appModel: AppModel
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
+    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
 
     enum SearchFilter: CaseIterable, Identifiable {
         case standaloneShips
@@ -36,10 +37,25 @@ struct BuybackView: View {
     @State private var checkoutContext: RSICheckoutContext?
     @State private var buybackError: BuybackCheckoutError?
     @State private var isPreparingCheckout = false
+    @State private var itemTranslationState = HangarItemTranslationViewState()
+    @State private var translationService = OnDeviceHangarItemTranslationService.shared
 
     var body: some View {
+        let currentItemTranslator = itemTranslator
+
         NavigationStack {
             List {
+                Section {
+                    IMEAwareSearchRow(
+                        text: $searchText,
+                        isActive: $isSearchPresented,
+                        prompt: AppLocalizer.string("Search buy-back titles and notes")
+                    )
+                }
+                .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+
                 if isSearchPresented {
                     Section {
                         ScrollView(.horizontal, showsIndicators: false) {
@@ -83,6 +99,7 @@ struct BuybackView: View {
                             } label: {
                                 BuybackGroupRow(
                                     itemGroup: itemGroup,
+                                    itemTranslator: currentItemTranslator,
                                     reloadToken: appModel.buybackImageReloadToken
                                 )
                             }
@@ -108,11 +125,9 @@ struct BuybackView: View {
                 }
             }
             .id(appLanguageRawValue)
-            .searchable(
-                text: $searchText,
-                isPresented: $isSearchPresented,
-                prompt: "Search buy-back titles and notes"
-            )
+            .task(id: hangarItemLanguageRawValue) {
+                await loadItemTranslationDictionary()
+            }
             .onChange(of: isSearchPresented) { _, isPresented in
                 guard !isPresented else {
                     return
@@ -150,7 +165,7 @@ struct BuybackView: View {
             }
             .sheet(item: $pendingBuybackGroup) { itemGroup in
                 BuybackConfirmationSheet(
-                    itemTitle: itemGroup.representative.title,
+                    itemTitle: currentItemTranslator.translated(itemGroup.representative.title),
                     onBack: {
                         pendingBuybackGroup = nil
                     },
@@ -192,7 +207,9 @@ struct BuybackView: View {
     }
 
     private var filteredItemGroups: [GroupedBuybackPledge] {
-        snapshot.buyback.groupedForBuybackDisplay.filter { itemGroup in
+        _ = translationService.cacheGeneration
+
+        return snapshot.buyback.groupedForBuybackDisplay.filter { itemGroup in
             let item = itemGroup.representative
 
             guard matchesSearchFilters(for: item) else {
@@ -203,8 +220,18 @@ struct BuybackView: View {
                 return true
             }
 
-            return item.searchHaystack.contains(searchText.localizedLowercase)
+            return translationService
+                .buybackSearchableText(for: item, using: itemTranslator)
+                .contains(searchText.localizedLowercase)
         }
+    }
+
+    private var itemTranslator: HangarItemTranslator {
+        itemTranslationState.translator(for: hangarItemLanguageRawValue)
+    }
+
+    private func loadItemTranslationDictionary() async {
+        await itemTranslationState.loadDictionary(for: hangarItemLanguageRawValue)
     }
 
     private func matchesSearchFilters(for item: BuybackPledge) -> Bool {
@@ -508,10 +535,10 @@ private extension GroupedBuybackPledge {
         }
 
         if Calendar.current.isDate(earliestDate, inSameDayAs: latestDate) {
-            return latestDate.formatted(date: .abbreviated, time: .omitted)
+            return AppLocalizer.displayDate(latestDate)
         }
 
-        return "\(earliestDate.formatted(date: .abbreviated, time: .omitted)) – \(latestDate.formatted(date: .abbreviated, time: .omitted))"
+        return "\(AppLocalizer.displayDate(earliestDate)) – \(AppLocalizer.displayDate(latestDate))"
     }
 }
 
@@ -560,6 +587,7 @@ private struct BuybackDebugExport: Codable {
 
 private struct BuybackGroupRow: View {
     let itemGroup: GroupedBuybackPledge
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
 
     private var item: BuybackPledge {
@@ -577,7 +605,10 @@ private struct BuybackGroupRow: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(item.title)
+                    HangarTranslatedText(
+                        source: item.title,
+                        itemTranslator: itemTranslator
+                    )
                         .font(.headline)
 
                     if itemGroup.quantity > 1 {

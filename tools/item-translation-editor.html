@@ -1,0 +1,973 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hangar Item Translation Editor</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d10;
+      --panel: #181b20;
+      --panel-2: #20242b;
+      --line: #343a44;
+      --text: #f2f5f8;
+      --muted: #a8b0bb;
+      --accent: #5aa9ff;
+      --accent-2: #47d18c;
+      --danger: #ff6b6b;
+      --warn: #ffb454;
+      --radius: 8px;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    button,
+    input,
+    textarea,
+    select {
+      font: inherit;
+    }
+
+    button {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-2);
+      color: var(--text);
+      min-height: 28px;
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      border-color: var(--accent);
+    }
+
+    button.primary {
+      border-color: rgba(90, 169, 255, 0.6);
+      background: #17324f;
+    }
+
+    button.success {
+      border-color: rgba(71, 209, 140, 0.6);
+      background: #173a2a;
+    }
+
+    button.danger {
+      border-color: rgba(255, 107, 107, 0.65);
+      background: #3b1c1f;
+    }
+
+    input,
+    textarea,
+    select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #101318;
+      color: var(--text);
+      min-height: 28px;
+      padding: 4px 7px;
+      outline: none;
+    }
+
+    input:focus,
+    textarea:focus,
+    select:focus {
+      border-color: var(--accent);
+    }
+
+    textarea {
+      min-height: 42px;
+      resize: vertical;
+    }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid var(--line);
+      background: rgba(11, 13, 16, 0.96);
+      backdrop-filter: blur(16px);
+    }
+
+    .bar {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 10px 12px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.2;
+    }
+
+    .path {
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .toolbar,
+    .filters,
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 8px;
+      align-items: end;
+    }
+
+    .toolbar > *,
+    .filters > * {
+      grid-column: span 2;
+    }
+
+    .toolbar .wide,
+    .filters .wide {
+      grid-column: span 4;
+    }
+
+    .stats {
+      align-items: stretch;
+    }
+
+    .stat {
+      grid-column: span 2;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      padding: 7px 9px;
+    }
+
+    .stat .label {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .stat .value {
+      margin-top: 1px;
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    main {
+      max-width: 1440px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 10px 12px;
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 10px;
+    }
+
+    aside {
+      position: sticky;
+      top: 132px;
+      align-self: start;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      padding: 8px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .drop-zone {
+      border: 1px dashed var(--line);
+      border-radius: var(--radius);
+      padding: 10px;
+      color: var(--muted);
+      background: #11151b;
+    }
+
+    .drop-zone.is-dragging {
+      border-color: var(--accent);
+      color: var(--text);
+    }
+
+    .help,
+    .status,
+    .issue-list {
+      border-radius: var(--radius);
+      padding: 8px 9px;
+      background: #11151b;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .status.ok {
+      color: #b5f1cf;
+      background: #102117;
+      border: 1px solid rgba(71, 209, 140, 0.35);
+    }
+
+    .status.warn {
+      color: #ffd7a0;
+      background: #24190b;
+      border: 1px solid rgba(255, 180, 84, 0.35);
+    }
+
+    .issue-list {
+      display: grid;
+      gap: 4px;
+      max-height: 180px;
+      overflow: auto;
+    }
+
+    .issue {
+      color: #ffd7a0;
+    }
+
+    .entry-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .entry {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      overflow: hidden;
+    }
+
+    .entry.invalid {
+      border-color: rgba(255, 180, 84, 0.8);
+    }
+
+    .entry-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 10px;
+      align-items: center;
+      padding: 7px 9px;
+      background: var(--panel-2);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .entry-title {
+      min-width: 0;
+      font-weight: 700;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .badge {
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      padding: 2px 6px;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .badge.done {
+      color: #b5f1cf;
+      border-color: rgba(71, 209, 140, 0.35);
+    }
+
+    .badge.draft {
+      color: #ffd7a0;
+      border-color: rgba(255, 180, 84, 0.35);
+    }
+
+    .entry-body {
+      padding: 8px;
+      display: grid;
+      grid-template-columns: 1fr 1fr 110px;
+      gap: 8px;
+      align-items: start;
+    }
+
+    .field {
+      display: grid;
+      gap: 3px;
+    }
+
+    .field label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .field.aliases {
+      grid-column: 1 / -1;
+    }
+
+    .entry-actions {
+      display: flex;
+      gap: 6px;
+      justify-content: flex-end;
+      padding: 0 8px 8px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .empty-state {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      min-height: 180px;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      text-align: center;
+      padding: 16px;
+    }
+
+    @media (max-width: 980px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+
+      aside {
+        position: static;
+      }
+
+      .toolbar > *,
+      .filters > *,
+      .toolbar .wide,
+      .filters .wide,
+      .stat {
+        grid-column: span 6;
+      }
+
+    }
+
+    @media (max-width: 640px) {
+      .toolbar > *,
+      .filters > *,
+      .toolbar .wide,
+      .filters .wide,
+      .stat {
+        grid-column: span 12;
+      }
+
+      .entry-body {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .field.aliases {
+        grid-column: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="bar">
+        <div class="title-row">
+          <div>
+            <h1>Hangar Item Translation Editor</h1>
+            <div class="path">Edit source JSON: /Users/chenliu/Projects/StarCitizen-Info/data/item-translations/zh-Hans.json</div>
+          </div>
+          <button class="success" id="downloadButton" type="button">Download JSON</button>
+        </div>
+
+        <div class="toolbar">
+          <label class="wide">
+            <input id="fileInput" type="file" accept="application/json,.json">
+          </label>
+          <button id="pasteButton" type="button">Paste JSON</button>
+          <button id="addEntryButton" type="button">Add Entry</button>
+          <button id="addKeywordButton" type="button">Add Keyword</button>
+          <button id="sortButton" type="button">Sort</button>
+        </div>
+
+        <div class="filters">
+          <label class="wide">
+            <input id="searchInput" type="search" placeholder="Search source, translation, kind, aliases">
+          </label>
+          <label>
+            <select id="kindFilter">
+              <option value="">All kinds</option>
+            </select>
+          </label>
+          <label>
+            <select id="statusFilter">
+              <option value="">All rows</option>
+              <option value="complete">Complete</option>
+              <option value="draft">Draft</option>
+              <option value="issue">Issues</option>
+            </select>
+          </label>
+          <label>
+            <input id="localeInput" type="text" value="zh-Hans" placeholder="locale">
+          </label>
+          <label>
+            <input id="versionInput" type="number" min="1" step="1" value="1" placeholder="version">
+          </label>
+        </div>
+
+        <div class="stats">
+          <div class="stat">
+            <div class="label">Rows</div>
+            <div class="value" id="rowCount">0</div>
+          </div>
+          <div class="stat">
+            <div class="label">Complete</div>
+            <div class="value" id="completeCount">0</div>
+          </div>
+          <div class="stat">
+            <div class="label">Draft</div>
+            <div class="value" id="draftCount">0</div>
+          </div>
+          <div class="stat">
+            <div class="label">Issues</div>
+            <div class="value" id="issueCount">0</div>
+          </div>
+          <div class="stat">
+            <div class="label">Visible</div>
+            <div class="value" id="visibleCount">0</div>
+          </div>
+          <div class="stat">
+            <div class="label">Kinds</div>
+            <div class="value" id="kindCount">0</div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <aside>
+        <div class="drop-zone" id="dropZone">
+          Drop zh-Hans.json here, or use the file picker above.
+        </div>
+        <div class="status warn" id="statusBox">No JSON loaded yet.</div>
+        <div class="issue-list" id="issueList"></div>
+        <div class="help">
+          Export downloads source-format JSON with only <code>locale</code>, <code>version</code>, and <code>entries</code>.
+          After replacing the source file, rebuild StarCitizen-Info with <code>node scripts/build-item-translations-json.mjs</code>.
+        </div>
+      </aside>
+
+      <section class="entry-list" id="entryList">
+        <div class="empty-state">Upload a translation JSON file to start editing.</div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="pasteDialog">
+    <form method="dialog" style="display:grid; gap:12px; min-width:min(760px, 90vw);">
+      <h2 style="margin:0;">Paste JSON</h2>
+      <textarea id="pasteText" style="min-height:320px;" placeholder='{"locale":"zh-Hans","version":1,"entries":[]}'></textarea>
+      <div style="display:flex; justify-content:flex-end; gap:8px;">
+        <button value="cancel" type="submit">Cancel</button>
+        <button class="primary" id="loadPasteButton" value="default" type="button">Load</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+    const state = {
+      locale: "zh-Hans",
+      version: 1,
+      entries: [],
+      issuesByIndex: new Map(),
+      visibleIndexes: []
+    };
+
+    const elements = {
+      fileInput: document.getElementById("fileInput"),
+      pasteButton: document.getElementById("pasteButton"),
+      pasteDialog: document.getElementById("pasteDialog"),
+      pasteText: document.getElementById("pasteText"),
+      loadPasteButton: document.getElementById("loadPasteButton"),
+      addEntryButton: document.getElementById("addEntryButton"),
+      addKeywordButton: document.getElementById("addKeywordButton"),
+      sortButton: document.getElementById("sortButton"),
+      downloadButton: document.getElementById("downloadButton"),
+      searchInput: document.getElementById("searchInput"),
+      kindFilter: document.getElementById("kindFilter"),
+      statusFilter: document.getElementById("statusFilter"),
+      localeInput: document.getElementById("localeInput"),
+      versionInput: document.getElementById("versionInput"),
+      rowCount: document.getElementById("rowCount"),
+      completeCount: document.getElementById("completeCount"),
+      draftCount: document.getElementById("draftCount"),
+      issueCount: document.getElementById("issueCount"),
+      visibleCount: document.getElementById("visibleCount"),
+      kindCount: document.getElementById("kindCount"),
+      statusBox: document.getElementById("statusBox"),
+      issueList: document.getElementById("issueList"),
+      entryList: document.getElementById("entryList"),
+      dropZone: document.getElementById("dropZone")
+    };
+
+    function normalizeLookupKey(value) {
+      return String(value || "")
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .trim()
+        .replace(/\s+/g, " ")
+        .toLocaleLowerCase("en-US");
+    }
+
+    function splitAliases(value) {
+      return String(value || "")
+        .split(/\r?\n|,/)
+        .map((alias) => alias.trim())
+        .filter(Boolean);
+    }
+
+    function aliasesText(entry) {
+      return Array.isArray(entry.aliases) ? entry.aliases.join(", ") : "";
+    }
+
+    function cleanEntry(entry) {
+      return {
+        source: String(entry?.source || "").trim(),
+        translation: String(entry?.translation || "").trim(),
+        kind: String(entry?.kind || "").trim(),
+        aliases: Array.isArray(entry?.aliases)
+          ? entry.aliases.map((alias) => String(alias).trim()).filter(Boolean)
+          : []
+      };
+    }
+
+    function loadPayload(payload) {
+      if (!payload || typeof payload !== "object" || !Array.isArray(payload.entries)) {
+        throw new Error("JSON must contain an entries array.");
+      }
+
+      state.locale = String(payload.locale || "zh-Hans").trim() || "zh-Hans";
+      state.version = Number.isInteger(payload.version) && payload.version > 0 ? payload.version : 1;
+      state.entries = payload.entries.map(cleanEntry);
+      elements.localeInput.value = state.locale;
+      elements.versionInput.value = String(state.version);
+      update();
+      setStatus(`Loaded ${state.entries.length} rows.`, "ok");
+    }
+
+    function setStatus(message, mode) {
+      elements.statusBox.textContent = message;
+      elements.statusBox.className = `status ${mode || "warn"}`;
+    }
+
+    async function readFile(file) {
+      const text = await file.text();
+      loadPayload(JSON.parse(text));
+    }
+
+    function validate() {
+      state.issuesByIndex = new Map();
+      const seen = new Map();
+
+      state.entries.forEach((entry, index) => {
+        const issues = [];
+        if (!entry.source.trim()) issues.push("Missing source.");
+        if (!entry.kind.trim()) issues.push("Missing kind.");
+
+        const keys = [entry.source, ...(entry.aliases || [])];
+        keys.forEach((keySource) => {
+          const key = normalizeLookupKey(keySource);
+          if (!key) return;
+          if (seen.has(key)) {
+            const previousIndex = seen.get(key) + 1;
+            issues.push(`Duplicate key "${keySource}" also used by row ${previousIndex}.`);
+          } else {
+            seen.set(key, index);
+          }
+        });
+
+        if (issues.length > 0) {
+          state.issuesByIndex.set(index, issues);
+        }
+      });
+    }
+
+    function filteredIndexes() {
+      const query = elements.searchInput.value.trim().toLocaleLowerCase();
+      const kind = elements.kindFilter.value;
+      const status = elements.statusFilter.value;
+
+      return state.entries
+        .map((entry, index) => ({ entry, index }))
+        .filter(({ entry, index }) => {
+          if (kind && entry.kind !== kind) return false;
+          if (status === "complete" && !entry.translation) return false;
+          if (status === "draft" && entry.translation) return false;
+          if (status === "issue" && !state.issuesByIndex.has(index)) return false;
+          if (!query) return true;
+          const haystack = [
+            entry.source,
+            entry.translation,
+            entry.kind,
+            ...(entry.aliases || [])
+          ].join(" ").toLocaleLowerCase();
+          return haystack.includes(query);
+        })
+        .map(({ index }) => index);
+    }
+
+    function updateKindFilter() {
+      const selected = elements.kindFilter.value;
+      const kinds = Array.from(new Set(state.entries.map((entry) => entry.kind).filter(Boolean))).sort();
+      elements.kindFilter.innerHTML = '<option value="">All kinds</option>';
+      kinds.forEach((kind) => {
+        const option = document.createElement("option");
+        option.value = kind;
+        option.textContent = kind;
+        elements.kindFilter.append(option);
+      });
+      if (kinds.includes(selected)) {
+        elements.kindFilter.value = selected;
+      }
+      elements.kindCount.textContent = String(kinds.length);
+    }
+
+    function updateStats() {
+      const completeCount = state.entries.filter((entry) => entry.translation).length;
+      elements.rowCount.textContent = String(state.entries.length);
+      elements.completeCount.textContent = String(completeCount);
+      elements.draftCount.textContent = String(state.entries.length - completeCount);
+      elements.issueCount.textContent = String(state.issuesByIndex.size);
+      elements.visibleCount.textContent = String(state.visibleIndexes.length);
+    }
+
+    function updateStatus() {
+      if (state.entries.length === 0) {
+        setStatus("No JSON loaded yet.", "warn");
+      } else {
+        setStatus(
+          state.issuesByIndex.size === 0 ? "JSON is valid." : "Fix validation issues before rebuilding.",
+          state.issuesByIndex.size === 0 ? "ok" : "warn"
+        );
+      }
+    }
+
+    function renderIssues() {
+      elements.issueList.innerHTML = "";
+      if (state.issuesByIndex.size === 0) {
+        const div = document.createElement("div");
+        div.textContent = "No validation issues.";
+        elements.issueList.append(div);
+        return;
+      }
+
+      for (const [index, issues] of state.issuesByIndex) {
+        const div = document.createElement("div");
+        div.className = "issue";
+        div.textContent = `Row ${index + 1}: ${issues.join(" ")}`;
+        elements.issueList.append(div);
+      }
+    }
+
+    function renderEntries() {
+      elements.entryList.innerHTML = "";
+      if (state.entries.length === 0) {
+        const div = document.createElement("div");
+        div.className = "empty-state";
+        div.textContent = "Upload a translation JSON file to start editing.";
+        elements.entryList.append(div);
+        return;
+      }
+
+      if (state.visibleIndexes.length === 0) {
+        const div = document.createElement("div");
+        div.className = "empty-state";
+        div.textContent = "No rows match the current filters.";
+        elements.entryList.append(div);
+        return;
+      }
+
+      const fragment = document.createDocumentFragment();
+      state.visibleIndexes.forEach((index) => {
+        fragment.append(renderEntry(index));
+      });
+      elements.entryList.append(fragment);
+    }
+
+    function renderEntry(index) {
+      const entry = state.entries[index];
+      const issues = state.issuesByIndex.get(index) || [];
+      const wrapper = document.createElement("article");
+      wrapper.className = `entry ${issues.length ? "invalid" : ""}`;
+      wrapper.dataset.index = String(index);
+
+      const header = document.createElement("div");
+      header.className = "entry-header";
+
+      const title = document.createElement("div");
+      title.className = "entry-title";
+      title.textContent = entry.source || `Row ${index + 1}`;
+
+      const kind = document.createElement("span");
+      kind.className = "badge";
+      kind.textContent = entry.kind || "missing kind";
+
+      const status = document.createElement("span");
+      status.className = `badge ${entry.translation ? "done" : "draft"}`;
+      status.textContent = entry.translation ? "Complete" : "Draft";
+
+      header.append(title, kind, status);
+
+      const body = document.createElement("div");
+      body.className = "entry-body";
+
+      body.append(
+        field("Source", input("source", entry.source, index)),
+        field("Translation", input("translation", entry.translation, index)),
+        field("Kind", input("kind", entry.kind, index)),
+        field("Aliases", aliasInput(aliasesText(entry), index), "aliases")
+      );
+
+      const actions = document.createElement("div");
+      actions.className = "entry-actions";
+
+      const duplicateButton = document.createElement("button");
+      duplicateButton.type = "button";
+      duplicateButton.textContent = "Duplicate";
+      duplicateButton.addEventListener("click", () => {
+        const copy = cleanEntry(entry);
+        copy.source = `${copy.source} copy`;
+        state.entries.splice(index + 1, 0, copy);
+        update();
+      });
+
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "danger";
+      deleteButton.textContent = "Delete";
+      deleteButton.addEventListener("click", () => {
+        state.entries.splice(index, 1);
+        update();
+      });
+
+      actions.append(duplicateButton, deleteButton);
+      wrapper.append(header, body, actions);
+      return wrapper;
+    }
+
+    function syncEntryShell(index) {
+      const wrapper = elements.entryList.querySelector(`.entry[data-index="${index}"]`);
+      if (!wrapper) return;
+
+      const entry = state.entries[index];
+      const issues = state.issuesByIndex.get(index) || [];
+      wrapper.classList.toggle("invalid", issues.length > 0);
+      const title = wrapper.querySelector(".entry-title");
+      if (title) title.textContent = entry.source || `Row ${index + 1}`;
+
+      const badges = wrapper.querySelectorAll(".badge");
+      if (badges[0]) {
+        badges[0].textContent = entry.kind || "missing kind";
+      }
+      if (badges[1]) {
+        badges[1].className = `badge ${entry.translation ? "done" : "draft"}`;
+        badges[1].textContent = entry.translation ? "Complete" : "Draft";
+      }
+    }
+
+    function field(labelText, control, extraClass) {
+      const div = document.createElement("div");
+      div.className = extraClass ? `field ${extraClass}` : "field";
+      const label = document.createElement("label");
+      label.textContent = labelText;
+      div.append(label, control);
+      return div;
+    }
+
+    function input(prop, value, index) {
+      const control = document.createElement("input");
+      control.dataset.index = String(index);
+      control.dataset.prop = prop;
+      control.value = value || "";
+      control.addEventListener("input", () => {
+        state.entries[index][prop] = control.value.trim();
+        rowSoftUpdate(index, prop === "kind");
+      });
+      return control;
+    }
+
+    function textarea(prop, value, index) {
+      const control = document.createElement("textarea");
+      control.dataset.index = String(index);
+      control.dataset.prop = prop;
+      control.value = value || "";
+      control.addEventListener("input", () => {
+        state.entries[index][prop] = splitAliases(control.value);
+        rowSoftUpdate(index);
+      });
+      return control;
+    }
+
+    function aliasInput(value, index) {
+      const control = document.createElement("input");
+      control.dataset.index = String(index);
+      control.dataset.prop = "aliases";
+      control.value = value || "";
+      control.placeholder = "Alias, Another Alias";
+      control.addEventListener("input", () => {
+        state.entries[index].aliases = splitAliases(control.value);
+        rowSoftUpdate(index);
+      });
+      return control;
+    }
+
+    function update() {
+      state.locale = elements.localeInput.value.trim() || "zh-Hans";
+      state.version = Math.max(1, Number.parseInt(elements.versionInput.value, 10) || 1);
+      validate();
+      updateKindFilter();
+      state.visibleIndexes = filteredIndexes();
+      updateStats();
+      renderIssues();
+      renderEntries();
+      updateStatus();
+    }
+
+    let softUpdateTimer = null;
+    function softUpdate() {
+      window.clearTimeout(softUpdateTimer);
+      softUpdateTimer = window.setTimeout(update, 180);
+    }
+
+    let rowSoftUpdateTimer = null;
+    function rowSoftUpdate(index, refreshKinds = false) {
+      window.clearTimeout(rowSoftUpdateTimer);
+      rowSoftUpdateTimer = window.setTimeout(() => {
+        validate();
+        if (refreshKinds) updateKindFilter();
+        updateStats();
+        renderIssues();
+        syncEntryShell(index);
+        updateStatus();
+      }, 120);
+    }
+
+    function addEntry(kind = "ship") {
+      state.entries.push({
+        source: "",
+        translation: "",
+        kind,
+        aliases: []
+      });
+      update();
+      window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+    }
+
+    function sortEntries() {
+      state.entries.sort((lhs, rhs) => {
+        const kindCompare = lhs.kind.localeCompare(rhs.kind);
+        if (kindCompare !== 0) return kindCompare;
+        return lhs.source.localeCompare(rhs.source, undefined, { numeric: true, sensitivity: "base" });
+      });
+      update();
+    }
+
+    function exportPayload() {
+      return {
+        locale: elements.localeInput.value.trim() || "zh-Hans",
+        version: Math.max(1, Number.parseInt(elements.versionInput.value, 10) || 1),
+        entries: state.entries.map(cleanEntry)
+      };
+    }
+
+    function downloadJSON() {
+      update();
+      const payload = exportPayload();
+      const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${payload.locale || "zh-Hans"}.json`;
+      document.body.append(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    elements.fileInput.addEventListener("change", async () => {
+      const file = elements.fileInput.files?.[0];
+      if (!file) return;
+      try {
+        await readFile(file);
+      } catch (error) {
+        setStatus(error.message || String(error), "warn");
+      }
+    });
+
+    elements.pasteButton.addEventListener("click", () => {
+      elements.pasteDialog.showModal();
+    });
+
+    elements.loadPasteButton.addEventListener("click", () => {
+      try {
+        loadPayload(JSON.parse(elements.pasteText.value));
+        elements.pasteDialog.close();
+      } catch (error) {
+        setStatus(error.message || String(error), "warn");
+      }
+    });
+
+    elements.addEntryButton.addEventListener("click", () => addEntry("ship"));
+    elements.addKeywordButton.addEventListener("click", () => addEntry("keyword"));
+    elements.sortButton.addEventListener("click", sortEntries);
+    elements.downloadButton.addEventListener("click", downloadJSON);
+    elements.searchInput.addEventListener("input", update);
+    elements.kindFilter.addEventListener("change", update);
+    elements.statusFilter.addEventListener("change", update);
+    elements.localeInput.addEventListener("input", softUpdate);
+    elements.versionInput.addEventListener("input", softUpdate);
+
+    ["dragenter", "dragover"].forEach((eventName) => {
+      elements.dropZone.addEventListener(eventName, (event) => {
+        event.preventDefault();
+        elements.dropZone.classList.add("is-dragging");
+      });
+    });
+
+    ["dragleave", "drop"].forEach((eventName) => {
+      elements.dropZone.addEventListener(eventName, (event) => {
+        event.preventDefault();
+        elements.dropZone.classList.remove("is-dragging");
+      });
+    });
+
+    elements.dropZone.addEventListener("drop", async (event) => {
+      const file = event.dataTransfer.files?.[0];
+      if (!file) return;
+      try {
+        await readFile(file);
+      } catch (error) {
+        setStatus(error.message || String(error), "warn");
+      }
+    });
+
+    update();
+  </script>
+</body>
+</html>

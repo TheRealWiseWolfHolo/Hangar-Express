@@ -270,7 +270,7 @@ struct AccountView: View {
             return AppLocalizer.string("Not yet synced")
         }
 
-        return lastRefreshAt.formatted(date: .abbreviated, time: .shortened)
+        return AppLocalizer.displayDateTime(lastRefreshAt)
     }
 
     private var snapshotColumns: [GridItem] {
@@ -629,6 +629,10 @@ private struct ConciergeLevel: Hashable {
         self.upperBoundSpendUSD = upperBoundSpendUSD
         self.backgroundColor = backgroundColor
         self.textColor = textColor
+    }
+
+    var localizedTitle: String {
+        AppLocalizer.string(title)
     }
 
     var requirementSummary: String {
@@ -1053,7 +1057,7 @@ private struct ConciergeLevelTag: View {
     let level: ConciergeLevel
 
     var body: some View {
-        Text(level.title)
+        Text(level.localizedTitle)
             .font(.caption.weight(.semibold))
             .foregroundStyle(level.textColor)
             .lineLimit(1)
@@ -1080,8 +1084,8 @@ private struct ConciergeLevelsSheetView: View {
         NavigationStack {
             List {
                 Section {
-                    LabeledContent("Current Spend", value: totalSpendUSD?.usdString ?? "Unavailable")
-                    LabeledContent("Current Tier", value: currentLevel?.title ?? "Below Concierge")
+                    LabeledContent("Current Spend", value: totalSpendUSD?.usdString ?? AppLocalizer.string("Unavailable"))
+                    LabeledContent("Current Tier", value: currentLevel?.localizedTitle ?? AppLocalizer.string("Below Concierge"))
                 }
 
                 Section("Concierge Tiers") {
@@ -1122,7 +1126,7 @@ private struct ConciergeLevelRequirementRow: View {
                     .font(.subheadline)
                     .foregroundStyle(.primary)
 
-                Text(isCurrent ? "Current tier" : (isUnlocked ? "Unlocked" : "Not reached yet"))
+                Text(AppLocalizer.string(isCurrent ? "Current tier" : (isUnlocked ? "Unlocked" : "Not reached yet")))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
