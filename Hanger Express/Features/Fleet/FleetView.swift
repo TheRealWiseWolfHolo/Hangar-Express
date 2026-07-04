@@ -465,7 +465,7 @@ enum FleetTool: String, CaseIterable, Identifiable {
         case .ccuChainCalculator:
             return AppLocalizer.string("Find the lowest-cost upgrade chain")
         case .resetCharacter:
-            return AppLocalizer.string("To be implemented")
+            return AppLocalizer.string("Request an RSI character repair")
         }
     }
 
@@ -486,6 +486,7 @@ enum FleetTool: String, CaseIterable, Identifiable {
         self == .allShips
             || self == .authorizedDevices
             || self == .ccuChainCalculator
+            || self == .resetCharacter
     }
 }
 

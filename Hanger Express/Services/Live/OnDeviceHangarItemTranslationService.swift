@@ -7,6 +7,7 @@ nonisolated struct OnDeviceHangarItemTranslationPreloadProgress: Equatable, Send
         case preparing
         case translating
         case finished
+        case downloadRequired
         case unavailable
         case failed
     }
@@ -21,6 +22,7 @@ typealias OnDeviceHangarItemTranslationPreloadLogHandler = @MainActor @Sendable 
 
 private nonisolated enum TranslationModelInstallStatus: Sendable {
     case installed
+    case downloadRequired
     case unavailable
     case timedOut
 
@@ -70,7 +72,8 @@ final class OnDeviceHangarItemTranslationService {
     private let cacheURL: URL
     private var cachedTranslations: [CacheKey: String] = [:]
     private var preprocessedLocales: Set<String> = []
-    private var installedStatusByLocale: [String: Bool] = [:]
+    private var preprocessedTranslationKeys: Set<CacheKey> = []
+    private var installedStatusByLocale: [String: TranslationModelInstallStatus] = [:]
     private var inFlightPreloadKeys: Set<CacheKey> = []
     private var inFlightOnDemandTranslationTasks: [CacheKey: Task<String?, Never>] = [:]
     private(set) var cacheGeneration = 0
@@ -90,6 +93,7 @@ final class OnDeviceHangarItemTranslationService {
         let persistedCache = Self.loadPersistedCache(from: cacheURL)
         cachedTranslations = persistedCache.translations
         preprocessedLocales = persistedCache.preprocessedLocales
+        preprocessedTranslationKeys = persistedCache.preprocessedTranslationKeys
     }
 
     func displayText(
@@ -342,6 +346,32 @@ final class OnDeviceHangarItemTranslationService {
         }
     }
 
+    func prepareTranslationModel(
+        for language: HangarItemLanguage,
+        logHandler: OnDeviceHangarItemTranslationPreloadLogHandler? = nil
+    ) async -> Bool {
+        guard let targetLocale = language.translationLocaleIdentifier else {
+            return true
+        }
+
+        installedStatusByLocale.removeValue(forKey: targetLocale)
+        let sourceLanguage = Locale.Language(identifier: "en")
+        let targetLanguage = Locale.Language(identifier: targetLocale)
+        let session = TranslationSession(installedSource: sourceLanguage, target: targetLanguage)
+
+        do {
+            logHandler?("Requesting Translation model download for en -> \(targetLocale).")
+            try await session.prepareTranslation()
+            installedStatusByLocale[targetLocale] = .installed
+            logHandler?("Translation model is ready for en -> \(targetLocale).")
+            return true
+        } catch {
+            installedStatusByLocale.removeValue(forKey: targetLocale)
+            logHandler?("Translation model download did not complete: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     func preloadTranslations(
         for sources: [String],
         using itemTranslator: HangarItemTranslator,
@@ -362,20 +392,13 @@ final class OnDeviceHangarItemTranslationService {
         }
 
         logHandler?("On-device preload service started. sources=\(sources.count), targetLocale=\(targetLocale).")
-        progressHandler?(
-            OnDeviceHangarItemTranslationPreloadProgress(
-                phase: .preparing,
-                completedUnitCount: 0,
-                totalUnitCount: 0
-            )
-        )
-
         logHandler?("Building pending machine translation source list off the main actor.")
         let pendingSources = await Self.detachedPendingPreloadSources(
             from: sources,
             targetLocale: targetLocale,
             itemTranslator: itemTranslator,
             cachedTranslationKeys: Set(cachedTranslations.keys),
+            preprocessedTranslationKeys: preprocessedTranslationKeys,
             inFlightKeys: inFlightPreloadKeys
         )
         guard !Task.isCancelled else {
@@ -399,6 +422,14 @@ final class OnDeviceHangarItemTranslationService {
             return
         }
 
+        progressHandler?(
+            OnDeviceHangarItemTranslationPreloadProgress(
+                phase: .preparing,
+                completedUnitCount: 0,
+                totalUnitCount: pendingSources.count
+            )
+        )
+
         logHandler?("Checking installed Translation model for en -> \(targetLocale).")
         let modelStatus = await installedStatus(targetLocale: targetLocale)
         logHandler?("Translation model status=\(modelStatus).")
@@ -409,9 +440,12 @@ final class OnDeviceHangarItemTranslationService {
         }
         guard modelStatus.isInstalled else {
             markPreloadFinished(for: pendingSources.map(\.key))
+            let phase: OnDeviceHangarItemTranslationPreloadProgress.Phase = modelStatus == .downloadRequired
+                ? .downloadRequired
+                : .unavailable
             progressHandler?(
                 OnDeviceHangarItemTranslationPreloadProgress(
-                    phase: .unavailable,
+                    phase: phase,
                     completedUnitCount: 0,
                     totalUnitCount: pendingSources.count
                 )
@@ -476,6 +510,9 @@ final class OnDeviceHangarItemTranslationService {
                 }
 
                 markPreloadFinished(for: batchResult.finishedKeys)
+                if !batchResult.didFail {
+                    markPreloadPreprocessed(for: batchResult.finishedKeys)
+                }
                 didEncounterBatchFailure = didEncounterBatchFailure || batchResult.didFail
                 completedUnitCount += batchResult.processedCount
 
@@ -483,14 +520,23 @@ final class OnDeviceHangarItemTranslationService {
                     for (key, translation) in batchResult.translations {
                         cachedTranslations[key] = translation
                     }
+                }
+                if !batchResult.didFail || !batchResult.translations.isEmpty {
                     persistCache()
                     cacheGeneration &+= 1
                     logHandler?("Persisted translation cache after batch \(batchResult.batchNumber).")
                 }
 
+                let progressPhase: OnDeviceHangarItemTranslationPreloadProgress.Phase
+                if completedUnitCount >= pendingSources.count {
+                    progressPhase = didEncounterBatchFailure ? .failed : .finished
+                } else {
+                    progressPhase = .translating
+                }
+
                 progressHandler?(
                     OnDeviceHangarItemTranslationPreloadProgress(
-                        phase: completedUnitCount >= pendingSources.count ? .finished : .translating,
+                        phase: progressPhase,
                         completedUnitCount: completedUnitCount,
                         totalUnitCount: pendingSources.count
                     )
@@ -512,6 +558,7 @@ final class OnDeviceHangarItemTranslationService {
         }
         cachedTranslations.removeAll()
         preprocessedLocales.removeAll()
+        preprocessedTranslationKeys.removeAll()
         installedStatusByLocale.removeAll()
         inFlightPreloadKeys.removeAll()
         inFlightOnDemandTranslationTasks.removeAll()
@@ -520,8 +567,8 @@ final class OnDeviceHangarItemTranslationService {
     }
 
     private func installedStatus(targetLocale: String) async -> TranslationModelInstallStatus {
-        if let isInstalled = installedStatusByLocale[targetLocale] {
-            return isInstalled ? .installed : .unavailable
+        if let status = installedStatusByLocale[targetLocale] {
+            return status
         }
 
         let status = await Self.detachedInstalledStatus(
@@ -530,8 +577,8 @@ final class OnDeviceHangarItemTranslationService {
             timeoutNanoseconds: Self.modelAvailabilityTimeoutNanoseconds
         )
 
-        if status != .timedOut {
-            installedStatusByLocale[targetLocale] = status.isInstalled
+        if status == .installed {
+            installedStatusByLocale[targetLocale] = status
         }
 
         return status
@@ -549,7 +596,18 @@ final class OnDeviceHangarItemTranslationService {
             let sourceLanguage = Locale.Language(identifier: sourceLocale)
             let targetLanguage = Locale.Language(identifier: targetLocale)
             let status = await availability.status(from: sourceLanguage, to: targetLanguage)
-            await result.resume(returning: status == .installed ? .installed : .unavailable)
+            let installStatus: TranslationModelInstallStatus
+            switch status {
+            case .installed:
+                installStatus = .installed
+            case .supported:
+                installStatus = .downloadRequired
+            case .unsupported:
+                installStatus = .unavailable
+            @unknown default:
+                installStatus = .unavailable
+            }
+            await result.resume(returning: installStatus)
         }
 
         Task.detached(priority: .utility) {
@@ -569,6 +627,7 @@ final class OnDeviceHangarItemTranslationService {
         targetLocale: String,
         itemTranslator: HangarItemTranslator,
         cachedTranslationKeys: Set<CacheKey>,
+        preprocessedTranslationKeys: Set<CacheKey>,
         inFlightKeys: Set<CacheKey>
     ) async -> [PendingPreloadSource] {
         let worker = Task.detached(priority: .utility) {
@@ -594,6 +653,7 @@ final class OnDeviceHangarItemTranslationService {
                 )
 
                 guard !cachedTranslationKeys.contains(key),
+                      !preprocessedTranslationKeys.contains(key),
                       !inFlightKeys.contains(key) else {
                     continue
                 }
@@ -824,6 +884,12 @@ final class OnDeviceHangarItemTranslationService {
         }
     }
 
+    private func markPreloadPreprocessed(for keys: [CacheKey]) {
+        for key in keys {
+            preprocessedTranslationKeys.insert(key)
+        }
+    }
+
     private func markLocalePreprocessed(_ targetLocale: String) {
         guard preprocessedLocales.insert(targetLocale).inserted else {
             return
@@ -842,6 +908,13 @@ final class OnDeviceHangarItemTranslationService {
             let payload = PersistedTranslationCache(
                 version: Self.cacheVersion,
                 preprocessedLocales: Array(preprocessedLocales).sorted(),
+                preprocessedEntries: preprocessedTranslationKeys.map { key in
+                    PersistedTranslationCache.ProcessedEntry(
+                        source: key.source,
+                        targetLocale: key.targetLocale,
+                        dictionaryVersion: key.dictionaryVersion
+                    )
+                },
                 entries: cachedTranslations.map { key, translation in
                     PersistedTranslationCache.Entry(
                         source: key.source,
@@ -866,7 +939,11 @@ final class OnDeviceHangarItemTranslationService {
         guard let data = try? Data(contentsOf: cacheURL),
               let payload = try? JSONDecoder().decode(PersistedTranslationCache.self, from: data),
               payload.version == cacheVersion else {
-            return PersistedTranslationCacheState(translations: [:], preprocessedLocales: [])
+            return PersistedTranslationCacheState(
+                translations: [:],
+                preprocessedLocales: [],
+                preprocessedTranslationKeys: []
+            )
         }
 
         var cache: [CacheKey: String] = [:]
@@ -886,9 +963,26 @@ final class OnDeviceHangarItemTranslationService {
             ] = translation
         }
 
+        var preprocessedKeys = Set<CacheKey>()
+        for entry in payload.preprocessedEntries ?? [] {
+            let source = entry.source.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !source.isEmpty else {
+                continue
+            }
+
+            preprocessedKeys.insert(
+                CacheKey(
+                    source: source,
+                    targetLocale: entry.targetLocale,
+                    dictionaryVersion: entry.dictionaryVersion
+                )
+            )
+        }
+
         return PersistedTranslationCacheState(
             translations: cache,
-            preprocessedLocales: Set(payload.preprocessedLocales ?? [])
+            preprocessedLocales: Set(payload.preprocessedLocales ?? []),
+            preprocessedTranslationKeys: preprocessedKeys
         )
     }
 
@@ -938,14 +1032,22 @@ private struct PersistedTranslationCache: Codable {
         let translation: String
     }
 
+    struct ProcessedEntry: Codable {
+        let source: String
+        let targetLocale: String
+        let dictionaryVersion: Int?
+    }
+
     let version: Int
     let preprocessedLocales: [String]?
+    let preprocessedEntries: [ProcessedEntry]?
     let entries: [Entry]
 }
 
 private struct PersistedTranslationCacheState {
     let translations: [CacheKey: String]
     let preprocessedLocales: Set<String>
+    let preprocessedTranslationKeys: Set<CacheKey>
 }
 
 private extension Array {

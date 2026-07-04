@@ -254,6 +254,12 @@ nonisolated struct ApplyUpgradeResult: Hashable, Sendable {
     let updatedCookies: [SessionCookie]
 }
 
+nonisolated struct CharacterRepairResult: Hashable, Sendable {
+    let wasSuccessful: Bool
+    let failureMessage: String?
+    let updatedCookies: [SessionCookie]
+}
+
 nonisolated struct BuybackCheckoutPreparation: Hashable, Sendable {
     let buybackPledgeID: Int
     let checkoutURL: URL
@@ -536,6 +542,11 @@ protocol HangarRepository: Sendable {
         targetPledgeID: Int,
         password: String
     ) async throws -> ApplyUpgradeResult
+
+    func requestCharacterRepair(
+        for session: UserSession,
+        password: String
+    ) async throws -> CharacterRepairResult
 
     func prepareBuybackCheckout(
         for session: UserSession,

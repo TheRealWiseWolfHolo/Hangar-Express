@@ -100,6 +100,7 @@ struct RootView: View {
 struct StartupWarmupOverlay: View {
     let title: String
     let detail: String
+    @Environment(\.colorScheme) private var colorScheme
     @State private var animatePulse = false
 
     var body: some View {
@@ -126,18 +127,18 @@ struct StartupWarmupOverlay: View {
 
                     ProgressView()
                         .progressViewStyle(.circular)
-                        .tint(.white)
+                        .tint(spinnerColor)
                         .scaleEffect(1.25)
                 }
 
                 VStack(spacing: 8) {
                     Text(title)
                         .font(.title3.bold())
-                        .foregroundStyle(.white)
+                        .foregroundStyle(titleColor)
 
                     Text(detail)
                         .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.82))
+                        .foregroundStyle(detailColor)
                         .multilineTextAlignment(.center)
                 }
             }
@@ -162,5 +163,17 @@ struct StartupWarmupOverlay: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(title). \(detail)")
+    }
+
+    private var titleColor: Color {
+        colorScheme == .dark ? .white : .primary
+    }
+
+    private var detailColor: Color {
+        colorScheme == .dark ? .white.opacity(0.82) : .secondary
+    }
+
+    private var spinnerColor: Color {
+        colorScheme == .dark ? .white : .blue
     }
 }

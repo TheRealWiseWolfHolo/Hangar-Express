@@ -8,6 +8,7 @@ struct AuthenticationFlowView: View {
     @AppStorage("auth.debug.showFullErrors") private var showsFullErrorDetails = false
     @State private var isShowingClearKeychainAlert = false
     @State private var didCopyAuthDebugReport = false
+    @State private var signInRoute: AuthenticationSignInRoute = .checkingIP
     @State private var viewModel: AuthenticationViewModel
 
     init(appModel: AppModel) {
@@ -100,19 +101,17 @@ struct AuthenticationFlowView: View {
                 }
             }
 
-            if appModel.recaptchaBroker.isPreparing {
+            if let signInPreparationOverlayDetail {
                 StartupWarmupOverlay(
                     title: "Preparing Sign-In",
-                    detail: appModel.recaptchaBroker.statusMessage
+                    detail: signInPreparationOverlayDetail
                 )
             }
         }
-        .background(
-            RecaptchaBridgeView(broker: appModel.recaptchaBroker)
-                .frame(width: 1, height: 1)
-                .opacity(0.01)
-                .allowsHitTesting(false)
-        )
+        .background(recaptchaBridge)
+        .task {
+            await resolveInitialSignInRoute()
+        }
         .sheet(item: browserChallengeBinding) { challenge in
             AuthenticationBrowserChallengeView(
                 challenge: challenge,
@@ -161,13 +160,25 @@ struct AuthenticationFlowView: View {
 
             Button("Continue") {
                 Task {
-                    await viewModel.submitCredentials()
+                    await viewModel.submitCredentials(
+                        forceBrowserLogin: shouldUseBrowserAssistedLogin
+                    )
                 }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(viewModel.isSubmitting)
+            .disabled(viewModel.isSubmitting || signInRoute.isCheckingIP)
         } header: {
             Text("Credentials")
+        }
+    }
+
+    @ViewBuilder
+    private var recaptchaBridge: some View {
+        if shouldInitializeRecaptchaBridge {
+            RecaptchaBridgeView(broker: appModel.recaptchaBroker)
+                .frame(width: 1, height: 1)
+                .opacity(0.01)
+                .allowsHitTesting(false)
         }
     }
 
@@ -240,6 +251,26 @@ struct AuthenticationFlowView: View {
         appModel.quickLoginSessions
     }
 
+    private var shouldInitializeRecaptchaBridge: Bool {
+        signInRoute == .browserlessHelper && !appModel.recaptchaBroker.prefersBrowserAssistedLogin
+    }
+
+    private var shouldUseBrowserAssistedLogin: Bool {
+        signInRoute.usesBrowserAssistedLogin || appModel.recaptchaBroker.prefersBrowserAssistedLogin
+    }
+
+    private var signInPreparationOverlayDetail: String? {
+        if signInRoute.isCheckingIP {
+            return "Checking your sign-in connection."
+        }
+
+        if appModel.recaptchaBroker.isPreparing, shouldInitializeRecaptchaBridge {
+            return appModel.recaptchaBroker.statusMessage
+        }
+
+        return nil
+    }
+
     private var browserChallengeBinding: Binding<AuthenticationViewModel.BrowserChallenge?> {
         Binding(
             get: { viewModel.browserChallenge },
@@ -265,13 +296,92 @@ struct AuthenticationFlowView: View {
             showsFullErrors: showsFullErrorDetails,
             browserChallengeIsPresented: viewModel.browserChallenge != nil,
             helperIsPreparing: appModel.recaptchaBroker.isPreparing,
-            helperStatusMessage: appModel.recaptchaBroker.statusMessage
+            helperStatusMessage: appModel.recaptchaBroker.statusMessage,
+            signInRoute: signInRoute.debugLabel,
+            helperPrefersBrowserAssistedLogin: appModel.recaptchaBroker.prefersBrowserAssistedLogin
         )
+    }
+
+    private func resolveInitialSignInRoute() async {
+        guard signInRoute == .checkingIP else {
+            return
+        }
+
+        let result = await appModel.authIPRegionChecker.currentRegion()
+
+        guard !Task.isCancelled else {
+            return
+        }
+
+        let countryCode = result.countryCode ?? "unknown"
+        if result.isMainlandChina {
+            signInRoute = .browserAssisted(reason: .mainlandChinaIP)
+            appModel.authDiagnostics.record(
+                stage: "auth.ip-region",
+                summary: "The public IP check resolved to mainland China, so Hangar Express will use browser-assisted sign-in.",
+                detail: "countryCode=\(countryCode)"
+            )
+        } else {
+            signInRoute = .browserlessHelper
+            appModel.authDiagnostics.record(
+                stage: "auth.ip-region",
+                summary: "The public IP check did not require browser-assisted sign-in, so Hangar Express will prepare the RSI verification helper.",
+                detail: ipRegionDebugDetail(for: result)
+            )
+        }
+    }
+
+    private func ipRegionDebugDetail(for result: AuthenticationIPRegionCheckResult) -> String {
+        var parts = [
+            "countryCode=\(result.countryCode ?? "unknown")"
+        ]
+
+        if let errorDescription = result.errorDescription, !errorDescription.isEmpty {
+            parts.append("error=\(errorDescription)")
+        }
+
+        return parts.joined(separator: ", ")
     }
 
     private func copyAuthDebugReport() {
         UIPasteboard.general.string = authDebugReport
         didCopyAuthDebugReport = true
+    }
+}
+
+private enum AuthenticationSignInRoute: Equatable {
+    case checkingIP
+    case browserlessHelper
+    case browserAssisted(reason: BrowserAssistedReason)
+
+    enum BrowserAssistedReason: Equatable {
+        case mainlandChinaIP
+    }
+
+    var isCheckingIP: Bool {
+        self == .checkingIP
+    }
+
+    var usesBrowserAssistedLogin: Bool {
+        if case .browserAssisted = self {
+            return true
+        }
+
+        return false
+    }
+
+    var debugLabel: String {
+        switch self {
+        case .checkingIP:
+            return "checking-ip"
+        case .browserlessHelper:
+            return "browserless-helper"
+        case let .browserAssisted(reason):
+            switch reason {
+            case .mainlandChinaIP:
+                return "browser-assisted-mainland-china-ip"
+            }
+        }
     }
 }
 
@@ -338,7 +448,9 @@ private enum AuthenticationDebugReportBuilder {
         showsFullErrors: Bool,
         browserChallengeIsPresented: Bool,
         helperIsPreparing: Bool,
-        helperStatusMessage: String
+        helperStatusMessage: String,
+        signInRoute: String,
+        helperPrefersBrowserAssistedLogin: Bool
     ) -> String {
         var lines: [String] = []
 
@@ -352,8 +464,10 @@ private enum AuthenticationDebugReportBuilder {
         lines.append("Remember Me: \(rememberMe)")
         lines.append("Show Full Auth Errors: \(showsFullErrors)")
         lines.append("Browser Challenge Visible: \(browserChallengeIsPresented)")
+        lines.append("Sign-In Route: \(signInRoute)")
         lines.append("Recaptcha Helper Preparing: \(helperIsPreparing)")
         lines.append("Recaptcha Helper Status: \(helperStatusMessage)")
+        lines.append("Recaptcha Helper Browser-Assisted Fallback: \(helperPrefersBrowserAssistedLogin)")
 
         if let noticeMessage, !noticeMessage.isEmpty {
             lines.append("")

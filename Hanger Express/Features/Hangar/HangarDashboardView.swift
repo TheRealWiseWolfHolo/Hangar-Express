@@ -611,7 +611,11 @@ private struct HangarBulkSelectionSummaryView: View {
                 .disabled(!canGift)
 
                 Button(role: .destructive, action: onReclaim) {
-                    Label("Reclaim", systemImage: "arrow.3.trianglepath")
+                    Label {
+                        Text(AppLocalizer.string("Reclaim"))
+                    } icon: {
+                        Image(systemName: "arrow.3.trianglepath")
+                    }
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -797,7 +801,11 @@ struct HangarPackageGroupRow: View {
     }
 
     private var insuranceBadgeText: String? {
-        visibleInsurance
+        package.isOriginalConceptShip ? "OC" : visibleInsurance
+    }
+
+    private var insuranceBadgeStyle: HangarInsuranceBadge.Style {
+        package.isOriginalConceptShip ? .originalConcept : .standard
     }
 
     var body: some View {
@@ -813,7 +821,10 @@ struct HangarPackageGroupRow: View {
                     )
 
                     if let insuranceBadgeText {
-                        HangarInsuranceBadge(text: insuranceBadgeText)
+                        HangarInsuranceBadge(
+                            text: insuranceBadgeText,
+                            style: insuranceBadgeStyle
+                        )
                             .padding(6)
                     }
                 }
@@ -967,7 +978,13 @@ private struct HangarSelectablePackageGroupRow: View {
 private struct HangarInsuranceBadge: View {
     @Environment(\.colorScheme) private var colorScheme
 
+    enum Style {
+        case standard
+        case originalConcept
+    }
+
     let text: String
+    let style: Style
 
     private var palette: HangarInsuranceBadgePalette {
         HangarInsuranceBadgePalette(colorScheme: colorScheme)
@@ -975,11 +992,25 @@ private struct HangarInsuranceBadge: View {
 
     var body: some View {
         Text(text)
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(palette.foregroundColor)
+            .font(.caption2.weight(style == .originalConcept ? .heavy : .semibold))
+            .foregroundStyle(foregroundStyle)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .modifier(HangarInsuranceBadgeGlassStyle(palette: palette))
+            .modifier(
+                HangarInsuranceBadgeGlassStyle(
+                    palette: palette,
+                    style: style
+                )
+            )
+    }
+
+    private var foregroundStyle: Color {
+        switch style {
+        case .standard:
+            return palette.foregroundColor
+        case .originalConcept:
+            return Color(red: 0.92, green: 0.78, blue: 0.32)
+        }
     }
 }
 
@@ -1013,18 +1044,69 @@ private struct HangarInsuranceBadgePalette {
 
 private struct HangarInsuranceBadgeGlassStyle: ViewModifier {
     let palette: HangarInsuranceBadgePalette
+    let style: HangarInsuranceBadge.Style
 
     func body(content: Content) -> some View {
         content
             .background(
                 Capsule(style: .continuous)
-                    .fill(palette.backgroundColor)
-                    .shadow(color: palette.shadowColor, radius: 3, x: 0, y: 1)
+                    .fill(backgroundStyle)
+                    .shadow(
+                        color: shadowColor,
+                        radius: style == .originalConcept ? 8 : 3,
+                        x: 0,
+                        y: style == .originalConcept ? 3 : 1
+                    )
             )
             .overlay {
                 Capsule(style: .continuous)
-                    .stroke(palette.strokeColor, lineWidth: 0.8)
+                    .strokeBorder(strokeStyle, lineWidth: style == .originalConcept ? 1 : 0.8)
             }
+    }
+
+    private var backgroundStyle: AnyShapeStyle {
+        switch style {
+        case .standard:
+            return AnyShapeStyle(palette.backgroundColor)
+        case .originalConcept:
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.72),
+                        Color.black.opacity(0.46)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+        }
+    }
+
+    private var strokeStyle: AnyShapeStyle {
+        switch style {
+        case .standard:
+            return AnyShapeStyle(palette.strokeColor)
+        case .originalConcept:
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.92, green: 0.78, blue: 0.32).opacity(0.42),
+                        Color(red: 0.92, green: 0.78, blue: 0.32).opacity(0.16)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+        }
+    }
+
+    private var shadowColor: Color {
+        switch style {
+        case .standard:
+            return palette.shadowColor
+        case .originalConcept:
+            return Color.black.opacity(0.32)
+        }
     }
 }
 
@@ -1246,7 +1328,7 @@ struct HangarPackageDetailView: View {
                     }
                     .padding(.vertical, 4)
                 } header: {
-                    Text("Also Contains")
+                    Text(AppLocalizer.string("Also Contains"))
                 }
             }
 
@@ -1256,7 +1338,7 @@ struct HangarPackageDetailView: View {
                         presentedActionSheet = .gift
                     } label: {
                         HangarActionTile(
-                            title: "Gift",
+                            title: AppLocalizer.string("Gift"),
                             systemImage: "gift.fill",
                             accentColor: .green,
                             isEnabled: canUseGiftAction
@@ -1269,7 +1351,7 @@ struct HangarPackageDetailView: View {
                         presentedActionSheet = .upgrade
                     } label: {
                         HangarActionTile(
-                            title: "Upgrade",
+                            title: AppLocalizer.string("Upgrade"),
                             systemImage: "chevron.up.2",
                             accentColor: .blue,
                             isEnabled: canUseUpgradeAction
@@ -1282,7 +1364,7 @@ struct HangarPackageDetailView: View {
                         presentedActionSheet = .melt
                     } label: {
                         HangarActionTile(
-                            title: "Reclaim",
+                            title: AppLocalizer.string("Reclaim"),
                             systemImage: "arrow.3.trianglepath",
                             accentColor: .red,
                             isEnabled: canUseReclaimAction
@@ -1792,7 +1874,7 @@ private enum HangarSharePictureGenerator {
         }
 
         return lowercased.contains("insurance")
-            || lowercased.contains("lti")
+            || HangarPackage.containsLifetimeInsuranceToken(lowercased)
             || lowercased.range(of: #"\d+\s*(month|months|mo|year|years|yr)\b"#, options: .regularExpression) != nil
     }
 
@@ -3473,7 +3555,7 @@ private struct HangarBulkSelectedPledgesSummaryView: View {
 }
 
 private struct HangarActionTile: View {
-    let title: LocalizedStringKey
+    let title: String
     let systemImage: String
     let accentColor: Color
     let isEnabled: Bool
