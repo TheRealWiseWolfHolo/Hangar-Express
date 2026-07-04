@@ -704,6 +704,13 @@ final class AppModel {
     private static let itemTranslationPreloadMaximumLogEntries = 80
     private static let itemTranslationPendingPreloadLanguageDefaultsKey = "hangar.itemTranslation.pendingPreloadLanguage"
     private static let versionUpdateNoteKeysByShortVersion: [String: [String]] = [
+        "1.0.8": [
+            "Added RSI character repair support for eligible accounts.",
+            "Improved CCU calculator responsiveness by waiting until both FROM and TO ships are selected before calculating upgrade results.",
+            "Improved Hangar and Fleet image loading during fast scrolling.",
+            "Fixed Hangar Log opening so entries appear as soon as the first refresh completes.",
+            "Reduced Hangar Log refresh lag by moving parsing and merge work off the main actor."
+        ],
         "1.0.7": [
             "Added Character Reset, allowing eligible users to request an RSI character repair from within Hangar Express.",
             "Improved Simplified Chinese localization across app flows.",
@@ -3059,9 +3066,11 @@ final class AppModel {
                 return try await hangarRepository.fetchSnapshot(for: session, progress: progress)
             }
 
+            let mode: HangarLogFetchMode = isPro ? .expanded : .initial
             return try await hangarRepository.refreshHangarLogData(
                 for: session,
                 from: existingSnapshot,
+                mode: mode,
                 progress: progress
             )
         case .account:
