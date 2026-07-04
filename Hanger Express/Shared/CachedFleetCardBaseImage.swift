@@ -2,12 +2,12 @@ import Foundation
 import SwiftUI
 import UIKit
 
-enum FleetCardBaseSnapshotStyle: String, Hashable, Sendable {
+nonisolated enum FleetCardBaseSnapshotStyle: String, Hashable, Sendable {
     case hero
     case compact
 }
 
-struct FleetCardBaseSnapshotRecipe: Hashable, Sendable {
+nonisolated struct FleetCardBaseSnapshotRecipe: Hashable, Sendable {
     let style: FleetCardBaseSnapshotStyle
     let pointSize: CGSize
     let manufacturerName: String

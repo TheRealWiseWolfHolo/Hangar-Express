@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.0.8 (In Progress)
+
+### Added
+- Added RSI character repair support for eligible accounts from inside Hangar Express.
+
+### Changed
+- Improved CCU calculator responsiveness by waiting until both FROM and TO ships are selected before running upgrade calculations.
+- Prefetched nearby Hangar and Fleet images so fast scrolling is less likely to reveal images loading on demand.
+
+### Fixed
+- Fixed Hangar Log opening to show entries as soon as the first refresh completes instead of requiring `Load More` after an empty result.
+- Reduced Hangar Log refresh lag by moving parsing, merging, and sorting work off the main actor and reusing parser resources during each batch.
+
 ## v0.5 (In Progress)
 
 ### Changed

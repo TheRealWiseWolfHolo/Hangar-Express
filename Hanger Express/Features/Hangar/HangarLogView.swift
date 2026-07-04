@@ -264,6 +264,12 @@ struct HangarLogView: View {
                 resetVisibleEntryCount()
             }
             .onChange(of: hangarLogs.count) { _, newCount in
+                let initialVisibleCount = min(entryBatchSize, filteredHangarLogs.count)
+                if newCount > 0,
+                   visibleEntryCount < initialVisibleCount {
+                    resetVisibleEntryCount()
+                }
+
                 if let lastRemoteExpansionBaselineCount,
                    newCount > lastRemoteExpansionBaselineCount {
                     self.lastRemoteExpansionBaselineCount = nil

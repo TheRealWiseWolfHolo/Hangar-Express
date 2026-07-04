@@ -1903,12 +1903,13 @@ final class LiveHangarRepository: HangarRepository {
             throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
         }
 
-        let fetchedLogs = Array(HangarLogParser.parse(result.items).prefix(mode.entryLimit))
-        let hangarLogs = mergedHangarLogs(
-            fetchedLogs: fetchedLogs,
+        let processedHangarLogs = await Self.processHangarLogItems(
+            result.items,
             existingLogs: existingLogs,
             entryLimit: mode.entryLimit
         )
+        let fetchedLogs = processedHangarLogs.fetchedLogs
+        let hangarLogs = processedHangarLogs.mergedLogs
 
         if hangarLogs.isEmpty {
             recordRefreshDiagnostics(
@@ -1969,9 +1970,7 @@ final class LiveHangarRepository: HangarRepository {
             ].joined(separator: ", ")
         )
 
-        return hangarLogs.sorted { lhs, rhs in
-            lhs.occurredAt > rhs.occurredAt
-        }
+        return hangarLogs
     }
 
     private func hangarLogStopMarkers(from existingLogs: [HangarLogEntry]) -> [String] {
@@ -1983,7 +1982,27 @@ final class LiveHangarRepository: HangarRepository {
         )
     }
 
-    private func mergedHangarLogs(
+    private nonisolated static func processHangarLogItems(
+        _ items: [RemoteHangarLogItem],
+        existingLogs: [HangarLogEntry],
+        entryLimit: Int
+    ) async -> (fetchedLogs: [HangarLogEntry], mergedLogs: [HangarLogEntry]) {
+        await Task.detached(priority: .userInitiated) {
+            let fetchedLogs = Array(HangarLogParser.parse(items).prefix(entryLimit))
+            let mergedLogs = mergedHangarLogs(
+                fetchedLogs: fetchedLogs,
+                existingLogs: existingLogs,
+                entryLimit: entryLimit
+            )
+            .sorted { lhs, rhs in
+                lhs.occurredAt > rhs.occurredAt
+            }
+
+            return (fetchedLogs, mergedLogs)
+        }.value
+    }
+
+    private nonisolated static func mergedHangarLogs(
         fetchedLogs: [HangarLogEntry],
         existingLogs: [HangarLogEntry],
         entryLimit: Int
@@ -10753,7 +10772,7 @@ private nonisolated struct RemoteLimitedShipCartInsertion: Decodable {
     let debugLog: [String]
 }
 
-private nonisolated struct RemoteHangarLogPage: Decodable {
+private nonisolated struct RemoteHangarLogPage: Decodable, Sendable {
     let accessDenied: Bool
     let statusCode: Int
     let items: [RemoteHangarLogItem]
@@ -10761,7 +10780,7 @@ private nonisolated struct RemoteHangarLogPage: Decodable {
     let debugSummary: String?
 }
 
-private nonisolated struct RemoteHangarLogItem: Decodable {
+private nonisolated struct RemoteHangarLogItem: Decodable, Sendable {
     let timeText: String
     let itemName: String
     let fullText: String
@@ -10782,119 +10801,159 @@ private nonisolated enum HangarLogParser {
     private static let giveawayPattern = #"^#(\d+?) - (.*?)$"#
 
     static func parse(_ items: [RemoteHangarLogItem]) -> [HangarLogEntry] {
-        items.compactMap(parse)
+        let parser = BatchParser()
+        return items.compactMap(parser.parse)
     }
 
-    private static func parse(_ item: RemoteHangarLogItem) -> HangarLogEntry? {
-        let occurredAt = parsedDate(from: item.timeText) ?? .distantPast
-        let content = item.contentText.trimmingCharacters(in: .whitespacesAndNewlines)
+    private final class BatchParser {
+        private let dateFormatter: DateFormatter = {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = .current
+            formatter.dateFormat = "MMM d yyyy, h:mm a"
+            return formatter
+        }()
 
-        var action: HangarLogAction = .unknown
-        var priceUSD: Decimal?
-        var orderCode: String?
-        var sourcePledgeID: String?
-        var targetPledgeID: String?
-        var operatorName: String?
-        var reason: String?
-        var upgradeContext: HangarLogUpgradeContext?
+        private let createdExpression = BatchParser.expression(HangarLogParser.createdPattern)
+        private let reclaimedExpression = BatchParser.expression(HangarLogParser.reclaimedPattern)
+        private let consumedExpression = BatchParser.expression(HangarLogParser.consumedPattern)
+        private let appliedUpgradeExpression = BatchParser.expression(HangarLogParser.appliedUpgradePattern)
+        private let buybackExpression = BatchParser.expression(HangarLogParser.buybackPattern)
+        private let giftExpression = BatchParser.expression(HangarLogParser.giftPattern)
+        private let giftClaimedExpression = BatchParser.expression(HangarLogParser.giftClaimedPattern)
+        private let giftCancelledExpression = BatchParser.expression(HangarLogParser.giftCancelledPattern)
+        private let nameChangeExpression = BatchParser.expression(HangarLogParser.nameChangePattern)
+        private let nameChangeReclaimedExpression = BatchParser.expression(HangarLogParser.nameChangeReclaimedPattern)
+        private let giveawayExpression = BatchParser.expression(HangarLogParser.giveawayPattern)
 
-        if let groups = match(createdPattern, in: content) {
-            action = .created
-            targetPledgeID = groupValue(groups, 0)
-            operatorName = groupValue(groups, 1)
-            orderCode = groupValue(groups, 2)
-            priceUSD = parseMoney(groupValue(groups, 3))
-        } else if let groups = match(reclaimedPattern, in: content) {
-            action = .reclaimed
-            targetPledgeID = groupValue(groups, 0)
-            operatorName = groupValue(groups, 1)
-            priceUSD = parseMoney(groupValue(groups, 2))
-        } else if let groups = match(consumedPattern, in: content) {
-            action = .consumed
-            targetPledgeID = groupValue(groups, 0)
-            operatorName = groupValue(groups, 1)
-            sourcePledgeID = groupValue(groups, 2)
-            priceUSD = parseMoney(groupValue(groups, 3))
-        } else if let groups = match(appliedUpgradePattern, in: content) {
-            action = .appliedUpgrade
-            targetPledgeID = groupValue(groups, 0)
-            sourcePledgeID = groupValue(groups, 1)
-            reason = groupValue(groups, 2)
-            priceUSD = parseMoney(groupValue(groups, 3))
-            operatorName = "CIG"
-            upgradeContext = HangarLogUpgradeContext.inferred(
-                from: [
-                    reason,
-                    item.itemName
-                ]
+        func parse(_ item: RemoteHangarLogItem) -> HangarLogEntry? {
+            let occurredAt = dateFormatter.date(from: item.timeText) ?? .distantPast
+            let content = item.contentText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            var action: HangarLogAction = .unknown
+            var priceUSD: Decimal?
+            var orderCode: String?
+            var sourcePledgeID: String?
+            var targetPledgeID: String?
+            var operatorName: String?
+            var reason: String?
+            var upgradeContext: HangarLogUpgradeContext?
+
+            if let groups = match(createdExpression, in: content) {
+                action = .created
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                operatorName = HangarLogParser.groupValue(groups, 1)
+                orderCode = HangarLogParser.groupValue(groups, 2)
+                priceUSD = HangarLogParser.parseMoney(HangarLogParser.groupValue(groups, 3))
+            } else if let groups = match(reclaimedExpression, in: content) {
+                action = .reclaimed
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                operatorName = HangarLogParser.groupValue(groups, 1)
+                priceUSD = HangarLogParser.parseMoney(HangarLogParser.groupValue(groups, 2))
+            } else if let groups = match(consumedExpression, in: content) {
+                action = .consumed
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                operatorName = HangarLogParser.groupValue(groups, 1)
+                sourcePledgeID = HangarLogParser.groupValue(groups, 2)
+                priceUSD = HangarLogParser.parseMoney(HangarLogParser.groupValue(groups, 3))
+            } else if let groups = match(appliedUpgradeExpression, in: content) {
+                action = .appliedUpgrade
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                sourcePledgeID = HangarLogParser.groupValue(groups, 1)
+                reason = HangarLogParser.groupValue(groups, 2)
+                priceUSD = HangarLogParser.parseMoney(HangarLogParser.groupValue(groups, 3))
+                operatorName = "CIG"
+                upgradeContext = HangarLogUpgradeContext.inferred(
+                    from: [
+                        reason,
+                        item.itemName
+                    ]
+                )
+            } else if let groups = match(buybackExpression, in: content) {
+                action = .buyback
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                operatorName = HangarLogParser.groupValue(groups, 1)
+                orderCode = HangarLogParser.groupValue(groups, 2)
+            } else if let groups = match(giftExpression, in: content) {
+                action = .gift
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                operatorName = HangarLogParser.groupValue(groups, 1)
+                priceUSD = HangarLogParser.parseMoney(HangarLogParser.groupValue(groups, 2))
+            } else if let groups = match(giftClaimedExpression, in: content) {
+                action = .giftClaimed
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                operatorName = HangarLogParser.groupValue(groups, 1)
+                priceUSD = HangarLogParser.parseMoney(HangarLogParser.groupValue(groups, 2))
+            } else if let groups = match(giftCancelledExpression, in: content) {
+                action = .giftCancelled
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                operatorName = HangarLogParser.groupValue(groups, 1)
+                priceUSD = HangarLogParser.parseMoney(HangarLogParser.groupValue(groups, 2))
+            } else if let groups = match(nameChangeExpression, in: content) {
+                action = .nameChange
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                sourcePledgeID = HangarLogParser.groupValue(groups, 1)
+                reason = HangarLogParser.groupValue(groups, 2)
+            } else if let groups = match(nameChangeReclaimedExpression, in: content) {
+                action = .nameChangeReclaimed
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                sourcePledgeID = HangarLogParser.groupValue(groups, 1)
+                reason = HangarLogParser.groupValue(groups, 2)
+            } else if let groups = match(giveawayExpression, in: content) {
+                action = .giveaway
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                reason = HangarLogParser.groupValue(groups, 1)
+            }
+
+            let resolvedOperatorName = operatorName?.nilIfEmpty ?? "CIG"
+            let resolvedTargetID = targetPledgeID?.nilIfEmpty
+            let identifier = [
+                action.rawValue,
+                resolvedTargetID ?? "unknown",
+                String(Int(occurredAt.timeIntervalSince1970)),
+                content
+            ].joined(separator: "#")
+
+            return HangarLogEntry(
+                id: identifier,
+                occurredAt: occurredAt,
+                action: action,
+                itemName: item.itemName.nilIfEmpty ?? "Unknown item",
+                operatorName: resolvedOperatorName,
+                priceUSD: priceUSD,
+                sourcePledgeID: sourcePledgeID?.nilIfEmpty,
+                targetPledgeID: resolvedTargetID,
+                orderCode: orderCode?.nilIfEmpty,
+                reason: reason?.nilIfEmpty,
+                rawText: item.fullText.nilIfEmpty ?? content,
+                upgradeContext: upgradeContext
             )
-        } else if let groups = match(buybackPattern, in: content) {
-            action = .buyback
-            targetPledgeID = groupValue(groups, 0)
-            operatorName = groupValue(groups, 1)
-            orderCode = groupValue(groups, 2)
-        } else if let groups = match(giftPattern, in: content) {
-            action = .gift
-            targetPledgeID = groupValue(groups, 0)
-            operatorName = groupValue(groups, 1)
-            priceUSD = parseMoney(groupValue(groups, 2))
-        } else if let groups = match(giftClaimedPattern, in: content) {
-            action = .giftClaimed
-            targetPledgeID = groupValue(groups, 0)
-            operatorName = groupValue(groups, 1)
-            priceUSD = parseMoney(groupValue(groups, 2))
-        } else if let groups = match(giftCancelledPattern, in: content) {
-            action = .giftCancelled
-            targetPledgeID = groupValue(groups, 0)
-            operatorName = groupValue(groups, 1)
-            priceUSD = parseMoney(groupValue(groups, 2))
-        } else if let groups = match(nameChangePattern, in: content) {
-            action = .nameChange
-            targetPledgeID = groupValue(groups, 0)
-            sourcePledgeID = groupValue(groups, 1)
-            reason = groupValue(groups, 2)
-        } else if let groups = match(nameChangeReclaimedPattern, in: content) {
-            action = .nameChangeReclaimed
-            targetPledgeID = groupValue(groups, 0)
-            sourcePledgeID = groupValue(groups, 1)
-            reason = groupValue(groups, 2)
-        } else if let groups = match(giveawayPattern, in: content) {
-            action = .giveaway
-            targetPledgeID = groupValue(groups, 0)
-            reason = groupValue(groups, 1)
         }
 
-        let resolvedOperatorName = operatorName?.nilIfEmpty ?? "CIG"
-        let resolvedTargetID = targetPledgeID?.nilIfEmpty
-        let identifier = [
-            action.rawValue,
-            resolvedTargetID ?? "unknown",
-            String(Int(occurredAt.timeIntervalSince1970)),
-            content
-        ].joined(separator: "#")
+        private static func expression(_ pattern: String) -> NSRegularExpression {
+            do {
+                return try NSRegularExpression(pattern: pattern)
+            } catch {
+                preconditionFailure("Invalid hangar log regex: \(pattern)")
+            }
+        }
 
-        return HangarLogEntry(
-            id: identifier,
-            occurredAt: occurredAt,
-            action: action,
-            itemName: item.itemName.nilIfEmpty ?? "Unknown item",
-            operatorName: resolvedOperatorName,
-            priceUSD: priceUSD,
-            sourcePledgeID: sourcePledgeID?.nilIfEmpty,
-            targetPledgeID: resolvedTargetID,
-            orderCode: orderCode?.nilIfEmpty,
-            reason: reason?.nilIfEmpty,
-            rawText: item.fullText.nilIfEmpty ?? content,
-            upgradeContext: upgradeContext
-        )
-    }
+        private func match(_ expression: NSRegularExpression, in text: String) -> [String]? {
+            let range = NSRange(text.startIndex ..< text.endIndex, in: text)
+            guard let match = expression.firstMatch(in: text, options: [], range: range) else {
+                return nil
+            }
 
-    private static func parsedDate(from rawValue: String) -> Date? {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "MMM d yyyy, h:mm a"
-        return formatter.date(from: rawValue)
+            return (1 ..< match.numberOfRanges).compactMap { index in
+                let captureRange = match.range(at: index)
+                guard captureRange.location != NSNotFound,
+                      let range = Range(captureRange, in: text) else {
+                    return nil
+                }
+
+                return String(text[range])
+            }
+        }
     }
 
     private static func parseMoney(_ rawValue: String?) -> Decimal? {
@@ -10911,27 +10970,6 @@ private nonisolated enum HangarLogParser {
         }
 
         return groups[index]
-    }
-
-    private static func match(_ pattern: String, in text: String) -> [String]? {
-        guard let expression = try? NSRegularExpression(pattern: pattern) else {
-            return nil
-        }
-
-        let range = NSRange(text.startIndex ..< text.endIndex, in: text)
-        guard let match = expression.firstMatch(in: text, options: [], range: range) else {
-            return nil
-        }
-
-        return (1 ..< match.numberOfRanges).compactMap { index in
-            let captureRange = match.range(at: index)
-            guard captureRange.location != NSNotFound,
-                  let range = Range(captureRange, in: text) else {
-                return nil
-            }
-
-            return String(text[range])
-        }
     }
 }
 

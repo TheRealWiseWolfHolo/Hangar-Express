@@ -44,9 +44,11 @@ struct HangarDashboardView: View {
     let snapshot: HangarSnapshot
     private let allPackageGroups: [GroupedHangarPackage]
 
+    @Environment(\.displayScale) private var displayScale
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
     @AppStorage(DisplayPreferences.hangarUpgradedShipDisplayModeKey) private var showsUpgradedShipInHangar = DisplayPreferences.hangarUpgradedShipDisplayEnabledByDefault
+    @AppStorage(DisplayPreferences.compositeUpgradeThumbnailModeKey) private var usesCompositeUpgradeThumbnails = DisplayPreferences.compositeUpgradeThumbnailsEnabledByDefault
     @AppStorage(DisplayPreferences.hangarGiftedHighlightKey) private var highlightsGiftedHangarRows = DisplayPreferences.hangarGiftedHighlightEnabledByDefault
     @AppStorage(DisplayPreferences.hangarUpgradedHighlightKey) private var highlightsUpgradedHangarRows = DisplayPreferences.hangarUpgradedHighlightEnabledByDefault
     @AppStorage(DisplayPreferences.sharePictureAutoCopiesDebugLogKey) private var autoCopiesSharePictureDebugLog = DisplayPreferences.sharePictureAutoCopiesDebugLogEnabledByDefault
@@ -65,6 +67,10 @@ struct HangarDashboardView: View {
     @State private var itemTranslationState = HangarItemTranslationViewState()
     @State private var translationService = OnDeviceHangarItemTranslationService.shared
     @State private var searchHaystackCache = HangarPackageSearchHaystackCache()
+    @State private var hangarImagePrefetchTask: Task<Void, Never>?
+
+    private static let hangarImagePrefetchLookaheadCount = 10
+    private static let hangarThumbnailPointSize = CGSize(width: 76, height: 76)
 
     init(appModel: AppModel, snapshot: HangarSnapshot) {
         self.appModel = appModel
@@ -149,7 +155,7 @@ struct HangarDashboardView: View {
                 }
 
                 Section {
-                    ForEach(visiblePackageGroups) { packageGroup in
+                    ForEach(Array(visiblePackageGroups.enumerated()), id: \.element.id) { offset, packageGroup in
                         let isSelected = selectedPackageGroupIDs.contains(packageGroup.id)
 
                         if isSelectingPackages {
@@ -164,6 +170,9 @@ struct HangarDashboardView: View {
                                 )
                             }
                             .buttonStyle(.plain)
+                            .onAppear {
+                                scheduleHangarImagePrefetch(startingAt: offset, in: visiblePackageGroups)
+                            }
                             .listRowBackground(
                                 hangarRowBackground(
                                     for: packageGroup.representative,
@@ -211,6 +220,9 @@ struct HangarDashboardView: View {
                                     Label("Share Raw Card Data", systemImage: "square.and.arrow.up")
                                 }
                             }
+                            .onAppear {
+                                scheduleHangarImagePrefetch(startingAt: offset, in: visiblePackageGroups)
+                            }
                             .listRowBackground(hangarRowBackground(for: packageGroup.representative))
                         }
                     }
@@ -221,6 +233,13 @@ struct HangarDashboardView: View {
             .id(appLanguageRawValue)
             .task(id: hangarItemLanguageRawValue) {
                 await loadItemTranslationDictionary()
+            }
+            .task(id: hangarImagePrefetchID(for: visiblePackageGroups)) {
+                await prefetchHangarImages(startingAt: 0, in: visiblePackageGroups)
+            }
+            .onDisappear {
+                hangarImagePrefetchTask?.cancel()
+                hangarImagePrefetchTask = nil
             }
             .onChange(of: isSearchPresented) { _, isPresented in
                 guard !isPresented else {
@@ -307,6 +326,96 @@ struct HangarDashboardView: View {
                 }
             }
         }
+    }
+
+    private func hangarImagePrefetchID(for packageGroups: [GroupedHangarPackage]) -> String {
+        [
+            appModel.hangarFleetImageReloadToken.uuidString,
+            showsUpgradedShipInHangar ? "upgraded" : "package",
+            usesCompositeUpgradeThumbnails ? "composite" : "single",
+            packageGroups.prefix(Self.hangarImagePrefetchLookaheadCount).map(\.id).joined(separator: ","),
+            "\(packageGroups.count)"
+        ].joined(separator: "|")
+    }
+
+    private func scheduleHangarImagePrefetch(
+        startingAt startIndex: Int,
+        in packageGroups: [GroupedHangarPackage]
+    ) {
+        hangarImagePrefetchTask?.cancel()
+        let requests = hangarImagePrefetchRequests(startingAt: startIndex, in: packageGroups)
+        hangarImagePrefetchTask = Task(priority: .utility) {
+            await URLCachedImageStore.shared.prefetchCompositeImages(for: requests.composites)
+            await URLCachedImageStore.shared.prefetchImages(for: requests.remotes)
+        }
+    }
+
+    private func prefetchHangarImages(
+        startingAt startIndex: Int,
+        in packageGroups: [GroupedHangarPackage]
+    ) async {
+        let requests = hangarImagePrefetchRequests(startingAt: startIndex, in: packageGroups)
+        await URLCachedImageStore.shared.prefetchCompositeImages(for: requests.composites)
+        await URLCachedImageStore.shared.prefetchImages(for: requests.remotes)
+    }
+
+    private func hangarImagePrefetchRequests(
+        startingAt startIndex: Int,
+        in packageGroups: [GroupedHangarPackage]
+    ) -> (remotes: [RemoteImagePrefetchRequest], composites: [UpgradeCompositeImagePrefetchRequest]) {
+        guard startIndex < packageGroups.count else {
+            return ([], [])
+        }
+
+        let thumbnailSize = Self.hangarThumbnailPointSize
+        var remoteRequests: [RemoteImagePrefetchRequest] = []
+        var compositeRequests: [UpgradeCompositeImagePrefetchRequest] = []
+        let window = packageGroups
+            .dropFirst(max(0, startIndex))
+            .prefix(Self.hangarImagePrefetchLookaheadCount)
+
+        for packageGroup in window {
+            let package = packageGroup.representative
+            if usesCompositeUpgradeThumbnails,
+               let upgradePricing = compositeUpgradePricing(for: package),
+               upgradePricing.sourceShipImageURL != nil || upgradePricing.targetShipImageURL != nil {
+                compositeRequests.append(
+                    UpgradeCompositeImagePrefetchRequest(
+                        sourceURL: upgradePricing.sourceShipImageURL,
+                        targetURL: upgradePricing.targetShipImageURL,
+                        targetPointSize: thumbnailSize,
+                        displayScale: displayScale
+                    )
+                )
+            } else if let thumbnailURL = displayThumbnailURL(for: package) {
+                remoteRequests.append(
+                    RemoteImagePrefetchRequest(
+                        url: thumbnailURL,
+                        targetPointSize: thumbnailSize,
+                        displayScale: displayScale
+                    )
+                )
+            }
+        }
+
+        return (remoteRequests, compositeRequests)
+    }
+
+    private func compositeUpgradePricing(for package: HangarPackage) -> PackageItem.UpgradePricing? {
+        guard package.isUpgradeOnlyPledge else {
+            return nil
+        }
+
+        return package.contents.compactMap(\.upgradePricing).first
+    }
+
+    private func displayThumbnailURL(for package: HangarPackage) -> URL? {
+        if showsUpgradedShipInHangar,
+           let upgradedShipThumbnailURL = package.upgradedShipThumbnailURL {
+            return upgradedShipThumbnailURL
+        }
+
+        return package.packageThumbnailURL
     }
 
     private var hasStoredCredentials: Bool {
