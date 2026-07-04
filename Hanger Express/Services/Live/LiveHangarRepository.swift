@@ -578,6 +578,24 @@ final class LiveHangarRepository: HangarRepository {
         )
     }
 
+    func requestCharacterRepair(
+        for session: UserSession,
+        password: String
+    ) async throws -> CharacterRepairResult {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.requestCharacterRepair(
+                for: session,
+                password: password
+            )
+        }
+
+        try validate(session: session)
+        return try await browser.requestCharacterRepair(
+            using: session.cookies,
+            password: password
+        )
+    }
+
     func prepareBuybackCheckout(
         for session: UserSession,
         pledge: BuybackPledge
@@ -2528,7 +2546,8 @@ final class LiveHangarRepository: HangarRepository {
             return "Hangar entitlement"
         }
 
-        if lowercasedTitle.contains("insurance") || lowercasedTitle.contains("lti") {
+        if lowercasedTitle.contains("insurance")
+            || HangarPackage.containsLifetimeInsuranceToken(lowercasedTitle) {
             return "Insurance"
         }
 
@@ -2746,7 +2765,7 @@ final class LiveHangarRepository: HangarRepository {
         var results: [String] = []
         let lowercased = value.localizedLowercase
 
-        if lowercased.contains("lti") || lowercased.contains("lifetime") {
+        if HangarPackage.containsLifetimeInsuranceToken(lowercased) {
             results.append("LTI")
         }
 
@@ -3194,6 +3213,13 @@ private struct RemoteUpgradeTargetCandidate: Decodable {
 }
 
 private struct RemoteApplyUpgradeExecution: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
+private struct RemoteCharacterRepairExecution: Decodable {
     let accessDenied: Bool
     let status: String
     let failureMessage: String?
@@ -4707,6 +4733,48 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             wasSuccessful: shouldTreatAsSuccess,
             failureMessage: failureMessage,
             updatedCookies: updatedCookies
+        )
+    }
+
+    fileprivate func requestCharacterRepair(
+        using cookies: [SessionCookie],
+        password: String
+    ) async throws -> CharacterRepairResult {
+        let url = try storefrontURL(path: "/en/account/reset")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let result = try await evaluate(
+            script: Self.requestCharacterRepairScript,
+            arguments: [
+                "reason": "Character reset",
+                "issueCouncilURL": "",
+                "currentPassword": password
+            ],
+            as: RemoteCharacterRepairExecution.self
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        let shouldTreatAsSuccess = result.status == "ok"
+        let failureMessage: String?
+        if shouldTreatAsSuccess {
+            failureMessage = nil
+        } else {
+            failureMessage = [result.failureMessage, result.debugSummary]
+                .compactMap { value in
+                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                }
+                .joined(separator: "\n\n")
+                .nilIfEmpty
+        }
+
+        return CharacterRepairResult(
+            wasSuccessful: shouldTreatAsSuccess,
+            failureMessage: failureMessage,
+            updatedCookies: await currentRSICookies()
         )
     }
 
@@ -9913,6 +9981,193 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       failedDeviceID: null,
       failureMessage: null,
       debugSummary: `requested=${targetDevices.length}, completed=${completedDeviceIDs.length}, passwordConfirmed=${didConfirmPassword ? 'yes' : 'no'}, csrfTokenPresent=${csrfToken ? 'yes' : 'no'}, rsiTokenPresent=${rsiToken ? 'yes' : 'no'}, rsiDevicePresent=${rsiDevice ? 'yes' : 'no'}`
+    };
+    """
+
+    private static let requestCharacterRepairScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const repairReason = typeof reason === 'string' && reason.trim() ? reason.trim() : 'Character reset';
+    const issueCouncilValue = typeof issueCouncilURL === 'string' ? issueCouncilURL.trim() : '';
+    const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
+    const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        failureMessage: 'The RSI character repair page reported access denied before the request started.',
+        debugSummary: null
+      };
+    }
+
+    if (!currentPasswordValue) {
+      return {
+        accessDenied: false,
+        status: 'missing-password',
+        failureMessage: 'Hangar Express does not have a saved RSI password for the character repair request.',
+        debugSummary: 'passwordPresent=no'
+      };
+    }
+
+    const isVisible = (element) => {
+      if (!element) {
+        return false;
+      }
+      const style = window.getComputedStyle(element);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+        return false;
+      }
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+
+    const setFieldValue = (element, value) => {
+      if (!element) {
+        return false;
+      }
+      element.focus?.();
+      element.value = value;
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    };
+
+    const findRequestRepairButton = () => {
+      const preferred = document.querySelector('.js-reset-account');
+      if (preferred) {
+        return preferred;
+      }
+
+      return Array.from(document.querySelectorAll('a, button'))
+        .find((element) => normalizeText(element.textContent).toLowerCase() === 'request repair') || null;
+    };
+
+    const findRepairForm = () => {
+      const forms = Array.from(document.querySelectorAll('form[name="reset-account"], form[action*="/account/reset"]'))
+        .filter((form) =>
+          form.querySelector('[name="reason"]') &&
+          form.querySelector('[name="link_council_report"]') &&
+          form.querySelector('[name="current_password"]')
+        );
+
+      if (!forms.length) {
+        return null;
+      }
+
+      const visibleForms = forms.filter(isVisible);
+      const candidates = visibleForms.length ? visibleForms : forms;
+      return candidates.find((form) => {
+        const action = normalizeText(form.getAttribute('action') || form.action || '');
+        return action.includes('/account/reset') || action === '';
+      }) || candidates[candidates.length - 1];
+    };
+
+    const requestButton = findRequestRepairButton();
+    if (requestButton) {
+      requestButton.click();
+    }
+
+    let form = null;
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      form = findRepairForm();
+      if (form) {
+        break;
+      }
+      await wait(100);
+    }
+
+    if (!form) {
+      return {
+        accessDenied: false,
+        status: 'missing-form',
+        failureMessage: 'Hangar Express could not find the RSI character repair request form.',
+        debugSummary: normalizeText(document.body.innerText).slice(0, 700)
+      };
+    }
+
+    const reasonField = form.querySelector('[name="reason"]');
+    const issueCouncilField = form.querySelector('[name="link_council_report"]');
+    const passwordField = form.querySelector('[name="current_password"]');
+    setFieldValue(reasonField, repairReason);
+    setFieldValue(issueCouncilField, issueCouncilValue);
+    setFieldValue(passwordField, currentPasswordValue);
+
+    const formData = new FormData(form);
+    formData.set('reason', repairReason);
+    formData.set('link_council_report', issueCouncilValue);
+    formData.set('current_password', currentPasswordValue);
+
+    const submitURL = new URL(form.getAttribute('action') || window.location.href, window.location.href).toString();
+    const requestBody = new URLSearchParams(formData);
+    const response = await fetch(submitURL, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'
+      },
+      body: requestBody.toString(),
+      redirect: 'follow'
+    });
+
+    const responseText = await response.text();
+    const parsedDocument = new DOMParser().parseFromString(responseText, 'text/html');
+    const responseBodyText = normalizeText(parsedDocument.body?.innerText || responseText);
+    const resetScopes = Array.from(parsedDocument.querySelectorAll('#reset-account'))
+      .filter((element) =>
+        element.querySelector('form[name="reset-account"]') ||
+        element.querySelector('.error-message') ||
+        element.querySelector('.success-message')
+      );
+    const messageScopes = resetScopes.length ? resetScopes : [parsedDocument];
+    const collectMessages = (selector) => messageScopes
+      .flatMap((scope) => Array.from(scope.querySelectorAll(selector)))
+      .map((element) => normalizeText(element.textContent))
+      .filter(Boolean);
+    const errorMessages = collectMessages('.js-error-message, .error-message, .alert-danger, .flash-error');
+    const successMessages = collectMessages('.js-success-message, .success-message, .alert-success, .flash-success');
+    const responseLooksAccessDenied =
+      response.status === 401 ||
+      response.status === 403 ||
+      parsedDocument.title.toLowerCase().includes('access denied') ||
+      responseBodyText.includes('Access denied');
+
+    if (responseLooksAccessDenied) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        failureMessage: errorMessages[0] || `RSI rejected the character repair request with HTTP ${response.status}.`,
+        debugSummary: `httpStatus=${response.status}, responseURL=${response.url || 'n/a'}`
+      };
+    }
+
+    if (!response.ok) {
+      return {
+        accessDenied: false,
+        status: 'failed',
+        failureMessage: errorMessages[0] || `RSI returned HTTP ${response.status} while requesting character repair.`,
+        debugSummary: `httpStatus=${response.status}, responsePreview=${responseBodyText.slice(0, 500) || 'n/a'}`
+      };
+    }
+
+    if (errorMessages.length) {
+      return {
+        accessDenied: false,
+        status: 'failed',
+        failureMessage: errorMessages.join('\\n'),
+        debugSummary: `httpStatus=${response.status}, responseURL=${response.url || 'n/a'}, successMessages=${successMessages.length}`
+      };
+    }
+
+    return {
+      accessDenied: false,
+      status: 'ok',
+      failureMessage: null,
+      debugSummary: `httpStatus=${response.status}, responseURL=${response.url || 'n/a'}, requestButtonClicked=${requestButton ? 'yes' : 'no'}, successMessages=${successMessages.length}`
     };
     """
 

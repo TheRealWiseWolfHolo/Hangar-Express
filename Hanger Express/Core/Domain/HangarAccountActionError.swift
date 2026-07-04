@@ -21,6 +21,8 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
     case upgradeTargetLookupFailed(message: String)
     case upgradeTimedOut(timeoutSeconds: Int)
     case upgradeRejected(message: String)
+    case characterRepairTimedOut(timeoutSeconds: Int)
+    case characterRepairRejected(message: String)
     case invalidBuybackItem
     case buybackCheckoutRejected(message: String)
     case invalidLimitedShip
@@ -36,7 +38,7 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
         case .missingSession:
             return AppLocalizer.string("No signed-in RSI session is currently available for this account action.")
         case .missingStoredPassword:
-            return AppLocalizer.string("This RSI account no longer has a saved password. Sign in again before Hangar Express can send melt or gift requests.")
+            return AppLocalizer.string("This RSI account no longer has a saved password. Sign in again before Hangar Express can send account action requests.")
         case .emptyPledgeSelection:
             return AppLocalizer.string("Select at least one pledge before starting a bulk action.")
         case .ineligibleMeltSelection:
@@ -90,6 +92,13 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
             )
         case let .upgradeRejected(message):
             return AppLocalizer.format("RSI did not accept the upgrade request.\n\n%@", message)
+        case let .characterRepairTimedOut(timeoutSeconds):
+            return AppLocalizer.format(
+                "RSI did not confirm the character repair request within %lld seconds. Open the RSI character repair page to verify whether it was submitted before trying again.",
+                timeoutSeconds
+            )
+        case let .characterRepairRejected(message):
+            return AppLocalizer.format("RSI did not accept the character repair request.\n\n%@", message)
         case .invalidBuybackItem:
             return AppLocalizer.string("Choose a valid buy-back pledge before Hangar Express can prepare checkout.")
         case let .buybackCheckoutRejected(message):

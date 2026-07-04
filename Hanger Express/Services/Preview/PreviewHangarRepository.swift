@@ -243,6 +243,17 @@ struct PreviewHangarRepository: HangarRepository {
         )
     }
 
+    func requestCharacterRepair(
+        for session: UserSession,
+        password _: String
+    ) async throws -> CharacterRepairResult {
+        CharacterRepairResult(
+            wasSuccessful: true,
+            failureMessage: nil,
+            updatedCookies: session.cookies
+        )
+    }
+
     func prepareBuybackCheckout(
         for session: UserSession,
         pledge: BuybackPledge

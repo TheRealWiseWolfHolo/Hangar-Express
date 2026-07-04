@@ -9,6 +9,7 @@ struct CCUUpgradeCalculatorView: View {
     @State private var selectedSourceKey: String?
     @State private var selectedDestinationKey: String?
     @State private var isRefreshingCatalog = false
+    @State private var routeCalculationState: CCUUpgradeRouteCalculationState = .idle
 
     private var loadedCatalog: CCUUpgradeCalculatorCatalog? {
         guard case let .loaded(catalog) = loadState else {
@@ -20,10 +21,6 @@ struct CCUUpgradeCalculatorView: View {
 
     private var catalogShips: [CCUUpgradeCatalogShip] {
         loadedCatalog?.ships ?? []
-    }
-
-    private var storeUpgradeOffers: [RSIShipCatalog.StoreUpgradeOffer] {
-        loadedCatalog?.storeUpgradeOffers ?? []
     }
 
     private var selectedSourceShip: CCUUpgradeCatalogShip? {
@@ -38,18 +35,18 @@ struct CCUUpgradeCalculatorView: View {
         }
     }
 
-    private var calculatedRoute: CCUUpgradeRoute? {
-        guard let selectedSourceShip,
-              let selectedDestinationShip else {
+    private var routeCalculationRequest: CCUUpgradeRouteCalculationRequest? {
+        guard let catalog = loadedCatalog,
+              let selectedSourceShip,
+              let selectedDestinationShip,
+              selectedSourceShip.msrpUSD.isLessThan(selectedDestinationShip.msrpUSD) else {
             return nil
         }
 
-        return CCUUpgradePlanner.bestRoute(
-            from: selectedSourceShip,
-            to: selectedDestinationShip,
-            snapshot: snapshot,
-            catalogShips: catalogShips,
-            storeUpgradeOffers: storeUpgradeOffers
+        return CCUUpgradeRouteCalculationRequest(
+            catalogID: catalog.id,
+            sourceKey: selectedSourceShip.key,
+            destinationKey: selectedDestinationShip.key
         )
     }
 
@@ -67,9 +64,9 @@ struct CCUUpgradeCalculatorView: View {
                 Section {
                     NavigationLink(value: CCUUpgradeShipPickerRole.source) {
                         CCUUpgradeShipSelectionRow(
-                            title: "Source Ship",
+                            title: AppLocalizer.string("Source Ship"),
                             ship: selectedSourceShip,
-                            placeholder: "Choose source",
+                            placeholder: AppLocalizer.string("Choose source"),
                             reloadToken: reloadToken
                         )
                     }
@@ -77,9 +74,9 @@ struct CCUUpgradeCalculatorView: View {
 
                     NavigationLink(value: CCUUpgradeShipPickerRole.destination) {
                         CCUUpgradeShipSelectionRow(
-                            title: "Destination Ship",
+                            title: AppLocalizer.string("Destination Ship"),
                             ship: selectedDestinationShip,
-                            placeholder: "Choose destination",
+                            placeholder: AppLocalizer.string("Choose destination"),
                             reloadToken: reloadToken
                         )
                     }
@@ -110,7 +107,7 @@ struct CCUUpgradeCalculatorView: View {
                         }
                     }
                     .disabled(isRefreshingCatalog || isLoadingCatalog)
-                    .accessibilityLabel("Refresh hosted ship catalog")
+                    .accessibilityLabel(AppLocalizer.string("Refresh hosted ship catalog"))
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
@@ -128,7 +125,10 @@ struct CCUUpgradeCalculatorView: View {
                 )
             }
             .task {
-                await loadCatalog(force: false)
+                await loadCatalog(force: true)
+            }
+            .task(id: routeCalculationRequest) {
+                await calculateRoute(for: routeCalculationRequest)
             }
         }
     }
@@ -181,20 +181,38 @@ struct CCUUpgradeCalculatorView: View {
                         systemImage: "exclamationmark.triangle",
                         description: Text("The destination ship must have a higher MSRP than the source ship.")
                     )
-                } else if let calculatedRoute {
-                    CCUUpgradeRouteSummaryCard(route: calculatedRoute)
+                } else if let routeCalculationRequest {
+                    switch routeCalculationState {
+                    case let .loaded(loadedRequest, route) where loadedRequest == routeCalculationRequest:
+                        if let route {
+                            CCUUpgradeRouteSummaryCard(route: route)
 
-                    if calculatedRoute.hasUnavailableStoreStep {
-                        CCUUpgradeRouteWarningView()
-                    }
+                            if route.hasUnavailableStoreStep {
+                                CCUUpgradeRouteWarningView()
+                            }
 
-                    ForEach(Array(calculatedRoute.steps.enumerated()), id: \.element.id) { offset, step in
-                        CCUUpgradeStepRow(
-                            number: offset + 1,
-                            step: step,
-                            paymentRequirement: calculatedRoute.paymentRequirement(for: step),
-                            reloadToken: reloadToken
-                        )
+                            ForEach(Array(route.steps.enumerated()), id: \.element.id) { offset, step in
+                                CCUUpgradeStepRow(
+                                    number: offset + 1,
+                                    step: step,
+                                    paymentRequirement: route.paymentRequirement(for: step),
+                                    reloadToken: reloadToken
+                                )
+                            }
+                        } else {
+                            ContentUnavailableView(
+                                "No CCU Path",
+                                systemImage: "link.badge.plus",
+                                description: Text("No valid upgrade chain was found for these ships.")
+                            )
+                        }
+                    default:
+                        HStack(spacing: 12) {
+                            ProgressView()
+
+                            Text("Calculating CCU chain...")
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 } else {
                     ContentUnavailableView(
@@ -262,19 +280,19 @@ struct CCUUpgradeCalculatorView: View {
             return
         }
 
-        if force {
-            await HostedShipCatalogStore.shared.clear()
-        }
-
         if showsLoadingState {
             loadState = .loading
         }
 
         do {
-            let catalog = try await HostedShipCatalogStore.shared.catalog(using: HostedShipCatalogClient())
+            let catalog = try await HostedShipCatalogStore.shared.catalog(
+                using: HostedShipCatalogClient(),
+                forceRefresh: force
+            )
             let ships = CCUUpgradeCatalogShip.makeShips(from: catalog)
             loadState = .loaded(
                 CCUUpgradeCalculatorCatalog(
+                    id: UUID(),
                     ships: ships,
                     storeUpgradeOffers: catalog.storeUpgradeOffers
                 )
@@ -297,11 +315,73 @@ struct CCUUpgradeCalculatorView: View {
             self.selectedDestinationKey = nil
         }
     }
+
+    @MainActor
+    private func calculateRoute(for request: CCUUpgradeRouteCalculationRequest?) async {
+        guard let request else {
+            routeCalculationState = .idle
+            return
+        }
+
+        guard let catalog = loadedCatalog,
+              catalog.id == request.catalogID,
+              let sourceShip = catalog.ships.first(where: { $0.key == request.sourceKey }),
+              let destinationShip = catalog.ships.first(where: { $0.key == request.destinationKey }),
+              sourceShip.msrpUSD.isLessThan(destinationShip.msrpUSD) else {
+            routeCalculationState = .idle
+            return
+        }
+
+        if case let .loaded(loadedRequest, _) = routeCalculationState,
+           loadedRequest == request {
+            return
+        }
+
+        routeCalculationState = .calculating(request)
+        await Task.yield()
+
+        guard !Task.isCancelled else {
+            return
+        }
+
+        let snapshot = snapshot
+        let catalogShips = catalog.ships
+        let storeUpgradeOffers = catalog.storeUpgradeOffers
+        let route = await Task.detached(priority: .userInitiated) {
+            CCUUpgradePlanner.bestRoute(
+                from: sourceShip,
+                to: destinationShip,
+                snapshot: snapshot,
+                catalogShips: catalogShips,
+                storeUpgradeOffers: storeUpgradeOffers
+            )
+        }.value
+
+        guard !Task.isCancelled,
+              routeCalculationRequest == request else {
+            return
+        }
+
+        routeCalculationState = .loaded(request, route)
+    }
 }
 
 private struct CCUUpgradeCalculatorCatalog {
+    let id: UUID
     let ships: [CCUUpgradeCatalogShip]
     let storeUpgradeOffers: [RSIShipCatalog.StoreUpgradeOffer]
+}
+
+private struct CCUUpgradeRouteCalculationRequest: Hashable, Sendable {
+    let catalogID: UUID
+    let sourceKey: String
+    let destinationKey: String
+}
+
+private enum CCUUpgradeRouteCalculationState {
+    case idle
+    case calculating(CCUUpgradeRouteCalculationRequest)
+    case loaded(CCUUpgradeRouteCalculationRequest, CCUUpgradeRoute?)
 }
 
 private enum CCUUpgradeCalculatorLoadState {
@@ -318,9 +398,9 @@ private enum CCUUpgradeShipPickerRole: Hashable {
     var title: String {
         switch self {
         case .source:
-            return "Source Ship"
+            return AppLocalizer.string("Source Ship")
         case .destination:
-            return "Destination Ship"
+            return AppLocalizer.string("Destination Ship")
         }
     }
 }
@@ -361,7 +441,7 @@ private struct CCUUpgradeShipSelectionRow: View {
                     .foregroundStyle(ship == nil ? .secondary : .primary)
 
                 if let ship {
-                    Text("\(ship.manufacturer) • MSRP \(ship.displayPrice)")
+                    Text(AppLocalizer.format("%@ • MSRP %@", ship.manufacturer, ship.displayPrice))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -468,7 +548,7 @@ private struct CCUUpgradeRouteSummaryCard: View {
                     Text("Best CCU Chain")
                         .font(.headline)
 
-                    Text("\(route.sourceShip.name) to \(route.destinationShip.name)")
+                    Text(AppLocalizer.format("%@ to %@", route.sourceShip.name, route.destinationShip.name))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -512,7 +592,7 @@ private struct CCUUpgradeMetricLabel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(title)
+            Text(AppLocalizer.string(title))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
 
@@ -587,17 +667,24 @@ private struct CCUUpgradeStepRow: View {
                 if step.kind.requiresNewPurchase {
                     VStack(alignment: .leading, spacing: 4) {
                         Label(
-                            "Purchase \(purchaseCostText)",
+                            AppLocalizer.format("Purchase %@", purchaseCostText),
                             systemImage: step.kind.isUnavailableStoreStep ? "cart.badge.questionmark" : "cart"
                         )
 
-                        Text("Store credit \(storeCreditText) • New money \(newMoneyText)")
+                        Text(AppLocalizer.format(
+                            "Store credit %@ • New money %@",
+                            storeCreditText,
+                            newMoneyText
+                        ))
                             .foregroundStyle(.secondary)
                     }
                     .font(.caption)
                     .foregroundStyle(step.kind.isUnavailableStoreStep ? .orange : .secondary)
                 } else if let referenceID = step.referenceID {
-                    Label("Already in hangar \(referenceID)", systemImage: "shippingbox")
+                    Label(
+                        AppLocalizer.format("Already in hangar %@", referenceID),
+                        systemImage: "shippingbox"
+                    )
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -668,7 +755,7 @@ private struct CCUUpgradeStepValue: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title)
+            Text(AppLocalizer.string(title))
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
 

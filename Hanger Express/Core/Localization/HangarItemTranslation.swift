@@ -541,6 +541,8 @@ nonisolated struct MaskedHangarItemText: Equatable, Sendable {
                 with: " ",
                 options: .regularExpression
             )
+            .replacingOccurrences(of: "战争债券 版", with: "战争债券版")
+            .replacingOccurrences(of: "标准 版", with: "标准版")
             .replacingOccurrences(
                 of: #" ([,.;:!?，。！？；：、）】》])"#,
                 with: "$1",

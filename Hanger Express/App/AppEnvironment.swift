@@ -9,6 +9,7 @@ struct AppEnvironment {
     let sensitiveActionAuthorizer: any SensitiveActionAuthorizing
     let authService: any AuthenticationServicing
     let recaptchaBroker: RecaptchaBroker
+    let authIPRegionChecker: any AuthenticationIPRegionChecking
     let authDiagnostics: AuthenticationDiagnosticsStore
     let refreshDiagnostics: RefreshDiagnosticsStore
     let subscriptionStore: SubscriptionStore
@@ -21,6 +22,7 @@ struct AppEnvironment {
         sensitiveActionAuthorizer: any SensitiveActionAuthorizing,
         authService: any AuthenticationServicing,
         recaptchaBroker: RecaptchaBroker,
+        authIPRegionChecker: any AuthenticationIPRegionChecking,
         authDiagnostics: AuthenticationDiagnosticsStore,
         refreshDiagnostics: RefreshDiagnosticsStore,
         subscriptionStore: SubscriptionStore
@@ -32,6 +34,7 @@ struct AppEnvironment {
         self.sensitiveActionAuthorizer = sensitiveActionAuthorizer
         self.authService = authService
         self.recaptchaBroker = recaptchaBroker
+        self.authIPRegionChecker = authIPRegionChecker
         self.authDiagnostics = authDiagnostics
         self.refreshDiagnostics = refreshDiagnostics
         self.subscriptionStore = subscriptionStore
@@ -49,6 +52,7 @@ struct AppEnvironment {
             sensitiveActionAuthorizer: PreviewSensitiveActionAuthorizer(),
             authService: PreviewAuthenticationService(diagnostics: diagnostics),
             recaptchaBroker: broker,
+            authIPRegionChecker: PreviewAuthenticationIPRegionChecker(),
             authDiagnostics: diagnostics,
             refreshDiagnostics: refreshDiagnostics,
             subscriptionStore: SubscriptionStore(storeKitEnabled: false)
@@ -67,6 +71,7 @@ struct AppEnvironment {
             sensitiveActionAuthorizer: DeviceOwnerSensitiveActionAuthorizer(),
             authService: RSIAuthService(recaptchaBroker: broker, diagnostics: diagnostics),
             recaptchaBroker: broker,
+            authIPRegionChecker: CloudflareAuthenticationIPRegionChecker(),
             authDiagnostics: diagnostics,
             refreshDiagnostics: refreshDiagnostics,
             subscriptionStore: SubscriptionStore()

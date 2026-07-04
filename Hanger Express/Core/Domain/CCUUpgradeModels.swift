@@ -1,6 +1,9 @@
 import Foundation
 
 nonisolated struct CCUUpgradeCatalogShip: Identifiable, Hashable, Sendable {
+    private static let maximumUpgradeableMSRPUSD: Decimal = 1000
+    private static let pioneerKey = UpgradeTitleParser.normalizedShipKey("Pioneer")
+
     let numericID: Int
     let key: String
     let name: String
@@ -21,7 +24,18 @@ nonisolated struct CCUUpgradeCatalogShip: Identifiable, Hashable, Sendable {
     }
 
     var displayAvailability: String {
-        storeAvailability?.nilIfBlankForCCU ?? (isStoreUpgradeAvailable ? "Available" : "Unavailable")
+        if let storeAvailability = storeAvailability?.nilIfBlankForCCU {
+            switch storeAvailability.localizedLowercase {
+            case "available":
+                return AppLocalizer.string("Available")
+            case "unavailable", "not available":
+                return AppLocalizer.string("Unavailable")
+            default:
+                return storeAvailability
+            }
+        }
+
+        return AppLocalizer.string(isStoreUpgradeAvailable ? "Available" : "Unavailable")
     }
 
     var isStoreUpgradeAvailable: Bool {
@@ -72,6 +86,11 @@ nonisolated struct CCUUpgradeCatalogShip: Identifiable, Hashable, Sendable {
                 continue
             }
 
+            guard msrpUSD.isLessThanOrEqual(to: Self.maximumUpgradeableMSRPUSD),
+                  !Self.isPioneerShip(name: ship.name, key: key) else {
+                continue
+            }
+
             let candidate = CCUUpgradeCatalogShip(
                 numericID: ship.id,
                 key: key,
@@ -108,6 +127,13 @@ nonisolated struct CCUUpgradeCatalogShip: Identifiable, Hashable, Sendable {
         }
     }
 
+    private static func isPioneerShip(name: String, key: String) -> Bool {
+        key == pioneerKey
+            || UpgradeTitleParser.normalizedShipKey(
+                UpgradeTitleParser.stripManufacturerPrefix(from: name)
+            ) == pioneerKey
+    }
+
     private func isPreferredCatalogEntry(over other: CCUUpgradeCatalogShip) -> Bool {
         if isStoreUpgradeAvailable != other.isStoreUpgradeAvailable {
             return isStoreUpgradeAvailable
@@ -138,38 +164,38 @@ nonisolated enum CCUUpgradeSourceKind: Int, Hashable, Sendable, CaseIterable {
     var title: String {
         switch self {
         case .hangarWarbond:
-            return "WB CCU in Hangar"
+            return AppLocalizer.string("WB CCU in Hangar")
         case .hangarStandardMeltAboveCurrent:
-            return "Standard CCU in Hangar"
+            return AppLocalizer.string("Standard CCU in Hangar")
         case .hangarStandardMeltMatchesCurrent:
-            return "Standard CCU in Hangar"
+            return AppLocalizer.string("Standard CCU in Hangar")
         case .buyback:
-            return "CCU in Buy Back"
+            return AppLocalizer.string("CCU in Buy Back")
         case .storeWarbond:
-            return "WB CCU in Store"
+            return AppLocalizer.string("WB CCU in Store")
         case .store:
-            return "CCU in Store"
+            return AppLocalizer.string("CCU in Store")
         case .unavailableStore:
-            return "CCU Not in Store"
+            return AppLocalizer.string("CCU Not in Store")
         }
     }
 
     var detail: String {
         switch self {
         case .hangarWarbond:
-            return "Best owned saving"
+            return AppLocalizer.string("Best owned saving")
         case .hangarStandardMeltAboveCurrent:
-            return "Melt above current value"
+            return AppLocalizer.string("Melt above current value")
         case .hangarStandardMeltMatchesCurrent:
-            return "Melt equals current value"
+            return AppLocalizer.string("Melt equals current value")
         case .buyback:
-            return "Recoverable from buy back"
+            return AppLocalizer.string("Recoverable from buy back")
         case .storeWarbond:
-            return "Purchasable now, new money only"
+            return AppLocalizer.string("Purchasable now, new money only")
         case .store:
-            return "Purchasable now"
+            return AppLocalizer.string("Purchasable now")
         case .unavailableStore:
-            return "Cannot be purchased right now"
+            return AppLocalizer.string("Cannot be purchased right now")
         }
     }
 
@@ -203,9 +229,9 @@ nonisolated enum CCUUpgradeSourceKind: Int, Hashable, Sendable, CaseIterable {
 
     var allowsStoreCredit: Bool {
         switch self {
-        case .buyback, .store, .unavailableStore:
+        case .store, .unavailableStore:
             return true
-        case .hangarWarbond, .hangarStandardMeltAboveCurrent, .hangarStandardMeltMatchesCurrent, .storeWarbond:
+        case .hangarWarbond, .hangarStandardMeltAboveCurrent, .hangarStandardMeltMatchesCurrent, .buyback, .storeWarbond:
             return false
         }
     }
@@ -537,8 +563,7 @@ nonisolated enum CCUUpgradePlanner {
                 return nil
             }
 
-            if !currentValueUSD.isGreaterThan(pledge.recoveredValueUSD),
-               targetShip.isStoreUpgradeAvailable {
+            if targetShip.isStoreUpgradeAvailable {
                 return nil
             }
 
@@ -549,8 +574,8 @@ nonisolated enum CCUUpgradePlanner {
                 title: pledge.title,
                 kind: .buyback,
                 currentValueUSD: currentValueUSD,
-                effectiveCostUSD: pledge.recoveredValueUSD,
-                newPurchaseCostUSD: pledge.recoveredValueUSD,
+                effectiveCostUSD: currentValueUSD,
+                newPurchaseCostUSD: currentValueUSD,
                 referenceID: "#\(pledge.id)"
             )
         }
