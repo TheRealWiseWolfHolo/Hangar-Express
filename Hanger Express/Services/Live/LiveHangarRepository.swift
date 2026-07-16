@@ -12,6 +12,7 @@ final class LiveHangarRepository: HangarRepository {
     private let buybackPageSize = 100
     private let maxPledgePages = 200
     private let maxBuybackPages = 100
+    private let hangarLogBatchSize = 10
 
     init(diagnostics: RefreshDiagnosticsStore) {
         refreshDiagnostics = diagnostics
@@ -283,14 +284,16 @@ final class LiveHangarRepository: HangarRepository {
         for session: UserSession,
         from snapshot: HangarSnapshot,
         mode: HangarLogFetchMode,
-        progress: @escaping RefreshProgressHandler
+        progress: @escaping RefreshProgressHandler,
+        batchHandler: HangarLogBatchHandler?
     ) async throws -> HangarSnapshot {
         if session.authMode == .developerPreview {
             return try await previewRepository.refreshHangarLogData(
                 for: session,
                 from: snapshot,
                 mode: mode,
-                progress: progress
+                progress: progress,
+                batchHandler: batchHandler
             )
         }
 
@@ -301,6 +304,7 @@ final class LiveHangarRepository: HangarRepository {
             using: session.cookies,
             existingLogs: snapshot.hangarLogs,
             mode: mode,
+            batchHandler: batchHandler,
             progress: progress,
             stepNumber: 2,
             stepCount: 2
@@ -1811,6 +1815,7 @@ final class LiveHangarRepository: HangarRepository {
         using cookies: [SessionCookie],
         existingLogs: [HangarLogEntry],
         mode: HangarLogFetchMode = .initial,
+        batchHandler: HangarLogBatchHandler?,
         browser activeBrowser: RSIAccountPageBrowser? = nil,
         progress: @escaping RefreshProgressHandler,
         stepNumber: Int,
@@ -1844,13 +1849,28 @@ final class LiveHangarRepository: HangarRepository {
         )
 
         let activeBrowser = activeBrowser ?? browser
-        let result: RemoteHangarLogPage
+        let entryLimit = mode.entryLimit
+        let batchSize = min(hangarLogBatchSize, entryLimit)
+        let knownRawTexts = hangarLogStopMarkers(from: existingLogs)
+        var fetchedLogs: [HangarLogEntry] = []
+        var hangarLogs = existingLogs
+        var page = 1
+        var pageCount: Int?
+        var lastResult: RemoteHangarLogPage?
+
+        while fetchedLogs.count < entryLimit {
+            let requestedEntryCount = min(batchSize, entryLimit - fetchedLogs.count)
+            guard requestedEntryCount > 0 else {
+                break
+            }
+
+            let result: RemoteHangarLogPage
         do {
             result = try await activeBrowser.fetchHangarLogPage(
                 using: cookies,
-                page: 1,
-                maxEntries: mode.entryLimit,
-                knownRawTexts: hangarLogStopMarkers(from: existingLogs)
+                page: page,
+                maxEntries: requestedEntryCount,
+                knownRawTexts: knownRawTexts
             )
         } catch {
             recordRefreshDiagnostics(
@@ -1861,6 +1881,8 @@ final class LiveHangarRepository: HangarRepository {
             )
             throw error
         }
+
+        lastResult = result
 
         if result.accessDenied {
             recordRefreshDiagnostics(
@@ -1903,27 +1925,76 @@ final class LiveHangarRepository: HangarRepository {
             throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
         }
 
+        let previousFetchedLogCount = fetchedLogs.count
         let processedHangarLogs = await Self.processHangarLogItems(
             result.items,
+            previousFetchedLogs: fetchedLogs,
             existingLogs: existingLogs,
-            entryLimit: mode.entryLimit
+            entryLimit: entryLimit
         )
-        let fetchedLogs = processedHangarLogs.fetchedLogs
-        let hangarLogs = processedHangarLogs.mergedLogs
+        fetchedLogs = processedHangarLogs.fetchedLogs
+        hangarLogs = processedHangarLogs.mergedLogs
+        pageCount = result.pageCount ?? pageCount
+
+        recordRefreshDiagnostics(
+            stage: "hangar-log.batch",
+            summary: "Loaded a hangar log batch from RSI.",
+            detail: [
+                "page=\(page)",
+                "requestedEntries=\(requestedEntryCount)",
+                "returnedItems=\(result.items.count)",
+                "newParsedEntries=\(fetchedLogs.count - previousFetchedLogCount)",
+                "fetchedTotal=\(fetchedLogs.count)",
+                "mergedTotal=\(hangarLogs.count)",
+                "pageCount=\(pageCount.map(String.init) ?? "unknown")",
+                "hitKnownEntry=\(result.hitKnownEntry == true)",
+                "debugSummary=\(result.debugSummary ?? "none")"
+            ].joined(separator: "\n")
+        )
+
+        if fetchedLogs.count > previousFetchedLogCount {
+            batchHandler?(hangarLogs)
+            progress(
+                makeProgress(
+                    stage: .hangarLog,
+                    stepNumber: stepNumber,
+                    stepCount: stepCount,
+                    detail: AppLocalizer.format("Loaded %lld hangar log entries from RSI.", fetchedLogs.count),
+                    completedUnitCount: fetchedLogs.count,
+                    totalUnitCount: entryLimit,
+                    trackerID: trackerID,
+                    trackerTitle: trackerTitle,
+                    displayRange: DisplayProgressRange.pages
+                )
+            )
+        }
+
+        let reachedPageCount = pageCount.map { page >= $0 } ?? false
+        if result.items.isEmpty ||
+            result.hitKnownEntry == true ||
+            fetchedLogs.count == previousFetchedLogCount ||
+            fetchedLogs.count >= entryLimit ||
+            reachedPageCount {
+            break
+        }
+
+        page += 1
+        }
 
         if hangarLogs.isEmpty {
+            let result = lastResult
             recordRefreshDiagnostics(
                 stage: "hangar-log.response",
                 summary: "RSI returned an empty hangar log payload.",
                 detail: [
-                    "statusCode=\(result.statusCode)",
-                    "returnedItems=\(result.items.count)",
-                    "debugSummary=\(result.debugSummary ?? "none")"
+                    "statusCode=\(result?.statusCode ?? 0)",
+                    "returnedItems=\(result?.items.count ?? 0)",
+                    "debugSummary=\(result?.debugSummary ?? "none")"
                 ].joined(separator: "\n"),
                 level: .error
             )
             throw LiveHangarRepositoryError.unexpectedMarkup(
-                result.debugSummary
+                result?.debugSummary
                 ?? "RSI opened the hangar log window, but no log entries were discovered."
             )
         }
@@ -1931,11 +2002,11 @@ final class LiveHangarRepository: HangarRepository {
         let addedEntryCount = max(hangarLogs.count - existingLogs.count, 0)
         let detail: String
         if existingLogs.isEmpty {
-            detail = hangarLogs.count >= mode.entryLimit
+            detail = hangarLogs.count >= entryLimit
                 ? AppLocalizer.format(
                     "Loaded %lld hangar log entries from RSI (cap %lld).",
                     hangarLogs.count,
-                    mode.entryLimit
+                    entryLimit
                 )
                 : AppLocalizer.format("Loaded %lld hangar log entries from RSI.", hangarLogs.count)
         } else if addedEntryCount > 0 {
@@ -1966,7 +2037,8 @@ final class LiveHangarRepository: HangarRepository {
                 "fetchedEntries=\(fetchedLogs.count)",
                 "mergedEntries=\(hangarLogs.count)",
                 "addedEntries=\(addedEntryCount)",
-                "statusCode=\(result.statusCode)"
+                "statusCode=\(lastResult?.statusCode ?? 0)",
+                "pageCount=\(pageCount.map(String.init) ?? "unknown")"
             ].joined(separator: ", ")
         )
 
@@ -1984,11 +2056,17 @@ final class LiveHangarRepository: HangarRepository {
 
     private nonisolated static func processHangarLogItems(
         _ items: [RemoteHangarLogItem],
+        previousFetchedLogs: [HangarLogEntry] = [],
         existingLogs: [HangarLogEntry],
         entryLimit: Int
     ) async -> (fetchedLogs: [HangarLogEntry], mergedLogs: [HangarLogEntry]) {
         await Task.detached(priority: .userInitiated) {
-            let fetchedLogs = Array(HangarLogParser.parse(items).prefix(entryLimit))
+            let parsedLogs = HangarLogParser.parse(items)
+            let fetchedLogs = mergedHangarLogs(
+                fetchedLogs: previousFetchedLogs + parsedLogs,
+                existingLogs: [],
+                entryLimit: entryLimit
+            )
             let mergedLogs = mergedHangarLogs(
                 fetchedLogs: fetchedLogs,
                 existingLogs: existingLogs,
@@ -7702,6 +7780,9 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     const resolvedMaxEntries = Number.isFinite(Number(maxEntries)) && Number(maxEntries) > 0
       ? Math.min(Math.floor(Number(maxEntries)), 500)
       : 10;
+    const requestedPage = Number.isFinite(Number(page)) && Number(page) > 0
+      ? Math.floor(Number(page))
+      : 1;
     const knownFullTexts = new Set(
       (Array.isArray(knownRawTexts) ? knownRawTexts : [])
         .map((value) => normalizeText(value))
@@ -7837,8 +7918,9 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       };
     }
 
-    const hangarLogButton = findHangarLogButton();
-    if (!hangarLogButton) {
+    const existingLogEntry = document.querySelector('.pledge-log-entry');
+    const hangarLogButton = existingLogEntry ? null : findHangarLogButton();
+    if (!existingLogEntry && !hangarLogButton) {
       return {
         accessDenied: false,
         statusCode: 200,
@@ -7868,7 +7950,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       requestHeaders['x-rsi-device'] = rsiDevice;
     }
 
-    const modalAppeared = await waitFor(
+    const modalAppeared = existingLogEntry || await waitFor(
       () =>
         document.querySelector('.pledge-log-entry') ||
         document.querySelector('[class*=\"modal\"] [class*=\"pledge\"]') ||
@@ -7887,13 +7969,16 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       };
     }
 
-    let items = dedupeEntries(onlyUnknownEntries(collectEntries()));
+    let items = requestedPage <= 1
+      ? dedupeEntries(onlyUnknownEntries(collectEntries()))
+      : [];
     let stablePasses = 0;
     let pagedFetchStatus = 'not-started';
     let pagedFetchPageCount = null;
-    let pagedFetchStoppedAt = 1;
+    let pagedFetchStoppedAt = requestedPage;
+    let hitKnownEntry = false;
 
-    for (let index = 0; index < 80 && items.length < resolvedMaxEntries; index += 1) {
+    for (let index = 0; requestedPage <= 1 && index < 80 && items.length < resolvedMaxEntries; index += 1) {
       const beforeCount = items.length;
 
       for (const container of findScrollableContainers()) {
@@ -7917,14 +8002,16 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       }
     }
 
-    items = dedupeEntries(onlyUnknownEntries(collectEntries())).slice(0, resolvedMaxEntries);
+    if (requestedPage <= 1) {
+      items = dedupeEntries(onlyUnknownEntries(collectEntries())).slice(0, resolvedMaxEntries);
+    }
 
     try {
       const pageOneResponse = await fetch('/api/account/pledgeLog', {
         method: 'POST',
         credentials: 'include',
         headers: requestHeaders,
-        body: JSON.stringify({ page: 1 })
+        body: JSON.stringify({ page: requestedPage })
       });
 
       const pageOneRawBody = await pageOneResponse.text();
@@ -7936,6 +8023,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       if (pageOneResponse.ok && pageOnePayload?.data) {
         const apiItems = parseRenderedEntries(pageOnePayload.data.rendered);
         const pageOneHitKnown = apiItems.some(isKnownEntry);
+        hitKnownEntry = hitKnownEntry || pageOneHitKnown;
         const pageOneNewItems = onlyUnknownEntries(apiItems);
         if (pageOneNewItems.length > 0) {
           items = dedupeEntries(pageOneNewItems.concat(items));
@@ -7944,10 +8032,11 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         const reportedPageCount = Number.parseInt(String(pageOnePayload.data.pagecount || ''), 10);
         const pageCount = Number.isFinite(reportedPageCount) && reportedPageCount > 0 ? reportedPageCount : null;
         pagedFetchPageCount = pageCount;
-        pagedFetchStatus = pageOneHitKnown ? 'page-1-hit-known' : 'page-1-ok';
+        pagedFetchStoppedAt = requestedPage;
+        pagedFetchStatus = pageOneHitKnown ? `page-${requestedPage}-hit-known` : `page-${requestedPage}-ok`;
 
         if (!pageOneHitKnown) {
-          for (let page = 2; page <= (pageCount || 100) && items.length < resolvedMaxEntries; page += 1) {
+          for (let page = requestedPage + 1; page <= (pageCount || requestedPage + 99) && items.length < resolvedMaxEntries; page += 1) {
             const response = await fetch('/api/account/pledgeLog', {
               method: 'POST',
               credentials: 'include',
@@ -7987,6 +8076,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             }
 
             const pageHitKnown = pageItems.some(isKnownEntry);
+            hitKnownEntry = hitKnownEntry || pageHitKnown;
             const newPageItems = onlyUnknownEntries(pageItems);
             const beforeCount = items.length;
             if (newPageItems.length > 0) {
@@ -8012,20 +8102,23 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
           pagedFetchStatus = `cap-${resolvedMaxEntries}`;
         }
       } else {
-        pagedFetchStatus = `page-1-http-${pageOneResponse.status}`;
+        pagedFetchStatus = `page-${requestedPage}-http-${pageOneResponse.status}`;
       }
     } catch (error) {
       pagedFetchStatus = `fetch-error:${normalizeText(error?.message || String(error))}`;
     }
 
     items = dedupeEntries(items).slice(0, resolvedMaxEntries);
+    const buttonLabel = hangarLogButton
+      ? normalizeText(hangarLogButton.textContent || hangarLogButton.value || '')
+      : 'already-open';
 
     const failureMessage = items.length === 0 && knownFullTexts.size === 0
       ? 'RSI opened the Hangar log flow, but no .pledge-log-entry rows were rendered.'
       : null;
 
     const debugSummary = [
-      `button=${normalizeText(hangarLogButton.textContent || hangarLogButton.value || '')}`,
+      `button=${buttonLabel}`,
       `entries=${items.length}`,
       `max=${resolvedMaxEntries}`,
       `knownMarkers=${knownFullTexts.size}`,
@@ -8041,6 +8134,9 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       accessDenied: false,
       statusCode: 200,
       items,
+      page: requestedPage,
+      pageCount: pagedFetchPageCount,
+      hitKnownEntry,
       failureMessage,
       debugSummary
     };
@@ -10776,6 +10872,9 @@ private nonisolated struct RemoteHangarLogPage: Decodable, Sendable {
     let accessDenied: Bool
     let statusCode: Int
     let items: [RemoteHangarLogItem]
+    let page: Int?
+    let pageCount: Int?
+    let hitKnownEntry: Bool?
     let failureMessage: String?
     let debugSummary: String?
 }

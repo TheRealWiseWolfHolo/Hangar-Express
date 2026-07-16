@@ -6,6 +6,7 @@ struct AuthenticationFlowView: View {
 
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage("auth.debug.showFullErrors") private var showsFullErrorDetails = false
+    @AppStorage("auth.forceBrowserLogin") private var forcesBrowserLogin = false
     @State private var isShowingClearKeychainAlert = false
     @State private var didCopyAuthDebugReport = false
     @State private var signInRoute: AuthenticationSignInRoute = .checkingIP
@@ -158,6 +159,8 @@ struct AuthenticationFlowView: View {
 
             Toggle("Keep me signed in", isOn: $viewModel.rememberMe)
 
+            Toggle("Force Browser Login", isOn: $forcesBrowserLogin)
+
             Button("Continue") {
                 Task {
                     await viewModel.submitCredentials(
@@ -166,7 +169,7 @@ struct AuthenticationFlowView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(viewModel.isSubmitting || signInRoute.isCheckingIP)
+            .disabled(viewModel.isSubmitting || (signInRoute.isCheckingIP && !forcesBrowserLogin))
         } header: {
             Text("Credentials")
         }
@@ -256,7 +259,7 @@ struct AuthenticationFlowView: View {
     }
 
     private var shouldUseBrowserAssistedLogin: Bool {
-        signInRoute.usesBrowserAssistedLogin || appModel.recaptchaBroker.prefersBrowserAssistedLogin
+        forcesBrowserLogin || signInRoute.usesBrowserAssistedLogin || appModel.recaptchaBroker.prefersBrowserAssistedLogin
     }
 
     private var signInPreparationOverlayDetail: String? {
@@ -297,6 +300,7 @@ struct AuthenticationFlowView: View {
             browserChallengeIsPresented: viewModel.browserChallenge != nil,
             helperIsPreparing: appModel.recaptchaBroker.isPreparing,
             helperStatusMessage: appModel.recaptchaBroker.statusMessage,
+            forceBrowserLogin: forcesBrowserLogin,
             signInRoute: signInRoute.debugLabel,
             helperPrefersBrowserAssistedLogin: appModel.recaptchaBroker.prefersBrowserAssistedLogin
         )
@@ -449,6 +453,7 @@ private enum AuthenticationDebugReportBuilder {
         browserChallengeIsPresented: Bool,
         helperIsPreparing: Bool,
         helperStatusMessage: String,
+        forceBrowserLogin: Bool,
         signInRoute: String,
         helperPrefersBrowserAssistedLogin: Bool
     ) -> String {
@@ -463,6 +468,7 @@ private enum AuthenticationDebugReportBuilder {
         lines.append("Login Identifier: \(maskedIdentifier(loginIdentifier))")
         lines.append("Remember Me: \(rememberMe)")
         lines.append("Show Full Auth Errors: \(showsFullErrors)")
+        lines.append("Force Browser Login: \(forceBrowserLogin)")
         lines.append("Browser Challenge Visible: \(browserChallengeIsPresented)")
         lines.append("Sign-In Route: \(signInRoute)")
         lines.append("Recaptcha Helper Preparing: \(helperIsPreparing)")

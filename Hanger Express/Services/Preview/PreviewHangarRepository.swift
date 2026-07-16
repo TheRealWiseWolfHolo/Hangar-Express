@@ -114,7 +114,8 @@ struct PreviewHangarRepository: HangarRepository {
         for session: UserSession,
         from snapshot: HangarSnapshot,
         mode _: HangarLogFetchMode,
-        progress: @escaping RefreshProgressHandler
+        progress: @escaping RefreshProgressHandler,
+        batchHandler _: HangarLogBatchHandler?
     ) async throws -> HangarSnapshot {
         progress(
             RefreshProgress(

@@ -56,53 +56,12 @@ struct AuthenticationBrowserChallengeView: View {
                             .font(.footnote)
                             .foregroundStyle(.orange)
                     }
-
-                    if !diagnostics.latestEntries.isEmpty {
-                        BrowserChallengeDiagnosticsExcerpt(entries: diagnostics.latestEntries)
-                    }
                 }
                 .padding(.horizontal)
                 .padding(.top, 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color(.systemBackground).opacity(0.96))
             }
-        }
-    }
-}
-
-private struct BrowserChallengeDiagnosticsExcerpt: View {
-    let entries: [AuthenticationDiagnosticsStore.Entry]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(entries.suffix(3))) { entry in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("[\(entry.timestampLabel)] \(entry.level.rawValue) \(entry.stage)")
-                        .font(.system(.caption2, design: .monospaced).weight(.semibold))
-                        .foregroundStyle(color(for: entry.level))
-
-                    Text(entry.summary)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(.secondarySystemBackground).opacity(0.92))
-        )
-    }
-
-    private func color(for level: AuthenticationDiagnosticsStore.Entry.Level) -> Color {
-        switch level {
-        case .info:
-            return .blue
-        case .warning:
-            return .orange
-        case .error:
-            return .red
         }
     }
 }
@@ -130,8 +89,16 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
+        configuration.websiteDataStore = .nonPersistent()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
+        configuration.mediaTypesRequiringUserActionForPlayback = .all
+        configuration.userContentController.addUserScript(
+            WKUserScript(
+                source: Self.mediaSuppressorScript,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: false
+            )
+        )
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -142,6 +109,182 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
         webView.load(URLRequest(url: Coordinator.loginURL))
         return webView
     }
+
+    private static let mediaSuppressorScript = """
+    (() => {
+      if (window.__hangerExpressMediaSuppressorInstalled) {
+        window.__hangerExpressSuppressMedia?.();
+        return;
+      }
+
+      window.__hangerExpressMediaSuppressorInstalled = true;
+
+      const mediaSelector = [
+        'video',
+        'audio',
+        'iframe[src*="youtube" i]',
+        'iframe[src*="youtu.be" i]',
+        'iframe[src*="vimeo" i]',
+        'iframe[src*="twitch" i]'
+      ].join(',');
+
+      const closeSelector = [
+        '[aria-label*="close" i]',
+        '[title*="close" i]',
+        '[class*="close" i]',
+        '[id*="close" i]',
+        'button'
+      ].join(',');
+
+      const loginControlSelector = [
+        'input[type="password"]',
+        'input[type="email"]',
+        'input[name="email" i]',
+        'input[name="username" i]',
+        'input[autocomplete="username" i]',
+        'iframe[src*="captcha" i]',
+        'iframe[src*="recaptcha" i]'
+      ].join(',');
+
+      const normalize = (value) => (value ?? '').replace(/\\s+/g, ' ').trim().toLowerCase();
+
+      const isVisible = (element) => {
+        if (!element || !element.isConnected) {
+          return false;
+        }
+
+        const style = window.getComputedStyle(element);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+
+      const containsLoginControl = (element) => Boolean(element?.querySelector?.(loginControlSelector));
+
+      const looksLikeVideoOverlay = (element) => {
+        if (!element || element === document.body || element === document.documentElement) {
+          return false;
+        }
+
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        const className = normalize(element.className);
+        const id = normalize(element.id);
+        const label = `${className} ${id} ${normalize(element.getAttribute('role'))}`;
+        const isOverlayName = /(modal|overlay|lightbox|popup|dialog|video|player|fullscreen)/.test(label);
+        const coversViewport = (style.position === 'fixed' || style.position === 'absolute')
+          && rect.width >= window.innerWidth * 0.45
+          && rect.height >= window.innerHeight * 0.25;
+
+        return isOverlayName || coversViewport || element.getAttribute('aria-modal') === 'true';
+      };
+
+      const closestVideoOverlay = (media) => {
+        let current = media?.parentElement;
+        while (current && current !== document.body && current !== document.documentElement) {
+          if (looksLikeVideoOverlay(current) && !containsLoginControl(current)) {
+            return current;
+          }
+
+          current = current.parentElement;
+        }
+
+        return null;
+      };
+
+      const closeOverlay = (overlay) => {
+        if (!overlay || !overlay.isConnected) {
+          return false;
+        }
+
+        const closeButton = Array.from(overlay.querySelectorAll(closeSelector)).find((candidate) => {
+          if (!isVisible(candidate)) {
+            return false;
+          }
+
+          const label = normalize([
+            candidate.textContent,
+            candidate.getAttribute('aria-label'),
+            candidate.getAttribute('title'),
+            candidate.value
+          ].filter(Boolean).join(' '));
+
+          return label === 'x'
+            || label === '×'
+            || label.includes('close')
+            || label.includes('dismiss')
+            || label.includes('skip');
+        });
+
+        if (closeButton) {
+          closeButton.click();
+        }
+
+        overlay.setAttribute('aria-hidden', 'true');
+        overlay.style.setProperty('display', 'none', 'important');
+        overlay.style.setProperty('visibility', 'hidden', 'important');
+        return true;
+      };
+
+      window.__hangerExpressSuppressMedia = () => {
+        let pausedMediaCount = 0;
+        let closedOverlayCount = 0;
+        const mediaElements = Array.from(document.querySelectorAll(mediaSelector));
+
+        for (const media of mediaElements) {
+          media.removeAttribute('autoplay');
+          media.setAttribute('preload', 'none');
+
+          if ('muted' in media) {
+            media.muted = true;
+          }
+
+          if (typeof media.pause === 'function' && !media.paused) {
+            try {
+              media.pause();
+              pausedMediaCount += 1;
+            } catch {}
+          }
+
+          if (document.activeElement === media && typeof media.blur === 'function') {
+            media.blur();
+          }
+
+          const overlay = closestVideoOverlay(media);
+          if (overlay && closeOverlay(overlay)) {
+            closedOverlayCount += 1;
+          }
+        }
+
+        return { pausedMediaCount, closedOverlayCount };
+      };
+
+      document.addEventListener('play', (event) => {
+        if (event.target?.matches?.('video,audio')) {
+          event.target.pause();
+        }
+      }, true);
+
+      const observer = new MutationObserver(() => {
+        window.__hangerExpressSuppressMedia();
+      });
+
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['autoplay', 'src', 'class', 'style']
+      });
+
+      window.__hangerExpressSuppressMedia();
+      window.setTimeout(window.__hangerExpressSuppressMedia, 500);
+      window.setTimeout(window.__hangerExpressSuppressMedia, 1500);
+      window.setTimeout(window.__hangerExpressSuppressMedia, 3500);
+    })();
+    """
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
         context.coordinator.update(
@@ -607,13 +750,6 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
             for cookie in storeCookies {
                 let key = cookieKey(cookie)
                 combined[key] = cookie
-            }
-
-            for cookie in HTTPCookieStorage.shared.cookies ?? [] {
-                let key = cookieKey(cookie)
-                if combined[key] == nil {
-                    combined[key] = cookie
-                }
             }
 
             return combined.values
