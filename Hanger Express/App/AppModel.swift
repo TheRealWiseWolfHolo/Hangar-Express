@@ -654,6 +654,7 @@ final class AppModel {
     var itemTranslationPreprocessPrompt: ItemTranslationPreprocessPrompt?
     var itemTranslationPreloadProgress: ItemTranslationPreloadProgress?
     var itemTranslationPreloadLogEntries: [ItemTranslationPreloadLogEntry] = []
+    private var hangarLogRefreshPreviewLogs: [HangarLogEntry] = []
     var previewsTranslationLoadingBar = false
     var startupActivity: StartupActivity?
     var transientBanner: TransientBanner?
@@ -705,11 +706,11 @@ final class AppModel {
     private static let itemTranslationPendingPreloadLanguageDefaultsKey = "hangar.itemTranslation.pendingPreloadLanguage"
     private static let versionUpdateNoteKeysByShortVersion: [String: [String]] = [
         "1.0.8": [
-            "Added RSI character repair support for eligible accounts.",
-            "Improved CCU calculator responsiveness by waiting until both FROM and TO ships are selected before calculating upgrade results.",
-            "Improved Hangar and Fleet image loading during fast scrolling.",
-            "Fixed Hangar Log opening so entries appear as soon as the first refresh completes.",
-            "Reduced Hangar Log refresh lag by moving parsing and merge work off the main actor."
+            "Request an RSI character repair from Hangar Express when your account is eligible.",
+            "The CCU calculator feels smoother when choosing ships.",
+            "Hangar and Fleet images appear sooner while you scroll.",
+            "Hangar Log opens right away and starts showing entries in small groups as they load.",
+            "Hangar Log refreshes should feel smoother and less likely to freeze the app."
         ],
         "1.0.7": [
             "Added Character Reset, allowing eligible users to request an RSI character repair from within Hangar Express.",
@@ -740,6 +741,22 @@ final class AppModel {
         }
 
         return snapshot
+    }
+
+    var hangarLogPresentationSnapshot: HangarSnapshot? {
+        guard let snapshot else {
+            return nil
+        }
+
+        guard isRefreshing(.hangarLog),
+              !hangarLogRefreshPreviewLogs.isEmpty else {
+            return snapshot
+        }
+
+        return snapshot.updatingHangarLogs(
+            hangarLogs: hangarLogRefreshPreviewLogs,
+            lastSyncedAt: snapshot.lastSyncedAt
+        )
     }
 
     var isRefreshing: Bool {
@@ -1110,6 +1127,11 @@ final class AppModel {
 
         let existingSnapshot = snapshot
         let resolvedScope = existingSnapshot == nil ? RefreshScope.full : scope
+        if resolvedScope == .hangarLog {
+            hangarLogRefreshPreviewLogs = existingSnapshot?.hangarLogs ?? []
+        } else {
+            hangarLogRefreshPreviewLogs = []
+        }
 
         if resolvedScope == .full || resolvedScope == .hangar {
             await HostedShipCatalogStore.shared.clear()
@@ -1144,11 +1166,16 @@ final class AppModel {
                     progressRelay: progressRelay
                 )
             } else {
+                let hangarLogBatchHandler = hangarLogBatchHandler(
+                    for: resolvedScope,
+                    fallbackSnapshot: existingSnapshot
+                )
                 snapshot = try await refreshedSnapshot(
                     for: session,
                     existingSnapshot: existingSnapshot,
                     scope: resolvedScope,
-                    affectedPledgeIDs: affectedPledgeIDs
+                    affectedPledgeIDs: affectedPledgeIDs,
+                    hangarLogBatchHandler: hangarLogBatchHandler
                 ) { progress in
                     progressRelay.submit(progress)
                 }
@@ -1173,9 +1200,7 @@ final class AppModel {
                 session: session,
                 existingSnapshot: existingSnapshot
             ) {
-                refreshProgress = nil
-                concurrentRefreshEntries = []
-                activeRefreshScope = nil
+                clearRefreshPresentation()
                 return
             }
 
@@ -1184,8 +1209,14 @@ final class AppModel {
                 resolvedScope.errorSubject,
                 error.localizedDescription
             )
-            if let existingSnapshot {
-                loadState = .loaded(existingSnapshot)
+            let partialHangarLogSnapshot = resolvedScope == .hangarLog
+                ? partialHangarLogRefreshSnapshot(fallbackSnapshot: existingSnapshot)
+                : nil
+            let fallbackSnapshot = resolvedScope == .hangarLog
+                ? (partialHangarLogSnapshot ?? snapshot ?? existingSnapshot)
+                : existingSnapshot
+            if let fallbackSnapshot {
+                loadState = .loaded(fallbackSnapshot)
                 presentRefreshError(message, scope: resolvedScope, error: error)
             } else {
                 presentRefreshError(message, scope: resolvedScope, error: error)
@@ -1212,10 +1243,41 @@ final class AppModel {
         )
     }
 
+    private func partialHangarLogRefreshSnapshot(fallbackSnapshot: HangarSnapshot?) -> HangarSnapshot? {
+        guard !hangarLogRefreshPreviewLogs.isEmpty,
+              let baseSnapshot = snapshot ?? fallbackSnapshot else {
+            return nil
+        }
+
+        return baseSnapshot.updatingHangarLogs(
+            hangarLogs: hangarLogRefreshPreviewLogs,
+            lastSyncedAt: baseSnapshot.lastSyncedAt
+        )
+    }
+
+    private func hangarLogBatchHandler(
+        for scope: RefreshScope,
+        fallbackSnapshot: HangarSnapshot?
+    ) -> HangarLogBatchHandler? {
+        guard scope == .hangarLog else {
+            return nil
+        }
+
+        return { [weak self] hangarLogs in
+            guard let self,
+                  !hangarLogs.isEmpty else {
+                return
+            }
+
+            self.hangarLogRefreshPreviewLogs = hangarLogs
+        }
+    }
+
     private func clearRefreshPresentation() {
         refreshProgress = nil
         concurrentRefreshEntries = []
         activeRefreshScope = nil
+        hangarLogRefreshPreviewLogs = []
     }
 
     private func persistSnapshotInBackground(_ snapshot: HangarSnapshot, for session: UserSession) {
@@ -3027,6 +3089,7 @@ final class AppModel {
         existingSnapshot: HangarSnapshot?,
         scope: RefreshScope,
         affectedPledgeIDs: [Int]? = nil,
+        hangarLogBatchHandler: HangarLogBatchHandler? = nil,
         progress: @escaping RefreshProgressHandler
     ) async throws -> HangarSnapshot {
         switch scope {
@@ -3071,7 +3134,8 @@ final class AppModel {
                 for: session,
                 from: existingSnapshot,
                 mode: mode,
-                progress: progress
+                progress: progress,
+                batchHandler: hangarLogBatchHandler
             )
         case .account:
             guard let existingSnapshot else {

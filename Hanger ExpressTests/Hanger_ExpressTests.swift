@@ -5475,7 +5475,8 @@ private actor FakeHangarRepository: HangarRepository {
         for session: UserSession,
         from snapshot: HangarSnapshot,
         mode _: HangarLogFetchMode,
-        progress: @escaping RefreshProgressHandler
+        progress: @escaping RefreshProgressHandler,
+        batchHandler _: HangarLogBatchHandler?
     ) async throws -> HangarSnapshot {
         invokedScopes.append("hangarLog")
         return snapshot
