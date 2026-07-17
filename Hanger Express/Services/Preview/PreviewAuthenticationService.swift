@@ -3,6 +3,7 @@ import Foundation
 actor PreviewAuthenticationService: AuthenticationServicing {
     private var pendingLoginIdentifier: String?
     private var pendingPassword: String?
+    private var pendingReadOnly = false
     private let diagnostics: AuthenticationDiagnosticsStore
 
     init(diagnostics: AuthenticationDiagnosticsStore) {
@@ -33,6 +34,7 @@ actor PreviewAuthenticationService: AuthenticationServicing {
         )
         pendingLoginIdentifier = trimmedLoginIdentifier
         pendingPassword = password
+        pendingReadOnly = false
 
         if forceBrowserLogin {
             return .requiresBrowserChallenge(
@@ -41,6 +43,20 @@ actor PreviewAuthenticationService: AuthenticationServicing {
         }
 
         return .requiresTwoFactor
+    }
+
+    func submitCaptcha(_ code: String) async throws -> SignInOutcome {
+        guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AuthenticationError.invalidInput("Enter the CAPTCHA code.")
+        }
+        return .requiresTwoFactor
+    }
+
+    func beginReadOnlySignIn() async throws -> SignInOutcome {
+        pendingLoginIdentifier = nil
+        pendingPassword = nil
+        pendingReadOnly = true
+        return .requiresBrowserChallenge("Sign in on RSI's website to create a preview read-only session.")
     }
 
     func submitTwoFactor(code: String, deviceName: String, trustDuration: TrustedDeviceDuration) async throws -> UserSession {
@@ -60,6 +76,7 @@ actor PreviewAuthenticationService: AuthenticationServicing {
         let handle = pendingLoginIdentifier.split(separator: "@").first.map(String.init) ?? pendingLoginIdentifier
         self.pendingLoginIdentifier = nil
         self.pendingPassword = nil
+        self.pendingReadOnly = false
 
         return UserSession(
             handle: handle,
@@ -74,7 +91,7 @@ actor PreviewAuthenticationService: AuthenticationServicing {
     }
 
     func completeBrowserAuthentication(cookies: [SessionCookie], trustBrowserSession: Bool) async throws -> UserSession {
-        guard let pendingLoginIdentifier, let pendingPassword else {
+        guard pendingReadOnly || (pendingLoginIdentifier != nil && pendingPassword != nil) else {
             await log(
                 stage: "preview.browser",
                 summary: "Preview browser completion expired before a pending sign-in could be completed.",
@@ -88,17 +105,22 @@ actor PreviewAuthenticationService: AuthenticationServicing {
             summary: "Completing preview browser authentication.",
             detail: "cookieCount=\(cookies.count)"
         )
-        let handle = pendingLoginIdentifier.split(separator: "@").first.map(String.init) ?? pendingLoginIdentifier
+        let identifier = pendingLoginIdentifier ?? "preview-read-only@hangerexpress.invalid"
+        let handle = identifier.split(separator: "@").first.map(String.init) ?? identifier
+        let savedCredentials = pendingReadOnly ? nil : AccountCredentials(loginIdentifier: identifier, password: pendingPassword ?? "")
+        let accessLevel: UserSession.AccessLevel = pendingReadOnly ? .readOnly : .full
         self.pendingLoginIdentifier = nil
         self.pendingPassword = nil
+        self.pendingReadOnly = false
 
         return UserSession(
             handle: handle,
             displayName: handle,
-            email: pendingLoginIdentifier,
+            email: identifier,
             authMode: .developerPreview,
+            accessLevel: accessLevel,
             notes: "Preview browser authentication completed without contacting RSI.",
-            credentials: AccountCredentials(loginIdentifier: pendingLoginIdentifier, password: pendingPassword),
+            credentials: savedCredentials,
             cookies: cookies,
             createdAt: .now
         )
@@ -113,12 +135,13 @@ actor PreviewAuthenticationService: AuthenticationServicing {
     }
 
     func canCompleteBrowserAuthentication(cookies: [SessionCookie]) async -> Bool {
-        pendingLoginIdentifier != nil && pendingPassword != nil
+        pendingReadOnly || (pendingLoginIdentifier != nil && pendingPassword != nil)
     }
 
     func cancelPendingAuthentication() async {
         pendingLoginIdentifier = nil
         pendingPassword = nil
+        pendingReadOnly = false
         await log(
             stage: "preview.cancel",
             summary: "Cancelled the preview sign-in flow."

@@ -88,7 +88,12 @@ struct AccountView: View {
                 }
 
                 Section {
-                    FleetToolsSection(showsHeader: false) { tool in
+                    FleetToolsSection(
+                        showsHeader: false,
+                        disabledTools: appModel.session?.isReadOnly == true
+                            ? [.authorizedDevices, .resetCharacter]
+                            : []
+                    ) { tool in
                         handleToolSelection(tool)
                     }
                     .padding(.vertical, 4)

@@ -4,6 +4,7 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
     case actionInProgress
     case missingSession
     case missingStoredPassword
+    case readOnlySession
     case emptyPledgeSelection
     case ineligibleMeltSelection
     case ineligibleGiftSelection
@@ -39,6 +40,8 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
             return AppLocalizer.string("No signed-in RSI session is currently available for this account action.")
         case .missingStoredPassword:
             return AppLocalizer.string("This RSI account no longer has a saved password. Sign in again before Hangar Express can send account action requests.")
+        case .readOnlySession:
+            return AppLocalizer.string("This action is disabled for this account because it was signed in as read-only. Sign in with credentials to enable password-confirmed actions.")
         case .emptyPledgeSelection:
             return AppLocalizer.string("Select at least one pledge before starting a bulk action.")
         case .ineligibleMeltSelection:

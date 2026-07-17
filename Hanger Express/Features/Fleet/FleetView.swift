@@ -560,7 +560,7 @@ struct FleetView: View {
     }
 }
 
-enum FleetTool: String, CaseIterable, Identifiable {
+enum FleetTool: String, CaseIterable, Identifiable, Hashable {
     case allShips
     case authorizedDevices
     case ccuChainCalculator
@@ -618,9 +618,15 @@ enum FleetTool: String, CaseIterable, Identifiable {
 struct FleetToolsSection: View {
     let onSelect: (FleetTool) -> Void
     var showsHeader = true
+    var disabledTools: Set<FleetTool> = []
 
-    init(showsHeader: Bool = true, onSelect: @escaping (FleetTool) -> Void) {
+    init(
+        showsHeader: Bool = true,
+        disabledTools: Set<FleetTool> = [],
+        onSelect: @escaping (FleetTool) -> Void
+    ) {
         self.showsHeader = showsHeader
+        self.disabledTools = disabledTools
         self.onSelect = onSelect
     }
 
@@ -635,7 +641,7 @@ struct FleetToolsSection: View {
 
             VStack(spacing: 10) {
                 ForEach(FleetTool.allCases) { tool in
-                    FleetToolRow(tool: tool) {
+                    FleetToolRow(tool: tool, isEnabled: !disabledTools.contains(tool)) {
                         onSelect(tool)
                     }
                 }
@@ -646,6 +652,7 @@ struct FleetToolsSection: View {
 
 private struct FleetToolRow: View {
     let tool: FleetTool
+    let isEnabled: Bool
     let action: () -> Void
 
     var body: some View {
@@ -653,11 +660,11 @@ private struct FleetToolRow: View {
             HStack(spacing: 12) {
                 Image(systemName: tool.systemImage)
                     .font(.title3.weight(.semibold))
-                    .foregroundStyle(tool.isAvailable ? Color.accentColor : .secondary)
+                    .foregroundStyle(tool.isAvailable && isEnabled ? Color.accentColor : .secondary)
                     .frame(width: 34, height: 34)
                     .background(
                         Circle()
-                            .fill((tool.isAvailable ? Color.accentColor : Color.secondary).opacity(0.12))
+                            .fill((tool.isAvailable && isEnabled ? Color.accentColor : Color.secondary).opacity(0.12))
                     )
 
                 VStack(alignment: .leading, spacing: 3) {
@@ -686,8 +693,8 @@ private struct FleetToolRow: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(!tool.isAvailable)
-        .opacity(tool.isAvailable ? 1 : 0.62)
+        .disabled(!tool.isAvailable || !isEnabled)
+        .opacity(tool.isAvailable && isEnabled ? 1 : 0.62)
     }
 }
 
