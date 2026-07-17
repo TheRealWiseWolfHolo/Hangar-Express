@@ -59,7 +59,6 @@ struct AuthenticationFlowView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 24) {
                         hero
-                        statusMessages
 
                         switch viewModel.step {
                         case .signIn:
@@ -178,7 +177,8 @@ struct AuthenticationFlowView: View {
             AuthenticationStatusBanner(
                 message: noticeMessage,
                 systemImage: "info.circle.fill",
-                tint: .orange
+                tint: .orange,
+                onCopy: copyAuthDebugReport
             )
         }
 
@@ -214,6 +214,7 @@ struct AuthenticationFlowView: View {
     private var signInSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             AuthenticationSectionHeader(title: "Credentials", systemImage: "person.badge.key.fill")
+            statusMessages
 
             AuthenticationCard {
                 VStack(spacing: 14) {
@@ -325,6 +326,7 @@ struct AuthenticationFlowView: View {
     private var captchaSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             AuthenticationSectionHeader(title: "RSI Verification", systemImage: "character.textbox")
+            statusMessages
 
             AuthenticationCard {
                 VStack(spacing: 16) {
@@ -428,6 +430,7 @@ struct AuthenticationFlowView: View {
     private var twoFactorSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             AuthenticationSectionHeader(title: "Verification", systemImage: "envelope.badge.shield.half.filled")
+            statusMessages
 
             AuthenticationCard {
                 VStack(spacing: 14) {
@@ -791,15 +794,25 @@ private struct AuthenticationStatusBanner: View {
     let message: String
     let systemImage: String
     let tint: Color
+    let onCopy: () -> Void
 
     var body: some View {
-        Label {
-            Text(message)
-        } icon: {
-            Image(systemName: systemImage)
-                .foregroundStyle(tint)
+        VStack(alignment: .leading, spacing: 12) {
+            Label {
+                Text(message)
+            } icon: {
+                Image(systemName: systemImage)
+                    .foregroundStyle(tint)
+            }
+            .font(.subheadline)
+
+            Button(action: onCopy) {
+                Label("Copy Logs", systemImage: "doc.on.doc")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(tint)
         }
-        .font(.subheadline)
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
