@@ -1035,6 +1035,10 @@ private struct SavedAccountRow: View {
             return AppLocalizer.format("%@ saved, credentials in Keychain", cookieSummary)
         }
 
+        if session.isReadOnly {
+            return AppLocalizer.format("%@ saved, read-only account", cookieSummary)
+        }
+
         return cookieSummary
     }
 }

@@ -6,10 +6,8 @@ struct AuthenticationFlowView: View {
 
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage("auth.debug.showFullErrors") private var showsFullErrorDetails = false
-    @AppStorage("auth.forceBrowserLogin") private var forcesBrowserLogin = false
     @State private var isShowingClearKeychainAlert = false
     @State private var didCopyAuthDebugReport = false
-    @State private var signInRoute: AuthenticationSignInRoute = .checkingIP
     @State private var viewModel: AuthenticationViewModel
 
     init(appModel: AppModel) {
@@ -60,6 +58,8 @@ struct AuthenticationFlowView: View {
                             savedAccountsSection
                         }
                         signInSection
+                    case .captcha:
+                        captchaSection
                     case .twoFactor:
                         twoFactorSection
                     }
@@ -102,16 +102,6 @@ struct AuthenticationFlowView: View {
                 }
             }
 
-            if let signInPreparationOverlayDetail {
-                StartupWarmupOverlay(
-                    title: "Preparing Sign-In",
-                    detail: signInPreparationOverlayDetail
-                )
-            }
-        }
-        .background(recaptchaBridge)
-        .task {
-            await resolveInitialSignInRoute()
         }
         .sheet(item: browserChallengeBinding) { challenge in
             AuthenticationBrowserChallengeView(
@@ -159,29 +149,59 @@ struct AuthenticationFlowView: View {
 
             Toggle("Keep me signed in", isOn: $viewModel.rememberMe)
 
-            Toggle("Force Browser Login", isOn: $forcesBrowserLogin)
-
             Button("Continue") {
                 Task {
-                    await viewModel.submitCredentials(
-                        forceBrowserLogin: shouldUseBrowserAssistedLogin
-                    )
+                    await viewModel.submitCredentials()
                 }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(viewModel.isSubmitting || (signInRoute.isCheckingIP && !forcesBrowserLogin))
+            .disabled(viewModel.isSubmitting)
+
+            Button("Login as Read Only") {
+                Task {
+                    await viewModel.beginReadOnlySignIn()
+                }
+            }
+            .disabled(viewModel.isSubmitting)
+
+            Text("Your password is entered directly on RSI's website and is not saved by Hangar Express. Password-confirmed features—including gifting, melting, applying upgrades, character repair, and device management—are disabled for this account.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         } header: {
             Text("Credentials")
         }
     }
 
-    @ViewBuilder
-    private var recaptchaBridge: some View {
-        if shouldInitializeRecaptchaBridge {
-            RecaptchaBridgeView(broker: appModel.recaptchaBroker)
-                .frame(width: 1, height: 1)
-                .opacity(0.01)
-                .allowsHitTesting(false)
+    private var captchaSection: some View {
+        Section {
+            if let data = viewModel.captchaImageData, let image = UIImage(data: data) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxHeight: 180)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityLabel("RSI CAPTCHA image")
+            }
+
+            TextField("CAPTCHA Code", text: $viewModel.captchaCode)
+                .textInputAutocapitalization(.characters)
+                .autocorrectionDisabled()
+                .keyboardType(.asciiCapable)
+
+            Button("Verify CAPTCHA") {
+                Task { await viewModel.submitCaptcha() }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(viewModel.isSubmitting || viewModel.captchaCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+            Button("Back to Sign In") {
+                viewModel.returnToSignIn()
+            }
+            .disabled(viewModel.isSubmitting)
+        } header: {
+            Text("RSI Verification")
+        } footer: {
+            Text("Enter the characters from RSI's launcher CAPTCHA. This image is served by RSI and does not require Google reCAPTCHA.")
         }
     }
 
@@ -254,26 +274,6 @@ struct AuthenticationFlowView: View {
         appModel.quickLoginSessions
     }
 
-    private var shouldInitializeRecaptchaBridge: Bool {
-        signInRoute == .browserlessHelper && !appModel.recaptchaBroker.prefersBrowserAssistedLogin
-    }
-
-    private var shouldUseBrowserAssistedLogin: Bool {
-        forcesBrowserLogin || signInRoute.usesBrowserAssistedLogin || appModel.recaptchaBroker.prefersBrowserAssistedLogin
-    }
-
-    private var signInPreparationOverlayDetail: String? {
-        if signInRoute.isCheckingIP {
-            return "Checking your sign-in connection."
-        }
-
-        if appModel.recaptchaBroker.isPreparing, shouldInitializeRecaptchaBridge {
-            return appModel.recaptchaBroker.statusMessage
-        }
-
-        return nil
-    }
-
     private var browserChallengeBinding: Binding<AuthenticationViewModel.BrowserChallenge?> {
         Binding(
             get: { viewModel.browserChallenge },
@@ -300,92 +300,13 @@ struct AuthenticationFlowView: View {
             browserChallengeIsPresented: viewModel.browserChallenge != nil,
             helperIsPreparing: appModel.recaptchaBroker.isPreparing,
             helperStatusMessage: appModel.recaptchaBroker.statusMessage,
-            forceBrowserLogin: forcesBrowserLogin,
-            signInRoute: signInRoute.debugLabel,
             helperPrefersBrowserAssistedLogin: appModel.recaptchaBroker.prefersBrowserAssistedLogin
         )
-    }
-
-    private func resolveInitialSignInRoute() async {
-        guard signInRoute == .checkingIP else {
-            return
-        }
-
-        let result = await appModel.authIPRegionChecker.currentRegion()
-
-        guard !Task.isCancelled else {
-            return
-        }
-
-        let countryCode = result.countryCode ?? "unknown"
-        if result.isMainlandChina {
-            signInRoute = .browserAssisted(reason: .mainlandChinaIP)
-            appModel.authDiagnostics.record(
-                stage: "auth.ip-region",
-                summary: "The public IP check resolved to mainland China, so Hangar Express will use browser-assisted sign-in.",
-                detail: "countryCode=\(countryCode)"
-            )
-        } else {
-            signInRoute = .browserlessHelper
-            appModel.authDiagnostics.record(
-                stage: "auth.ip-region",
-                summary: "The public IP check did not require browser-assisted sign-in, so Hangar Express will prepare the RSI verification helper.",
-                detail: ipRegionDebugDetail(for: result)
-            )
-        }
-    }
-
-    private func ipRegionDebugDetail(for result: AuthenticationIPRegionCheckResult) -> String {
-        var parts = [
-            "countryCode=\(result.countryCode ?? "unknown")"
-        ]
-
-        if let errorDescription = result.errorDescription, !errorDescription.isEmpty {
-            parts.append("error=\(errorDescription)")
-        }
-
-        return parts.joined(separator: ", ")
     }
 
     private func copyAuthDebugReport() {
         UIPasteboard.general.string = authDebugReport
         didCopyAuthDebugReport = true
-    }
-}
-
-private enum AuthenticationSignInRoute: Equatable {
-    case checkingIP
-    case browserlessHelper
-    case browserAssisted(reason: BrowserAssistedReason)
-
-    enum BrowserAssistedReason: Equatable {
-        case mainlandChinaIP
-    }
-
-    var isCheckingIP: Bool {
-        self == .checkingIP
-    }
-
-    var usesBrowserAssistedLogin: Bool {
-        if case .browserAssisted = self {
-            return true
-        }
-
-        return false
-    }
-
-    var debugLabel: String {
-        switch self {
-        case .checkingIP:
-            return "checking-ip"
-        case .browserlessHelper:
-            return "browserless-helper"
-        case let .browserAssisted(reason):
-            switch reason {
-            case .mainlandChinaIP:
-                return "browser-assisted-mainland-china-ip"
-            }
-        }
     }
 }
 
@@ -453,8 +374,6 @@ private enum AuthenticationDebugReportBuilder {
         browserChallengeIsPresented: Bool,
         helperIsPreparing: Bool,
         helperStatusMessage: String,
-        forceBrowserLogin: Bool,
-        signInRoute: String,
         helperPrefersBrowserAssistedLogin: Bool
     ) -> String {
         var lines: [String] = []
@@ -468,9 +387,8 @@ private enum AuthenticationDebugReportBuilder {
         lines.append("Login Identifier: \(maskedIdentifier(loginIdentifier))")
         lines.append("Remember Me: \(rememberMe)")
         lines.append("Show Full Auth Errors: \(showsFullErrors)")
-        lines.append("Force Browser Login: \(forceBrowserLogin)")
         lines.append("Browser Challenge Visible: \(browserChallengeIsPresented)")
-        lines.append("Sign-In Route: \(signInRoute)")
+        lines.append("Sign-In Route: launcher-api")
         lines.append("Recaptcha Helper Preparing: \(helperIsPreparing)")
         lines.append("Recaptcha Helper Status: \(helperStatusMessage)")
         lines.append("Recaptcha Helper Browser-Assisted Fallback: \(helperPrefersBrowserAssistedLogin)")
@@ -549,6 +467,8 @@ private enum AuthenticationDebugReportBuilder {
         switch step {
         case .signIn:
             return "Sign In"
+        case .captcha:
+            return "CAPTCHA"
         case .twoFactor:
             return "Verification"
         }

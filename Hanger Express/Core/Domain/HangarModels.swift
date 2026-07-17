@@ -113,6 +113,13 @@ nonisolated struct StoredSessionsPayload: Hashable, Sendable, Codable {
 nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
     let id: UUID
 
+    enum AccessLevel: String, Hashable, Sendable, Codable {
+        case full
+        case readOnly = "read_only"
+
+        var isReadOnly: Bool { self == .readOnly }
+    }
+
     enum AuthMode: String, Hashable, Sendable, Codable {
         case rsiNativeLogin = "RSI Login"
         case importedCookies = "Imported cookies"
@@ -139,6 +146,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
     let displayName: String
     let email: String
     let authMode: AuthMode
+    let accessLevel: AccessLevel
     let notes: String
     let avatarURL: URL?
     let credentials: AccountCredentials?
@@ -146,8 +154,10 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
     let createdAt: Date
 
     var hasStoredCredentials: Bool {
-        credentials != nil
+        accessLevel == .full && credentials != nil
     }
+
+    var isReadOnly: Bool { accessLevel.isReadOnly }
 
     var accountKey: String {
         if let loginIdentifier = credentials?.loginIdentifier.normalizedAccountKeyComponent {
@@ -170,6 +180,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
         displayName: "WiseWolfHolo",
         email: "preview@hangerexpress.invalid",
         authMode: .developerPreview,
+        accessLevel: .full,
         notes: "Uses local sample data while the live RSI integration is being built.",
         avatarURL: nil,
         credentials: nil,
@@ -183,6 +194,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
         displayName: String,
         email: String,
         authMode: AuthMode,
+        accessLevel: AccessLevel = .full,
         notes: String,
         avatarURL: URL? = nil,
         credentials: AccountCredentials?,
@@ -194,6 +206,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
         self.displayName = displayName
         self.email = email
         self.authMode = authMode
+        self.accessLevel = accessLevel
         self.notes = notes
         self.avatarURL = avatarURL
         self.credentials = credentials
@@ -207,6 +220,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
         case displayName
         case email
         case authMode
+        case accessLevel
         case notes
         case avatarURL
         case credentials
@@ -222,6 +236,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
         displayName = try container.decodeIfPresent(String.self, forKey: .displayName) ?? handle
         email = try container.decodeIfPresent(String.self, forKey: .email) ?? ""
         authMode = try container.decodeIfPresent(AuthMode.self, forKey: .authMode) ?? .rsiNativeLogin
+        accessLevel = try container.decodeIfPresent(AccessLevel.self, forKey: .accessLevel) ?? .full
         notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
         avatarURL = try container.decodeIfPresent(URL.self, forKey: .avatarURL)
         credentials = try container.decodeIfPresent(AccountCredentials.self, forKey: .credentials)
@@ -236,6 +251,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
             displayName: displayName,
             email: email,
             authMode: authMode,
+            accessLevel: accessLevel,
             notes: notes ?? self.notes,
             avatarURL: avatarURL,
             credentials: credentials,
@@ -251,6 +267,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
             displayName: displayName,
             email: email,
             authMode: authMode,
+            accessLevel: accessLevel,
             notes: notes ?? self.notes,
             avatarURL: avatarURL,
             credentials: credentials,

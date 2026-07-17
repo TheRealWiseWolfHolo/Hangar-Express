@@ -1875,6 +1875,10 @@ final class AppModel {
             throw HangarAccountActionError.missingSession
         }
 
+        guard !session.isReadOnly else {
+            throw HangarAccountActionError.readOnlySession
+        }
+
         let preMeltSnapshot = snapshot
 
         guard let credentials = session.credentials,
@@ -1958,6 +1962,10 @@ final class AppModel {
             throw HangarAccountActionError.missingSession
         }
 
+        guard !session.isReadOnly else {
+            throw HangarAccountActionError.readOnlySession
+        }
+
         let preMeltSnapshot = snapshot
 
         guard let credentials = session.credentials,
@@ -2037,6 +2045,10 @@ final class AppModel {
 
         guard let session else {
             throw HangarAccountActionError.missingSession
+        }
+
+        guard !session.isReadOnly else {
+            throw HangarAccountActionError.readOnlySession
         }
 
         let trimmedRecipientEmail = recipientEmail.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2142,6 +2154,10 @@ final class AppModel {
             throw HangarAccountActionError.missingSession
         }
 
+        guard !session.isReadOnly else {
+            throw HangarAccountActionError.readOnlySession
+        }
+
         let trimmedRecipientEmail = recipientEmail.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedRecipientEmail.isEmpty else {
             throw HangarAccountActionError.missingGiftRecipientEmail
@@ -2225,6 +2241,10 @@ final class AppModel {
             throw HangarAccountActionError.missingSession
         }
 
+        guard !session.isReadOnly else {
+            throw HangarAccountActionError.readOnlySession
+        }
+
         let upgradeItemPledgeID = try selectedUpgradeItemPledgeID(for: packageGroup)
         let timeoutSeconds = Self.upgradeTargetLookupTimeoutSeconds
 
@@ -2266,6 +2286,10 @@ final class AppModel {
 
         guard let session else {
             throw HangarAccountActionError.missingSession
+        }
+
+        guard !session.isReadOnly else {
+            throw HangarAccountActionError.readOnlySession
         }
 
         let upgradeItemPledgeID = try selectedUpgradeItemPledgeID(for: packageGroup)
@@ -2341,6 +2365,10 @@ final class AppModel {
 
         guard let session else {
             throw HangarAccountActionError.missingSession
+        }
+
+        guard !session.isReadOnly else {
+            throw HangarAccountActionError.readOnlySession
         }
 
         guard let credentials = session.credentials,
@@ -2484,6 +2512,10 @@ final class AppModel {
             throw HangarAccountActionError.missingSession
         }
 
+        guard !session.isReadOnly else {
+            throw HangarAccountActionError.readOnlySession
+        }
+
         let timeoutSeconds = Self.authorizedDevicesRequestTimeoutSeconds
         let password = session.credentials?.password
         do {
@@ -2517,6 +2549,10 @@ final class AppModel {
     func removeAuthorizedDevice(_ device: AuthorizedDevice) async throws {
         guard let session else {
             throw HangarAccountActionError.missingSession
+        }
+
+        guard !session.isReadOnly else {
+            throw HangarAccountActionError.readOnlySession
         }
 
         guard !device.shouldProtectFromBulkRemoval else {
@@ -2591,6 +2627,10 @@ final class AppModel {
 
         guard let session else {
             throw HangarAccountActionError.missingSession
+        }
+
+        guard !session.isReadOnly else {
+            throw HangarAccountActionError.readOnlySession
         }
 
         let timeoutSeconds = max(Self.authorizedDevicesRequestTimeoutSeconds, removableDevices.count * 8)

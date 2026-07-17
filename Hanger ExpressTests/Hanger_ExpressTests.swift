@@ -117,6 +117,87 @@ struct Hanger_ExpressTests {
         #expect(rebuiltCookie.isHTTPOnly)
     }
 
+    @Test func legacySessionsDecodeWithFullAccess() throws {
+        let original = makeUserSession(
+            handle: "legacy",
+            email: "legacy@example.com",
+            loginIdentifier: "legacy@example.com",
+            password: "secret",
+            createdAt: Date(timeIntervalSince1970: 100)
+        )
+        let encoded = try JSONEncoder().encode(original)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "accessLevel")
+
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(UserSession.self, from: legacyData)
+
+        #expect(decoded.accessLevel == .full)
+        #expect(decoded.hasStoredCredentials)
+    }
+
+    @Test func readOnlySessionsPersistWithoutCredentials() throws {
+        let session = UserSession(
+            handle: "readonly",
+            displayName: "Read Only",
+            email: "readonly@example.com",
+            authMode: .rsiNativeLogin,
+            accessLevel: .readOnly,
+            notes: "",
+            credentials: nil,
+            cookies: [makeSessionCookie(name: "Rsi-Token", value: "token")],
+            createdAt: Date(timeIntervalSince1970: 101)
+        )
+
+        let decoded = try JSONDecoder().decode(UserSession.self, from: JSONEncoder().encode(session))
+        #expect(decoded.isReadOnly)
+        #expect(!decoded.hasStoredCredentials)
+        #expect(decoded.credentials == nil)
+        #expect(decoded.updatingCookies([]).isReadOnly)
+    }
+
+    @Test func launcherResponseDecodesSessionAndDeviceTokens() throws {
+        let data = Data(#"{"success":1,"code":"OK","msg":"Success","data":{"session_id":"session-token","device_id":"device-token"}}"#.utf8)
+        let response = try JSONDecoder().decode(RSILauncherSignInResponse.self, from: data)
+
+        #expect(response.succeeded)
+        #expect(response.data?.sessionID == "session-token")
+        #expect(response.data?.deviceID == "device-token")
+    }
+
+    @Test func readOnlyAccountCannotStartPasswordConfirmedMelt() async throws {
+        let session = makeUserSession(
+            handle: "readonly-action",
+            email: "readonly-action@example.com",
+            loginIdentifier: "readonly-action@example.com",
+            password: "not-stored",
+            createdAt: Date(timeIntervalSince1970: 102),
+            accessLevel: .readOnly
+        )
+        let snapshot = PreviewHangarRepository.sampleSnapshot
+        let appModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: snapshot),
+                hangarRepository: FakeHangarRepository(hangarSnapshot: snapshot)
+            )
+        )
+        appModel.session = session
+        appModel.savedSessions = [session]
+        appModel.loadState = .loaded(snapshot)
+        let reclaimable = try #require(snapshot.packages.first { $0.canReclaim })
+        let group = try #require([reclaimable].groupedForInventoryDisplay.first)
+
+        do {
+            try await appModel.melt(packageGroup: group, quantity: 1)
+            Issue.record("Read-only melt unexpectedly succeeded")
+        } catch let error as HangarAccountActionError {
+            #expect(error == .readOnlySession)
+        }
+    }
+
     @Test func subscriptionEntitlementsClampRefreshWorkersByPlan() async throws {
         #expect(ProSubscriptionConfiguration.productIDs == Set(["0001", "0002", "HangarExpLTI"]))
         #expect(ProSubscriptionConfiguration.productIDOrder == ["0001", "0002", "HangarExpLTI"])
@@ -1903,7 +1984,8 @@ struct Hanger_ExpressTests {
 
         let service = RSIAuthService(
             recaptchaBroker: webSession,
-            diagnostics: AuthenticationDiagnosticsStore()
+            diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false
         )
         let outcome = try await service.signIn(
             loginIdentifier: "pilot@example.com",
@@ -1915,6 +1997,8 @@ struct Hanger_ExpressTests {
         switch outcome {
         case .requiresTwoFactor:
             break
+        case .requiresCaptcha:
+            Issue.record("Expected the auth flow to require a verification code, not a CAPTCHA.")
         case .authenticated:
             Issue.record("Expected the auth flow to require a verification code.")
         case let .requiresBrowserChallenge(message):
@@ -1944,6 +2028,7 @@ struct Hanger_ExpressTests {
         let service = RSIAuthService(
             recaptchaBroker: webSession,
             diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false,
             accountFetcher: { cookies in
                 #expect(cookies.map(\.name).sorted() == ["Rsi-Token", "_rsi_device"])
                 return AuthenticatedAccount(
@@ -1970,6 +2055,8 @@ struct Hanger_ExpressTests {
             #expect(session.cookies.count == 2)
         case .requiresTwoFactor:
             Issue.record("Expected browserless sign-in to authenticate immediately when RSI had already issued reusable session cookies.")
+        case .requiresCaptcha:
+            Issue.record("Expected browserless sign-in to authenticate immediately, not request a CAPTCHA.")
         case let .requiresBrowserChallenge(message):
             Issue.record("Expected browserless sign-in to authenticate immediately, but the service requested browser login instead: \(message)")
         }
@@ -2003,6 +2090,7 @@ struct Hanger_ExpressTests {
         let service = RSIAuthService(
             recaptchaBroker: webSession,
             diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false,
             accountFetcher: { cookies in
                 #expect(cookies.map(\.name).sorted() == ["Rsi-Token"])
                 return AuthenticatedAccount(
@@ -2056,6 +2144,7 @@ struct Hanger_ExpressTests {
         let service = RSIAuthService(
             recaptchaBroker: webSession,
             diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false,
             accountFetcher: { cookies in
                 #expect(cookies.map(\.name) == ["Rsi-Token"])
                 return AuthenticatedAccount(
@@ -2140,7 +2229,8 @@ struct Hanger_ExpressTests {
 
         let service = RSIAuthService(
             recaptchaBroker: webSession,
-            diagnostics: AuthenticationDiagnosticsStore()
+            diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false
         )
 
         do {
@@ -2190,7 +2280,8 @@ struct Hanger_ExpressTests {
 
         let service = RSIAuthService(
             recaptchaBroker: webSession,
-            diagnostics: AuthenticationDiagnosticsStore()
+            diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false
         )
 
         do {
@@ -2241,7 +2332,8 @@ struct Hanger_ExpressTests {
 
         let service = RSIAuthService(
             recaptchaBroker: webSession,
-            diagnostics: AuthenticationDiagnosticsStore()
+            diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false
         )
 
         do {
@@ -2314,7 +2406,8 @@ struct Hanger_ExpressTests {
 
         let service = RSIAuthService(
             recaptchaBroker: webSession,
-            diagnostics: AuthenticationDiagnosticsStore()
+            diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false
         )
         _ = try await service.signIn(
             loginIdentifier: "pilot@example.com",
@@ -4899,16 +4992,20 @@ private func makeUserSession(
     password: String,
     createdAt: Date,
     avatarURL: URL? = nil,
-    cookies: [SessionCookie] = []
+    cookies: [SessionCookie] = [],
+    accessLevel: UserSession.AccessLevel = .full
 ) -> UserSession {
     UserSession(
         handle: handle,
         displayName: handle,
         email: email,
         authMode: .rsiNativeLogin,
+        accessLevel: accessLevel,
         notes: "",
         avatarURL: avatarURL,
-        credentials: AccountCredentials(loginIdentifier: loginIdentifier, password: password),
+        credentials: accessLevel.isReadOnly
+            ? nil
+            : AccountCredentials(loginIdentifier: loginIdentifier, password: password),
         cookies: cookies,
         createdAt: createdAt
     )

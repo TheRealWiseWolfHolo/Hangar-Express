@@ -451,6 +451,9 @@ struct HangarDashboardView: View {
         }
 
         if !hasStoredCredentials {
+            if appModel.session?.isReadOnly == true {
+                return AppLocalizer.string("Bulk gift and reclaim are disabled for this read-only account.")
+            }
             return AppLocalizer.string("Bulk gift and reclaim need a fresh sign-in with saved credentials.")
         }
 
@@ -1491,7 +1494,11 @@ struct HangarPackageDetailView: View {
             } footer: {
                 VStack(alignment: .leading, spacing: 6) {
                     if hasAnySupportedLiveAction && !hasStoredCredentials {
-                        Text("Grey actions need a fresh sign-in with saved credentials before Hangar Express can send live RSI requests.")
+                        if appModel.session?.isReadOnly == true {
+                            Text("Gift, upgrade, and reclaim are disabled for this read-only account.")
+                        } else {
+                            Text("Grey actions need a fresh sign-in with saved credentials before Hangar Express can send live RSI requests.")
+                        }
                     } else if hasAnySupportedLiveAction {
                         Text("Hangar Express will confirm with Face ID or your iPhone passcode before sending any live RSI action.")
                     } else {
