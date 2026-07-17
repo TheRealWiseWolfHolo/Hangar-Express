@@ -251,7 +251,14 @@
 "RSI Email or Login ID" = "RSI 邮箱或登录 ID";
 "Password" = "密码";
 "Keep me signed in" = "保持登录状态";
+"Your password is secured" = "你的密码已安全保护";
+"Your password is not saved" = "你的密码不会被保存";
+"Password Security" = "密码安全";
+"Read-Only Login" = "只读登录";
+"More information" = "更多信息";
+"Your password is stored securely in this device's Keychain and sent only to RSI when authentication or password confirmation is required. It is never shared with any other service." = "你的密码会安全地存储在此设备的钥匙串中，并且仅在登录或需要密码确认时发送给 RSI，绝不会与任何其他服务共享。";
 "Continue" = "继续";
+"OR" = "或";
 "Login as Read Only" = "以只读模式登录";
 "Your password is entered directly on RSI's website and is not saved by Hangar Express. Password-confirmed features—including gifting, melting, applying upgrades, character repair, and device management—are disabled for this account." = "你的密码将直接输入 RSI 网站，Hangar Express 不会保存。此账户将禁用需要密码确认的功能，包括赠送、熔炼、应用升级、角色修复和设备管理。";
 "RSI CAPTCHA image" = "RSI 验证码图片";
@@ -453,6 +460,10 @@
 "Refresh Failed" = "刷新失败";
 "Hangar Express" = "机库通";
 "RSI Login" = "RSI 登录";
+"Sign in to sync your hangar and manage your fleet." = "登录以同步你的机库并管理舰队。";
+"Use a saved RSI session or manage it from the account menu." = "使用已保存的 RSI 会话，或从账户菜单中管理它。";
+"Use Saved" = "使用已保存会话";
+"Account options" = "账户选项";
 "Cancel" = "取消";
 "Finished Login" = "完成登录";
 "Refresh" = "刷新";

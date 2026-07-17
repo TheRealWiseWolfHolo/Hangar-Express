@@ -6,9 +6,45 @@ struct AuthenticationFlowView: View {
 
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage("auth.debug.showFullErrors") private var showsFullErrorDetails = false
+    @FocusState private var focusedField: InputField?
     @State private var isShowingClearKeychainAlert = false
     @State private var didCopyAuthDebugReport = false
+    @State private var isAdvancedExpanded = false
+    @State private var passwordInfoTopic: PasswordInfoTopic?
     @State private var viewModel: AuthenticationViewModel
+
+    private enum InputField: Hashable {
+        case loginIdentifier
+        case password
+        case captcha
+        case verificationCode
+        case deviceName
+    }
+
+    private enum PasswordInfoTopic: String, Identifiable {
+        case standard
+        case readOnly
+
+        var id: Self { self }
+
+        var title: LocalizedStringKey {
+            switch self {
+            case .standard:
+                return "Password Security"
+            case .readOnly:
+                return "Read-Only Login"
+            }
+        }
+
+        var message: LocalizedStringKey {
+            switch self {
+            case .standard:
+                return "Your password is stored securely in this device's Keychain and sent only to RSI when authentication or password confirmation is required. It is never shared with any other service."
+            case .readOnly:
+                return "Your password is entered directly on RSI's website and is not saved by Hangar Express. Password-confirmed features—including gifting, melting, applying upgrades, character repair, and device management—are disabled for this account."
+            }
+        }
+    }
 
     init(appModel: AppModel) {
         self.appModel = appModel
@@ -16,92 +52,47 @@ struct AuthenticationFlowView: View {
     }
 
     var body: some View {
-        ZStack {
-            NavigationStack {
-                Form {
-                    Section {
-                        Text("This is an unofficial Star Citizen fan app and is not affiliated with the Cloud Imperium group of companies.")
-                            .font(.subheadline.weight(.semibold))
-                    } header: {
-                        Text("RSI Login")
-                    }
+        NavigationStack {
+            ZStack(alignment: .top) {
+                AuthenticationBackground()
 
-                    if let noticeMessage = viewModel.noticeMessage {
-                        Section {
-                            Text(noticeMessage)
-                                .foregroundStyle(.orange)
-                        }
-                    }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 24) {
+                        hero
+                        statusMessages
 
-                    if let errorMessage = viewModel.errorMessage {
-                        Section {
-                            Text(errorMessage)
-                                .foregroundStyle(.red)
-
-                            if showsFullErrorDetails, let errorDebugDetails = viewModel.errorDebugDetails {
-                                Text(verbatim: errorDebugDetails)
-                                    .font(.system(.footnote, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
+                        switch viewModel.step {
+                        case .signIn:
+                            if !quickLoginSessions.isEmpty {
+                                savedAccountsSection
                             }
-
-                            Button("Copy Auth Debug Report") {
-                                copyAuthDebugReport()
-                            }
-                            .disabled(authDebugReport.isEmpty)
+                            signInSection
+                        case .captcha:
+                            captchaSection
+                        case .twoFactor:
+                            twoFactorSection
                         }
-                    }
 
-                    switch viewModel.step {
-                    case .signIn:
-                        if !quickLoginSessions.isEmpty {
-                            savedAccountsSection
-                        }
-                        signInSection
-                    case .captcha:
-                        captchaSection
-                    case .twoFactor:
-                        twoFactorSection
+                        advancedSection
+                        legalNotice
                     }
-
-#if DEBUG
-                    Section {
-                        Button("Load Demo Hangar") {
-                            Task {
-                                await viewModel.loadDemoHangar()
-                            }
-                        }
-                    }
-#endif
-
-                    Section {
-                        Toggle("Show Full Auth Errors", isOn: $showsFullErrorDetails)
-
-                        Button("Remove Saved Keychain Content", role: .destructive) {
-                            isShowingClearKeychainAlert = true
-                        }
-                        .disabled(viewModel.isSubmitting)
-                    } header: {
-                        Text("Advanced")
-                    } footer: {
-                        Text("Removes every saved RSI account, its stored cookies, and saved credentials from Keychain without touching your local image or hangar cache.")
-                    }
-
-                    Section {
-                        Text("Star Citizen, Squadron 42, Roberts Space Industries, and related names, ships, artwork, and other game content shown or referenced by this app belong to the Cloud Imperium group of companies and their respective owners.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
+                    .frame(maxWidth: 640)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
+                    .padding(.bottom, 36)
+                    .frame(maxWidth: .infinity)
                 }
-                .id(appLanguageRawValue)
-                .navigationTitle("Hangar Express")
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        AppLanguageMenuButton()
-                    }
+                .scrollDismissesKeyboard(.interactively)
+            }
+            .id(appLanguageRawValue)
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    AppLanguageMenuButton()
                 }
             }
-
         }
         .sheet(item: browserChallengeBinding) { challenge in
             AuthenticationBrowserChallengeView(
@@ -134,133 +125,422 @@ struct AuthenticationFlowView: View {
         } message: {
             Text("The full auth debug report was copied to the clipboard so a tester can paste it into a message.")
         }
+        .alert(item: $passwordInfoTopic) { topic in
+            Alert(
+                title: Text(topic.title),
+                message: Text(topic.message),
+                dismissButton: .default(Text("OK"))
+            )
+        }
+    }
+
+    private var hero: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 14) {
+                Image("BrandMark")
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 64, height: 64)
+                    .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 17, style: .continuous)
+                            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                    }
+                    .shadow(color: Color.black.opacity(0.18), radius: 12, y: 6)
+
+                Text("Hangar Express")
+                    .font(.largeTitle.bold())
+                    .foregroundStyle(.primary)
+            }
+
+            Text("Sign in to sync your hangar and manage your fleet.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "info.circle.fill")
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.top, 1)
+
+                Text("This is an unofficial Star Citizen fan app and is not affiliated with the Cloud Imperium group of companies.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+    }
+
+    @ViewBuilder
+    private var statusMessages: some View {
+        if let noticeMessage = viewModel.noticeMessage {
+            AuthenticationStatusBanner(
+                message: noticeMessage,
+                systemImage: "info.circle.fill",
+                tint: .orange
+            )
+        }
+
+        if let errorMessage = viewModel.errorMessage {
+            AuthenticationCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    Label {
+                        Text(errorMessage)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                    }
+                    .font(.subheadline.weight(.medium))
+
+                    if showsFullErrorDetails, let errorDebugDetails = viewModel.errorDebugDetails {
+                        Text(verbatim: errorDebugDetails)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+
+                    Button("Copy Auth Debug Report") {
+                        copyAuthDebugReport()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(authDebugReport.isEmpty)
+                }
+            }
+        }
     }
 
     private var signInSection: some View {
-        Section {
-            TextField("RSI Email or Login ID", text: $viewModel.loginIdentifier)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .keyboardType(.asciiCapable)
-                .textContentType(.username)
+        VStack(alignment: .leading, spacing: 12) {
+            AuthenticationSectionHeader(title: "Credentials", systemImage: "person.badge.key.fill")
 
-            SecureField("Password", text: $viewModel.password)
-                .textContentType(.password)
+            AuthenticationCard {
+                VStack(spacing: 14) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "person.fill")
+                            .frame(width: 22)
+                            .foregroundStyle(.secondary)
 
-            Toggle("Keep me signed in", isOn: $viewModel.rememberMe)
+                        TextField("RSI Email or Login ID", text: $viewModel.loginIdentifier)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.asciiCapable)
+                            .textContentType(.username)
+                            .focused($focusedField, equals: .loginIdentifier)
+                            .submitLabel(.next)
+                            .onSubmit { focusedField = .password }
+                    }
+                    .authenticationInputSurface()
 
-            Button("Continue") {
-                Task {
-                    await viewModel.submitCredentials()
+                    HStack(spacing: 12) {
+                        Image(systemName: "lock.fill")
+                            .frame(width: 22)
+                            .foregroundStyle(.secondary)
+
+                        SecureField("Password", text: $viewModel.password)
+                            .textContentType(.password)
+                            .focused($focusedField, equals: .password)
+                            .submitLabel(.go)
+                            .onSubmit {
+                                Task { await viewModel.submitCredentials() }
+                            }
+                    }
+                    .authenticationInputSurface()
+
+                    Toggle(isOn: $viewModel.rememberMe) {
+                        Label("Keep me signed in", systemImage: "checkmark.shield.fill")
+                            .font(.subheadline.weight(.medium))
+                    }
+                    .tint(Color.accentColor)
+
+                    PasswordInfoRow(
+                        title: "Your password is secured",
+                        systemImage: "lock.shield.fill"
+                    ) {
+                        passwordInfoTopic = .standard
+                    }
+
+                    Button {
+                        focusedField = nil
+                        Task { await viewModel.submitCredentials() }
+                    } label: {
+                        HStack(spacing: 10) {
+                            if viewModel.isSubmitting {
+                                ProgressView()
+                                    .tint(.white)
+                            } else {
+                                Image(systemName: "arrow.right")
+                            }
+
+                            Text("Continue")
+                                .fontWeight(.semibold)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 50)
+                        .foregroundStyle(.white)
+                        .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isSubmitting)
+
+                    HStack(spacing: 12) {
+                        Divider()
+
+                        Text("OR")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.tertiary)
+                            .tracking(0.8)
+
+                        Divider()
+                    }
+                    .frame(height: 16)
+                    .accessibilityElement(children: .combine)
+
+                    Button {
+                        focusedField = nil
+                        Task { await viewModel.beginReadOnlySignIn() }
+                    } label: {
+                        Label("Login as Read Only", systemImage: "eye.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 46)
+                            .foregroundStyle(Color.accentColor)
+                            .background(Color.accentColor.opacity(0.09), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isSubmitting)
+
+                    PasswordInfoRow(
+                        title: "Your password is not saved",
+                        systemImage: "hand.raised.fill"
+                    ) {
+                        passwordInfoTopic = .readOnly
+                    }
                 }
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(viewModel.isSubmitting)
-
-            Button("Login as Read Only") {
-                Task {
-                    await viewModel.beginReadOnlySignIn()
-                }
-            }
-            .disabled(viewModel.isSubmitting)
-
-            Text("Your password is entered directly on RSI's website and is not saved by Hangar Express. Password-confirmed features—including gifting, melting, applying upgrades, character repair, and device management—are disabled for this account.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        } header: {
-            Text("Credentials")
         }
     }
 
     private var captchaSection: some View {
-        Section {
-            if let data = viewModel.captchaImageData, let image = UIImage(data: data) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxHeight: 180)
-                    .frame(maxWidth: .infinity)
-                    .accessibilityLabel("RSI CAPTCHA image")
-            }
+        VStack(alignment: .leading, spacing: 12) {
+            AuthenticationSectionHeader(title: "RSI Verification", systemImage: "character.textbox")
 
-            TextField("CAPTCHA Code", text: $viewModel.captchaCode)
-                .textInputAutocapitalization(.characters)
-                .autocorrectionDisabled()
-                .keyboardType(.asciiCapable)
+            AuthenticationCard {
+                VStack(spacing: 16) {
+                    if let data = viewModel.captchaImageData, let image = UIImage(data: data) {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxHeight: 180)
+                            .frame(maxWidth: .infinity)
+                            .padding(10)
+                            .background(.white, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .accessibilityLabel("RSI CAPTCHA image")
+                    }
 
-            Button("Verify CAPTCHA") {
-                Task { await viewModel.submitCaptcha() }
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(viewModel.isSubmitting || viewModel.captchaCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    HStack(spacing: 12) {
+                        Image(systemName: "textformat.abc")
+                            .frame(width: 22)
+                            .foregroundStyle(.secondary)
 
-            Button("Back to Sign In") {
-                viewModel.returnToSignIn()
+                        TextField("CAPTCHA Code", text: $viewModel.captchaCode)
+                            .textInputAutocapitalization(.characters)
+                            .autocorrectionDisabled()
+                            .keyboardType(.asciiCapable)
+                            .focused($focusedField, equals: .captcha)
+                            .submitLabel(.go)
+                            .onSubmit { Task { await viewModel.submitCaptcha() } }
+                    }
+                    .authenticationInputSurface()
+
+                    Button {
+                        focusedField = nil
+                        Task { await viewModel.submitCaptcha() }
+                    } label: {
+                        Text("Verify CAPTCHA")
+                            .fontWeight(.semibold)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 50)
+                            .foregroundStyle(.white)
+                            .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isSubmitting || viewModel.captchaCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    Button("Back to Sign In") {
+                        focusedField = nil
+                        viewModel.returnToSignIn()
+                    }
+                    .disabled(viewModel.isSubmitting)
+
+                    Text("Enter the characters from RSI's launcher CAPTCHA. This image is served by RSI and does not require Google reCAPTCHA.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
-            .disabled(viewModel.isSubmitting)
-        } header: {
-            Text("RSI Verification")
-        } footer: {
-            Text("Enter the characters from RSI's launcher CAPTCHA. This image is served by RSI and does not require Google reCAPTCHA.")
         }
     }
 
     private var savedAccountsSection: some View {
-        Section {
-            SavedQuickLoginRows(
-                sessions: quickLoginSessions,
-                isDisabled: viewModel.isSubmitting,
-                onSelect: { session in
-                    Task {
-                        await appModel.openSavedAccount(id: session.id)
-                    }
-                },
-                onRemove: { session in
-                    Task {
-                        await appModel.removeSavedAccount(id: session.id)
-                    }
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                AuthenticationSectionHeader(title: "Saved Accounts", systemImage: "person.crop.circle.badge.checkmark")
+
+                Spacer()
+
+                Text(quickLoginSessions.count, format: .number)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Color.primary.opacity(0.06), in: Capsule())
+            }
+
+            LazyVGrid(
+                columns: [
+                    GridItem(.adaptive(minimum: 155, maximum: 260), spacing: 10, alignment: .top)
+                ],
+                alignment: .leading,
+                spacing: 10
+            ) {
+                ForEach(quickLoginSessions, id: \.id) { session in
+                    SavedQuickLoginCard(
+                        session: session,
+                        isDisabled: viewModel.isSubmitting,
+                        onSelect: {
+                            Task { await appModel.openSavedAccount(id: session.id) }
+                        },
+                        onRemove: {
+                            Task { await appModel.removeSavedAccount(id: session.id) }
+                        }
+                    )
                 }
-            )
-        } header: {
-            Text("Saved Accounts")
-        } footer: {
-            Text("Pick a saved RSI account to reuse its stored cookies, or jump back into sign-in with its stored credentials if the session needs to be refreshed. Swipe left on an account to remove it.")
+            }
+
+            Text("Use a saved RSI session or manage it from the account menu.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
     private var twoFactorSection: some View {
-        Section {
-            TextField("Verification Code", text: verificationCodeBinding)
-                .keyboardType(.asciiCapable)
-                .textInputAutocapitalization(.characters)
-                .autocorrectionDisabled()
-                .textContentType(.oneTimeCode)
+        VStack(alignment: .leading, spacing: 12) {
+            AuthenticationSectionHeader(title: "Verification", systemImage: "envelope.badge.shield.half.filled")
 
-            TextField("Device Name", text: $viewModel.deviceName)
-                .textInputAutocapitalization(.words)
+            AuthenticationCard {
+                VStack(spacing: 14) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "number")
+                            .frame(width: 22)
+                            .foregroundStyle(.secondary)
 
-            Picker("Remember This Device", selection: $viewModel.trustDuration) {
-                ForEach(TrustedDeviceDuration.allCases) { duration in
-                    Text(duration.displayName)
-                        .tag(duration)
+                        TextField("Verification Code", text: verificationCodeBinding)
+                            .keyboardType(.asciiCapable)
+                            .textInputAutocapitalization(.characters)
+                            .autocorrectionDisabled()
+                            .textContentType(.oneTimeCode)
+                            .focused($focusedField, equals: .verificationCode)
+                    }
+                    .authenticationInputSurface()
+
+                    HStack(spacing: 12) {
+                        Image(systemName: "iphone")
+                            .frame(width: 22)
+                            .foregroundStyle(.secondary)
+
+                        TextField("Device Name", text: $viewModel.deviceName)
+                            .textInputAutocapitalization(.words)
+                            .focused($focusedField, equals: .deviceName)
+                    }
+                    .authenticationInputSurface()
+
+                    HStack(spacing: 12) {
+                        Label("Remember This Device", systemImage: "clock.arrow.circlepath")
+                            .font(.subheadline.weight(.medium))
+
+                        Spacer(minLength: 8)
+
+                        Picker("Remember This Device", selection: $viewModel.trustDuration) {
+                            ForEach(TrustedDeviceDuration.allCases) { duration in
+                                Text(duration.displayName)
+                                    .tag(duration)
+                            }
+                        }
+                        .labelsHidden()
+                    }
+
+                    Button {
+                        focusedField = nil
+                        Task { await viewModel.submitVerificationCode() }
+                    } label: {
+                        Text("Verify")
+                            .fontWeight(.semibold)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 50)
+                            .foregroundStyle(.white)
+                            .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isSubmitting || viewModel.verificationCode.isEmpty)
+
+                    Button("Back to Sign In") {
+                        focusedField = nil
+                        viewModel.returnToSignIn()
+                    }
+                    .disabled(viewModel.isSubmitting)
                 }
             }
-
-            Button("Verify") {
-                Task {
-                    await viewModel.submitVerificationCode()
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(viewModel.isSubmitting)
-
-            Button("Back to Sign In") {
-                viewModel.returnToSignIn()
-            }
-            .disabled(viewModel.isSubmitting)
-        } header: {
-            Text("Verification")
         }
+    }
+
+    private var advancedSection: some View {
+        AuthenticationCard {
+            DisclosureGroup(isExpanded: $isAdvancedExpanded) {
+                VStack(alignment: .leading, spacing: 16) {
+                    Divider()
+
+                    Toggle("Show Full Auth Errors", isOn: $showsFullErrorDetails)
+                        .tint(Color.accentColor)
+
+#if DEBUG
+                    Button {
+                        Task { await viewModel.loadDemoHangar() }
+                    } label: {
+                        Label("Load Demo Hangar", systemImage: "sparkles")
+                    }
+                    .disabled(viewModel.isSubmitting)
+#endif
+
+                    Button(role: .destructive) {
+                        isShowingClearKeychainAlert = true
+                    } label: {
+                        Label("Remove Saved Keychain Content", systemImage: "key.slash.fill")
+                    }
+                    .disabled(viewModel.isSubmitting)
+
+                    Text("Removes every saved RSI account, its stored cookies, and saved credentials from Keychain without touching your local image or hangar cache.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.top, 12)
+            } label: {
+                Label("Advanced", systemImage: "gearshape.fill")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+            }
+            .tint(.secondary)
+        }
+    }
+
+    private var legalNotice: some View {
+        Text("Star Citizen, Squadron 42, Roberts Space Industries, and related names, ships, artwork, and other game content shown or referenced by this app belong to the Cloud Imperium group of companies and their respective owners.")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 8)
     }
 
     private var verificationCodeBinding: Binding<String> {
@@ -310,54 +590,247 @@ struct AuthenticationFlowView: View {
     }
 }
 
-private struct SavedQuickLoginRows: View {
-    let sessions: [UserSession]
+private struct SavedQuickLoginCard: View {
+    let session: UserSession
     let isDisabled: Bool
-    let onSelect: (UserSession) -> Void
-    let onRemove: (UserSession) -> Void
+    let onSelect: () -> Void
+    let onRemove: () -> Void
 
     var body: some View {
-        ForEach(sessions, id: \.id) { session in
-            SavedQuickLoginButton(session: session, isDisabled: isDisabled) {
-                onSelect(session)
-            }
-            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                Button("Remove", role: .destructive) {
-                    onRemove(session)
+        ZStack(alignment: .topTrailing) {
+            Button(action: onSelect) {
+                HStack(spacing: 10) {
+                    SavedAccountAvatar(session: session)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(session.displayName)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+
+                        Text(session.credentials?.loginIdentifier ?? session.email)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+
+                    Spacer(minLength: 24)
                 }
-                .disabled(isDisabled)
+                .padding(11)
+                .frame(maxWidth: .infinity, minHeight: 66, alignment: .leading)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .disabled(isDisabled)
+            .accessibilityHint("Use Saved")
+
+            Menu {
+                Button("Remove", role: .destructive, action: onRemove)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .padding(.top, 4)
+            .padding(.trailing, 4)
+            .accessibilityLabel("Account options")
+            .disabled(isDisabled)
+        }
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
         }
     }
 }
 
-private struct SavedQuickLoginButton: View {
+private struct SavedAccountAvatar: View {
     let session: UserSession
-    let isDisabled: Bool
-    let onSelect: () -> Void
+
+    private let size: CGFloat = 42
 
     var body: some View {
-        Button(action: onSelect) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(session.displayName)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-
-                    Text(session.credentials?.loginIdentifier ?? session.email)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+        Group {
+            if let avatarURL = session.avatarURL {
+                CachedRemoteImage(
+                    url: avatarURL,
+                    targetSize: CGSize(width: size, height: size)
+                ) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    case .empty, .failure:
+                        placeholder
+                    }
                 }
-
-                Spacer(minLength: 12)
-
-                Text("Use Saved")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color.accentColor)
+            } else {
+                placeholder
             }
-            .padding(.vertical, 2)
         }
-        .disabled(isDisabled)
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if session.isReadOnly {
+                Image(systemName: "eye.fill")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 16, height: 16)
+                    .background(Color.accentColor, in: Circle())
+                    .overlay {
+                        Circle()
+                            .stroke(Color(uiColor: .systemGroupedBackground), lineWidth: 1.5)
+                    }
+                    .offset(x: 3, y: 3)
+            }
+        }
+    }
+
+    private var placeholder: some View {
+        LinearGradient(
+            colors: [Color.accentColor, Color.cyan],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        .overlay {
+            Text(initials)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.white)
+        }
+    }
+
+    private var initials: String {
+        let words = session.displayName
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+            .filter { !$0.isEmpty }
+
+        guard !words.isEmpty else {
+            return "HE"
+        }
+
+        return words
+            .prefix(2)
+            .compactMap { $0.first.map(String.init) }
+            .joined()
+            .uppercased()
+    }
+}
+
+private struct AuthenticationSectionHeader: View {
+    let title: LocalizedStringKey
+    let systemImage: String
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.headline)
+            .foregroundStyle(.primary)
+    }
+}
+
+private struct PasswordInfoRow: View {
+    let title: LocalizedStringKey
+    let systemImage: String
+    let onInfo: () -> Void
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: systemImage)
+                .font(.caption)
+                .foregroundStyle(Color.accentColor)
+
+            Text(title)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+
+            Button(action: onInfo) {
+                Image(systemName: "info.circle")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("More information")
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct AuthenticationCard<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+            }
+            .shadow(color: Color.black.opacity(0.05), radius: 16, y: 8)
+    }
+}
+
+private struct AuthenticationStatusBanner: View {
+    let message: String
+    let systemImage: String
+    let tint: Color
+
+    var body: some View {
+        Label {
+            Text(message)
+        } icon: {
+            Image(systemName: systemImage)
+                .foregroundStyle(tint)
+        }
+        .font(.subheadline)
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+}
+
+private struct AuthenticationBackground: View {
+    var body: some View {
+        ZStack {
+            Color(uiColor: .systemGroupedBackground)
+
+            RadialGradient(
+                colors: [Color.accentColor.opacity(0.11), .clear],
+                center: .topLeading,
+                startRadius: 0,
+                endRadius: 360
+            )
+        }
+        .ignoresSafeArea()
+    }
+}
+
+private extension View {
+    func authenticationInputSurface() -> some View {
+        padding(.horizontal, 14)
+            .frame(minHeight: 52)
+            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+            }
     }
 }
 
