@@ -5,15 +5,19 @@
 ### Added
 - Added the ability to request an RSI character repair from Hangar Express when an account is eligible.
 - Added left-swipe CCU exclusions to the calculator, with immediate path recalculation and an option to restore excluded upgrades.
+- Added image export actions to save or share complete CCU calculations, plus a direct Save to Photos action for Hangar share pictures.
 
 ### Changed
 - Made ship selection feel smoother in the CCU calculator.
 - Simplified the CCU calculator summary to clearly show destination MSRP, melt value, total savings, and the payment breakdown.
+- Renamed the untranslated Item Language option from Original to English.
+- Standardized displayed dates as MM/DD/YYYY in English and YYYY/MM/DD in Simplified Chinese.
 - Made Hangar and Fleet images appear sooner while scrolling quickly.
 - Changed Hangar Log so it opens right away and starts showing entries in groups of 10 as they load.
 
 ### Fixed
 - Fixed CCU calculator totals so the source ship is valued at its owned melt value, or MSRP when it is not owned, and added a value choice when owned copies have different melt values.
+- Fixed Early Access renewal and auto-renewal details getting stuck on Checking until Manage Plans was opened.
 - Fixed Hangar Log refreshes that could look empty or frozen while entries were still loading.
 - Reduced app slowdown during Hangar Log refreshes.
 

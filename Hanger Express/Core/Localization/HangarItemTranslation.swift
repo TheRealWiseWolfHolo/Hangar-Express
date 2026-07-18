@@ -23,7 +23,7 @@ enum HangarItemLanguage: String, CaseIterable, Identifiable, Sendable {
     var label: some View {
         switch self {
         case .original:
-            Text("Original")
+            Text("English")
         case .simplifiedChinese:
             Text("简体中文")
         }

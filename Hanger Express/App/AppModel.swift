@@ -714,7 +714,11 @@ final class AppModel {
             "Added read-only sign-in, which keeps your password out of Hangar Express and disables password-confirmed actions for that account.",
             "Redesigned sign-in with compact saved-account cards, account avatars, and clearer security information.",
             "Refined sign-in labels and added complete Simplified Chinese localization for password-security popups.",
-            "Authentication notices now appear beside sign-in controls and can copy diagnostic logs for support."
+            "Authentication notices now appear beside sign-in controls and can copy diagnostic logs for support.",
+            "CCU calculations and Hangar share pictures can now be saved directly to Photos, and CCU chains can also be shared as images.",
+            "Item Language now clearly labels untranslated item names as English.",
+            "English and Chinese dates now use consistent numeric formats.",
+            "Settings now loads Early Access renewal details automatically."
         ],
         "1.0.7": [
             "Added Character Reset, allowing eligible users to request an RSI character repair from within Hangar Express.",

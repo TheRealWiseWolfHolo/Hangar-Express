@@ -1,3 +1,4 @@
+import Photos
 import SwiftUI
 import UIKit
 
@@ -63,6 +64,7 @@ struct HangarDashboardView: View {
     @State private var presentedBulkAction: HangarBulkActionRequest?
     @State private var sharePicturePayload: HangarSharePicturePayload?
     @State private var sharePictureError: HangarSharePictureError?
+    @State private var photoSaveNotice: HangarPhotoSaveNotice?
     @State private var isGeneratingSharePicture = false
     @State private var itemTranslationState = HangarItemTranslationViewState()
     @State private var translationService = OnDeviceHangarItemTranslationService.shared
@@ -197,6 +199,15 @@ struct HangarDashboardView: View {
                             .contextMenu {
                                 Button {
                                     Task {
+                                        await savePictureToPhotos(for: packageGroup)
+                                    }
+                                } label: {
+                                    Label("Save to Photos", systemImage: "square.and.arrow.down")
+                                }
+                                .disabled(isGeneratingSharePicture)
+
+                                Button {
+                                    Task {
                                         await presentSharePicture(for: packageGroup)
                                     }
                                 } label: {
@@ -288,6 +299,13 @@ struct HangarDashboardView: View {
                 Alert(
                     title: Text("Share Picture Failed"),
                     message: Text(error.message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
+            .alert(item: $photoSaveNotice) { notice in
+                Alert(
+                    title: Text(notice.title),
+                    message: Text(notice.message),
                     dismissButton: .default(Text("OK"))
                 )
             }
@@ -638,6 +656,42 @@ struct HangarDashboardView: View {
             sharePicturePayload = HangarSharePicturePayload(fileURL: fileURL)
         } catch {
             sharePictureError = HangarSharePictureError(message: error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func savePictureToPhotos(for packageGroup: GroupedHangarPackage) async {
+        guard !isGeneratingSharePicture else { return }
+        isGeneratingSharePicture = true
+        defer { isGeneratingSharePicture = false }
+
+        let authorization = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard authorization == .authorized || authorization == .limited else {
+            photoSaveNotice = HangarPhotoSaveNotice(
+                title: AppLocalizer.string("Unable to Save Image"),
+                message: AppLocalizer.string("Photo access is required to save the hangar picture.")
+            )
+            return
+        }
+
+        do {
+            let fileURL = try await HangarSharePictureGenerator.makeJPEG(
+                for: packageGroup,
+                fleet: snapshot.fleet,
+                itemTranslator: itemTranslator
+            )
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: fileURL)
+            }
+            photoSaveNotice = HangarPhotoSaveNotice(
+                title: AppLocalizer.string("Saved to Photos"),
+                message: AppLocalizer.string("The hangar picture was added to your photo library.")
+            )
+        } catch {
+            photoSaveNotice = HangarPhotoSaveNotice(
+                title: AppLocalizer.string("Unable to Save Image"),
+                message: error.localizedDescription
+            )
         }
     }
 
@@ -1678,6 +1732,12 @@ private struct HangarSharePicturePayload: Identifiable {
 
 private struct HangarSharePictureError: Identifiable {
     let id = UUID()
+    let message: String
+}
+
+private struct HangarPhotoSaveNotice: Identifiable {
+    let id = UUID()
+    let title: String
     let message: String
 }
 

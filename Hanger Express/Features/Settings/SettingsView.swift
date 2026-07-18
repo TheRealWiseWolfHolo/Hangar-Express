@@ -448,6 +448,9 @@ private struct ProSubscriptionSection: View {
         } footer: {
             Text("Developing Hangar Express takes time and money. Show your *optional* support here.")
         }
+        .task {
+            await subscriptionStore.start()
+        }
     }
 
     private var primaryButtonTitle: String {
