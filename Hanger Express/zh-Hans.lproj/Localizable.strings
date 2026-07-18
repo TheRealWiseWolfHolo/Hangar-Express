@@ -21,6 +21,7 @@
 "Sign-in now follows RSI's launcher-style authentication flow for better regional reliability." = "登录现已采用类似 RSI 启动器的认证流程，以提升不同地区的可靠性。";
 "Added read-only sign-in, which keeps your password out of Hangar Express and disables password-confirmed actions for that account." = "新增只读登录：密码不会提供给机库通，并会为该账户停用需要密码确认的操作。";
 "Redesigned sign-in with compact saved-account cards, account avatars, and clearer security information." = "重新设计登录界面，采用更紧凑的已保存账户卡片、账户头像和更清晰的安全说明。";
+"Refined sign-in labels and added complete Simplified Chinese localization for password-security popups." = "优化了登录界面文案，并为密码安全提示弹窗补全简体中文本地化。";
 "Authentication notices now appear beside sign-in controls and can copy diagnostic logs for support." = "认证提示现在会显示在登录控件旁，并可复制诊断日志以便排查问题。";
 "Hangar" = "机库";
 "Fleet" = "舰队";
