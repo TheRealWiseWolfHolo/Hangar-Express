@@ -497,6 +497,9 @@
 "Search ships" = "搜索舰船";
 "%@ • MSRP %@" = "%@ • MSRP %@";
 "Best CCU Chain" = "最佳 CCU 链";
+"Total Savings" = "总节省";
+"Destination MSRP" = "目标舰船 MSRP";
+"Melt Value" = "可溶价值";
 "%@ to %@" = "%@ 到 %@";
 "Direct Value" = "直接价值";
 "Value Used" = "已用价值";
