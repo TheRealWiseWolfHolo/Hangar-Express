@@ -8,6 +8,8 @@ struct CCUUpgradeCalculatorView: View {
     @State private var loadState: CCUUpgradeCalculatorLoadState = .idle
     @State private var selectedSourceKey: String?
     @State private var selectedDestinationKey: String?
+    @State private var selectedSourceMeltValueUSD: Decimal?
+    @State private var excludedCCUs: [String: String] = [:]
     @State private var isRefreshingCatalog = false
     @State private var routeCalculationState: CCUUpgradeRouteCalculationState = .idle
 
@@ -35,10 +37,29 @@ struct CCUUpgradeCalculatorView: View {
         }
     }
 
+    private var sourceMeltValueOptions: [Decimal] {
+        guard let selectedSourceShip else { return [] }
+        return CCUUpgradePlanner.sourceShipMeltValues(
+            for: selectedSourceShip,
+            snapshot: snapshot,
+            catalogShips: catalogShips
+        )
+    }
+
+    private var resolvedSourceValueUSD: Decimal? {
+        guard let selectedSourceShip else { return nil }
+        if sourceMeltValueOptions.isEmpty { return selectedSourceShip.msrpUSD }
+        if sourceMeltValueOptions.count == 1 { return sourceMeltValueOptions[0] }
+        guard let selectedSourceMeltValueUSD,
+              sourceMeltValueOptions.contains(selectedSourceMeltValueUSD) else { return nil }
+        return selectedSourceMeltValueUSD
+    }
+
     private var routeCalculationRequest: CCUUpgradeRouteCalculationRequest? {
         guard let catalog = loadedCatalog,
               let selectedSourceShip,
               let selectedDestinationShip,
+              let resolvedSourceValueUSD,
               selectedSourceShip.msrpUSD.isLessThan(selectedDestinationShip.msrpUSD) else {
             return nil
         }
@@ -46,7 +67,9 @@ struct CCUUpgradeCalculatorView: View {
         return CCUUpgradeRouteCalculationRequest(
             catalogID: catalog.id,
             sourceKey: selectedSourceShip.key,
-            destinationKey: selectedDestinationShip.key
+            destinationKey: selectedDestinationShip.key,
+            sourceValueUSD: resolvedSourceValueUSD,
+            excludedCandidateIDs: Set(excludedCCUs.keys)
         )
     }
 
@@ -81,6 +104,23 @@ struct CCUUpgradeCalculatorView: View {
                         )
                     }
                     .disabled(catalogShips.isEmpty)
+
+                    if sourceMeltValueOptions.count > 1 {
+                        Picker("Source Ship Value", selection: $selectedSourceMeltValueUSD) {
+                            Text("Choose melt value").tag(nil as Decimal?)
+                            ForEach(sourceMeltValueOptions, id: \.self) { value in
+                                Text(value.usdString).tag(value as Decimal?)
+                            }
+                        }
+                    } else if let resolvedSourceValueUSD {
+                        LabeledContent(
+                            "Source Ship Value",
+                            value: resolvedSourceValueUSD.usdString
+                        )
+                        Text(sourceMeltValueOptions.isEmpty ? "Using MSRP because this ship is not in your hangar." : "Using the melt value of your owned ship.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 } header: {
                     Text("Ships")
                 } footer: {
@@ -89,6 +129,7 @@ struct CCUUpgradeCalculatorView: View {
 
                 catalogStatusSection
                 calculationSection
+                excludedCCUsSection
             }
             .navigationTitle("CCU Calculator")
             .navigationBarTitleDisplayMode(.inline)
@@ -173,6 +214,12 @@ struct CCUUpgradeCalculatorView: View {
                         systemImage: "arrow.left.arrow.right",
                         description: Text("Choose both ships to calculate the chain.")
                     )
+                } else if sourceMeltValueOptions.count > 1 && resolvedSourceValueUSD == nil {
+                    ContentUnavailableView(
+                        "Choose Source Value",
+                        systemImage: "dollarsign.circle",
+                        description: Text("You own this ship at multiple melt values. Choose which one to use.")
+                    )
                 } else if let selectedSourceShip,
                           let selectedDestinationShip,
                           !selectedSourceShip.msrpUSD.isLessThan(selectedDestinationShip.msrpUSD) {
@@ -198,6 +245,13 @@ struct CCUUpgradeCalculatorView: View {
                                     paymentRequirement: route.paymentRequirement(for: step),
                                     reloadToken: reloadToken
                                 )
+                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                    Button(role: .destructive) {
+                                        exclude(step)
+                                    } label: {
+                                        Label("Exclude", systemImage: "minus.circle")
+                                    }
+                                }
                             }
                         } else {
                             ContentUnavailableView(
@@ -227,6 +281,33 @@ struct CCUUpgradeCalculatorView: View {
         }
     }
 
+    @ViewBuilder
+    private var excludedCCUsSection: some View {
+        if !excludedCCUs.isEmpty {
+            Section {
+                ForEach(excludedCCUs.keys.sorted(), id: \.self) { candidateID in
+                    HStack {
+                        Text(excludedCCUs[candidateID] ?? candidateID)
+                            .lineLimit(2)
+                        Spacer()
+                        Button("Restore") {
+                            excludedCCUs.removeValue(forKey: candidateID)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+            } header: {
+                Text("Excluded CCUs")
+            } footer: {
+                Text("Restoring a CCU recalculates the path and allows it to be used again.")
+            }
+        }
+    }
+
+    private func exclude(_ step: CCUUpgradeCandidate) {
+        excludedCCUs[step.id] = step.routeValueText
+    }
+
     private func selectableShips(for role: CCUUpgradeShipPickerRole) -> [CCUUpgradeCatalogShip] {
         switch role {
         case .source:
@@ -249,12 +330,19 @@ struct CCUUpgradeCalculatorView: View {
         case .source:
             return Binding(
                 get: { selectedSourceKey },
-                set: { selectedSourceKey = $0 }
+                set: {
+                    selectedSourceKey = $0
+                    selectedSourceMeltValueUSD = nil
+                    excludedCCUs.removeAll()
+                }
             )
         case .destination:
             return Binding(
                 get: { selectedDestinationKey },
-                set: { selectedDestinationKey = $0 }
+                set: {
+                    selectedDestinationKey = $0
+                    excludedCCUs.removeAll()
+                }
             )
         }
     }
@@ -353,7 +441,9 @@ struct CCUUpgradeCalculatorView: View {
                 to: destinationShip,
                 snapshot: snapshot,
                 catalogShips: catalogShips,
-                storeUpgradeOffers: storeUpgradeOffers
+                storeUpgradeOffers: storeUpgradeOffers,
+                selectedSourceMeltValueUSD: request.sourceValueUSD,
+                excludedCandidateIDs: request.excludedCandidateIDs
             )
         }.value
 
@@ -376,6 +466,8 @@ private struct CCUUpgradeRouteCalculationRequest: Hashable, Sendable {
     let catalogID: UUID
     let sourceKey: String
     let destinationKey: String
+    let sourceValueUSD: Decimal
+    let excludedCandidateIDs: Set<String>
 }
 
 private enum CCUUpgradeRouteCalculationState {
@@ -562,8 +654,13 @@ private struct CCUUpgradeRouteSummaryCard: View {
 
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
                 GridRow {
-                    CCUUpgradeMetricLabel(title: "Direct Value", value: route.standardUpgradeValueUSD.usdString)
+                    CCUUpgradeMetricLabel(title: "Ship MSRP", value: route.standardUpgradeValueUSD.usdString)
                     CCUUpgradeMetricLabel(title: "Value Used", value: route.totalEffectiveCostUSD.usdString)
+                }
+
+                GridRow {
+                    CCUUpgradeMetricLabel(title: "Source Value", value: route.sourceShipValueUSD.usdString)
+                    CCUUpgradeMetricLabel(title: "Savings", value: route.totalSavingsUSD.usdString)
                 }
 
                 GridRow {
