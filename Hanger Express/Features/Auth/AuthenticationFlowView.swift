@@ -271,7 +271,7 @@ struct AuthenticationFlowView: View {
                                 Image(systemName: "arrow.right")
                             }
 
-                            Text("Continue")
+                            Text("Log In")
                                 .fontWeight(.semibold)
                         }
                         .frame(maxWidth: .infinity)
