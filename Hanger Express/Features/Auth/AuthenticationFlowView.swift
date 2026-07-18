@@ -28,21 +28,21 @@ struct AuthenticationFlowView: View {
 
         var id: Self { self }
 
-        var title: LocalizedStringKey {
+        var title: String {
             switch self {
             case .standard:
-                return "Your Password is Secured"
+                return AppLocalizer.string("Your Password is Secured")
             case .readOnly:
-                return "Read-Only Login"
+                return AppLocalizer.string("Read-Only Login")
             }
         }
 
-        var message: LocalizedStringKey {
+        var message: String {
             switch self {
             case .standard:
-                return "Your password is stored securely in this device's Keychain and used only to sign in and authenticate with RSI services. It is never shared with the app developer or any third-party service."
+                return AppLocalizer.string("Your password is stored securely in this device's Keychain and used only to sign in and authenticate with RSI services. It is never shared with the app developer or any third-party service.")
             case .readOnly:
-                return "Read-only login opens an RSI browser session. You enter your password directly on RSI's website, so it is never visible to or saved by Hangar Express. Password-confirmed features—including gifting, melting, applying upgrades, character repair, and device management—are disabled for this account."
+                return AppLocalizer.string("Read-only login opens an RSI browser session. You enter your password directly on RSI's website, so it is never visible to or saved by Hangar Express. Password-confirmed features—including gifting, melting, applying upgrades, character repair, and device management—are disabled for this account.")
             }
         }
     }
@@ -104,7 +104,7 @@ struct AuthenticationFlowView: View {
             Alert(
                 title: Text(topic.title),
                 message: Text(topic.message),
-                dismissButton: .default(Text("OK"))
+                dismissButton: .default(Text(AppLocalizer.string("OK")))
             )
         }
     }
