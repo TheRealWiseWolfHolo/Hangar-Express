@@ -388,7 +388,8 @@ struct Hanger_ExpressTests {
         #expect(route.totalNewPurchaseCostUSD == 80)
         #expect(route.totalStoreCreditNeededUSD == 0)
         #expect(route.totalNewMoneyNeededUSD == 80)
-        #expect(route.totalEffectiveCostUSD == 135)
+        #expect(route.sourceShipValueUSD == 30)
+        #expect(route.totalEffectiveCostUSD == 165)
         #expect(route.totalSavingsUSD == 25)
         #expect(!route.hasUnavailableStoreStep)
 
@@ -576,7 +577,8 @@ struct Hanger_ExpressTests {
         #expect(route.totalNewPurchaseCostUSD == 65)
         #expect(route.totalStoreCreditNeededUSD == 0)
         #expect(route.totalNewMoneyNeededUSD == 65)
-        #expect(route.totalEffectiveCostUSD == 65)
+        #expect(route.sourceShipValueUSD == 30)
+        #expect(route.totalEffectiveCostUSD == 95)
         #expect(route.totalSavingsUSD == 15)
 
         let storeWarbondStep = try #require(route.steps.first)
@@ -654,6 +656,104 @@ struct Hanger_ExpressTests {
         #expect(route.totalStoreCreditNeededUSD == 0)
         #expect(route.totalNewMoneyNeededUSD == 200)
         #expect(route.totalSavingsUSD == 25)
+    }
+
+    @Test func ccuPlannerUsesOwnedSourceShipMeltValue() throws {
+        let catalogShips = CCUUpgradeCatalogShip.makeShips(from: makeCCUTestCatalog())
+        let snapshot = makeCCUTestSnapshot(
+            fleet: [makeCCUTestFleetShip(id: 1, name: "300i", meltValueUSD: 45)],
+            packages: [],
+            buyback: []
+        )
+        let source = try #require(catalogShips.first { $0.name == "300i" })
+        let destination = try #require(catalogShips.first { $0.name == "Cutlass Black" })
+
+        let route = try #require(CCUUpgradePlanner.bestRoute(
+            from: source,
+            to: destination,
+            snapshot: snapshot,
+            catalogShips: catalogShips
+        ))
+
+        #expect(route.sourceShipValueUSD == 45)
+        #expect(route.totalEffectiveCostUSD == 95)
+        #expect(route.totalSavingsUSD == 15)
+    }
+
+    @Test func ccuPlannerRequiresSelectionForDifferentOwnedSourceValues() throws {
+        let catalogShips = CCUUpgradeCatalogShip.makeShips(from: makeCCUTestCatalog())
+        let snapshot = makeCCUTestSnapshot(
+            fleet: [
+                makeCCUTestFleetShip(id: 1, name: "300i", meltValueUSD: 40),
+                makeCCUTestFleetShip(id: 2, name: "300i", meltValueUSD: 50)
+            ],
+            packages: [],
+            buyback: []
+        )
+        let source = try #require(catalogShips.first { $0.name == "300i" })
+        let destination = try #require(catalogShips.first { $0.name == "Cutlass Black" })
+
+        #expect(CCUUpgradePlanner.bestRoute(
+            from: source,
+            to: destination,
+            snapshot: snapshot,
+            catalogShips: catalogShips
+        ) == nil)
+
+        let route = try #require(CCUUpgradePlanner.bestRoute(
+            from: source,
+            to: destination,
+            snapshot: snapshot,
+            catalogShips: catalogShips,
+            selectedSourceMeltValueUSD: 50
+        ))
+        #expect(route.sourceShipValueUSD == 50)
+        #expect(route.totalEffectiveCostUSD == 100)
+    }
+
+    @Test func ccuPlannerRecalculatesWithoutExcludedCCU() throws {
+        let catalogShips = CCUUpgradeCatalogShip.makeShips(from: makeCCUTestCatalog())
+        let snapshot = makeCCUTestSnapshot(
+            packages: [
+                makeCCUTestUpgradePackage(
+                    id: 100,
+                    title: "300i to Cutlass Black Best Upgrade",
+                    source: "300i",
+                    target: "Cutlass Black",
+                    currentValueUSD: 50,
+                    meltValueUSD: 20
+                ),
+                makeCCUTestUpgradePackage(
+                    id: 101,
+                    title: "300i to Cutlass Black Alternate Upgrade",
+                    source: "300i",
+                    target: "Cutlass Black",
+                    currentValueUSD: 50,
+                    meltValueUSD: 30
+                )
+            ],
+            buyback: []
+        )
+        let source = try #require(catalogShips.first { $0.name == "300i" })
+        let destination = try #require(catalogShips.first { $0.name == "Cutlass Black" })
+        let originalRoute = try #require(CCUUpgradePlanner.bestRoute(
+            from: source,
+            to: destination,
+            snapshot: snapshot,
+            catalogShips: catalogShips
+        ))
+        let excludedID = try #require(originalRoute.steps.first?.id)
+
+        let recalculatedRoute = try #require(CCUUpgradePlanner.bestRoute(
+            from: source,
+            to: destination,
+            snapshot: snapshot,
+            catalogShips: catalogShips,
+            excludedCandidateIDs: [excludedID]
+        ))
+
+        #expect(recalculatedRoute.steps.first?.title == "300i to Cutlass Black Alternate Upgrade")
+        #expect(recalculatedRoute.steps.first?.effectiveCostUSD == 30)
     }
 
     @Test func fileSnapshotStorePersistsSnapshotsByAccountKey() async throws {
@@ -4931,6 +5031,7 @@ private func makeCCUTestCatalogShip(
 
 private func makeCCUTestSnapshot(
     storeCreditUSD: Decimal = 0,
+    fleet: [FleetShip] = [],
     packages: [HangarPackage],
     buyback: [BuybackPledge]
 ) -> HangarSnapshot {
@@ -4939,8 +5040,23 @@ private func makeCCUTestSnapshot(
         lastSyncedAt: Date(timeIntervalSince1970: 1_000),
         storeCreditUSD: storeCreditUSD,
         packages: packages,
-        fleet: [],
+        fleet: fleet,
         buyback: buyback
+    )
+}
+
+private func makeCCUTestFleetShip(id: Int, name: String, meltValueUSD: Decimal) -> FleetShip {
+    FleetShip(
+        id: id,
+        displayName: name,
+        manufacturer: "Origin",
+        role: "Touring",
+        insurance: "6 Months",
+        sourcePackageID: id,
+        sourcePackageName: name,
+        meltValueUSD: meltValueUSD,
+        canGift: true,
+        canReclaim: true
     )
 }
 

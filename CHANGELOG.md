@@ -4,6 +4,7 @@
 
 ### Added
 - Added the ability to request an RSI character repair from Hangar Express when an account is eligible.
+- Added left-swipe CCU exclusions to the calculator, with immediate path recalculation and an option to restore excluded upgrades.
 
 ### Changed
 - Made ship selection feel smoother in the CCU calculator.
@@ -11,6 +12,7 @@
 - Changed Hangar Log so it opens right away and starts showing entries in groups of 10 as they load.
 
 ### Fixed
+- Fixed CCU calculator totals so the source ship is valued at its owned melt value, or MSRP when it is not owned, and added a value choice when owned copies have different melt values.
 - Fixed Hangar Log refreshes that could look empty or frozen while entries were still loading.
 - Reduced app slowdown during Hangar Log refreshes.
 

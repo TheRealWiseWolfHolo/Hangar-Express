@@ -281,6 +281,7 @@ private nonisolated struct CCUUpgradeStorePath: Hashable, Sendable {
 nonisolated struct CCUUpgradeRoute: Hashable, Sendable {
     let sourceShip: CCUUpgradeCatalogShip
     let destinationShip: CCUUpgradeCatalogShip
+    let sourceShipValueUSD: Decimal
     let steps: [CCUUpgradeCandidate]
     let standardUpgradeValueUSD: Decimal
     let totalEffectiveCostUSD: Decimal
@@ -319,7 +320,9 @@ nonisolated enum CCUUpgradePlanner {
         to destinationShip: CCUUpgradeCatalogShip,
         snapshot: HangarSnapshot,
         catalogShips: [CCUUpgradeCatalogShip],
-        storeUpgradeOffers: [RSIShipCatalog.StoreUpgradeOffer] = []
+        storeUpgradeOffers: [RSIShipCatalog.StoreUpgradeOffer] = [],
+        selectedSourceMeltValueUSD: Decimal? = nil,
+        excludedCandidateIDs: Set<String> = []
     ) -> CCUUpgradeRoute? {
         guard sourceShip.msrpUSD.isLessThan(destinationShip.msrpUSD) else {
             return nil
@@ -331,11 +334,31 @@ nonisolated enum CCUUpgradePlanner {
             return nil
         }
 
+        let ownedSourceMeltValues = sourceShipMeltValues(
+            for: sourceShip,
+            snapshot: snapshot,
+            shipIndex: shipIndex
+        )
+        let sourceShipValueUSD: Decimal
+        if ownedSourceMeltValues.isEmpty {
+            sourceShipValueUSD = sourceShip.msrpUSD
+        } else if let selectedSourceMeltValueUSD,
+                  ownedSourceMeltValues.contains(selectedSourceMeltValueUSD) {
+            sourceShipValueUSD = selectedSourceMeltValueUSD
+        } else if ownedSourceMeltValues.count == 1,
+                  let soleMeltValue = ownedSourceMeltValues.first {
+            sourceShipValueUSD = soleMeltValue
+        } else {
+            // The caller must ask which owned copy to use when melt values differ.
+            return nil
+        }
+
         let candidates = allCandidates(
             snapshot: snapshot,
             shipIndex: shipIndex,
             storeUpgradeOffers: storeUpgradeOffers
         )
+            .filter { !excludedCandidateIDs.contains($0.id) }
             .filter { candidate in
                 candidate.sourceShip.msrpUSD.isGreaterThanOrEqual(to: sourceShip.msrpUSD)
                     && candidate.targetShip.msrpUSD.isLessThanOrEqual(to: destinationShip.msrpUSD)
@@ -392,13 +415,40 @@ nonisolated enum CCUUpgradePlanner {
         return CCUUpgradeRoute(
             sourceShip: sourceShip,
             destinationShip: destinationShip,
+            sourceShipValueUSD: sourceShipValueUSD,
             steps: destinationState.steps,
-            standardUpgradeValueUSD: destinationShip.msrpUSD - sourceShip.msrpUSD,
-            totalEffectiveCostUSD: destinationState.totalEffectiveCostUSD,
+            standardUpgradeValueUSD: destinationShip.msrpUSD,
+            totalEffectiveCostUSD: sourceShipValueUSD + destinationState.totalEffectiveCostUSD,
             totalNewPurchaseCostUSD: destinationState.totalNewPurchaseCostUSD,
             availableStoreCreditUSD: availableStoreCreditUSD,
             paymentRequirements: paymentRequirements
         )
+    }
+
+    static func sourceShipMeltValues(
+        for sourceShip: CCUUpgradeCatalogShip,
+        snapshot: HangarSnapshot,
+        catalogShips: [CCUUpgradeCatalogShip]
+    ) -> [Decimal] {
+        sourceShipMeltValues(
+            for: sourceShip,
+            snapshot: snapshot,
+            shipIndex: CCUUpgradeShipIndex(ships: catalogShips)
+        )
+    }
+
+    private static func sourceShipMeltValues(
+        for sourceShip: CCUUpgradeCatalogShip,
+        snapshot: HangarSnapshot,
+        shipIndex: CCUUpgradeShipIndex
+    ) -> [Decimal] {
+        Array(Set(snapshot.fleet.compactMap { ownedShip -> Decimal? in
+            guard shipIndex.matchShip(named: ownedShip.displayName)?.key == sourceShip.key else {
+                return nil
+            }
+            return ownedShip.meltValueUSD
+        }))
+        .sorted { $0.compare(to: $1) == .orderedAscending }
     }
 
     static func allCandidates(
