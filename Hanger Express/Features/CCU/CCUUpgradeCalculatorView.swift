@@ -1,4 +1,6 @@
+import Photos
 import SwiftUI
+import UIKit
 
 struct CCUUpgradeCalculatorView: View {
     let snapshot: HangarSnapshot
@@ -12,6 +14,9 @@ struct CCUUpgradeCalculatorView: View {
     @State private var excludedCCUs: [String: String] = [:]
     @State private var isRefreshingCatalog = false
     @State private var routeCalculationState: CCUUpgradeRouteCalculationState = .idle
+    @State private var exportPayload: CCUCalculationExportPayload?
+    @State private var exportNotice: CCUCalculationExportNotice?
+    @State private var isExportingCalculation = false
 
     private var loadedCatalog: CCUUpgradeCalculatorCatalog? {
         guard case let .loaded(catalog) = loadState else {
@@ -73,6 +78,15 @@ struct CCUUpgradeCalculatorView: View {
         )
     }
 
+    private var displayedRoute: CCUUpgradeRoute? {
+        guard let routeCalculationRequest,
+              case let .loaded(loadedRequest, route) = routeCalculationState,
+              loadedRequest == routeCalculationRequest else {
+            return nil
+        }
+        return route
+    }
+
     private var isLoadingCatalog: Bool {
         if case .loading = loadState {
             return true
@@ -129,6 +143,26 @@ struct CCUUpgradeCalculatorView: View {
                 calculationSection
                 excludedCCUsSection
             }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if let displayedRoute {
+                    CCUCalculationExportButtons(
+                        isExporting: isExportingCalculation,
+                        onSave: {
+                            Task { await saveCalculationToPhotos(displayedRoute) }
+                        },
+                        onShare: {
+                            Task { await shareCalculation(displayedRoute) }
+                        }
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.top, 10)
+                    .padding(.bottom, 8)
+                    .background(.bar)
+                    .overlay(alignment: .top) {
+                        Divider()
+                    }
+                }
+            }
             .navigationTitle("CCU Calculator")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -168,6 +202,31 @@ struct CCUUpgradeCalculatorView: View {
             }
             .task(id: routeCalculationRequest) {
                 await calculateRoute(for: routeCalculationRequest)
+            }
+            .sheet(item: $exportPayload) { payload in
+                CCUCalculationShareSheet(activityItems: [payload.fileURL])
+            }
+            .alert(item: $exportNotice) { notice in
+                Alert(
+                    title: Text(notice.title),
+                    message: Text(notice.message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
+            .overlay {
+                if isExportingCalculation {
+                    ZStack {
+                        Color.black.opacity(0.18)
+                            .ignoresSafeArea()
+
+                        ProgressView("Creating image...")
+                            .padding(18)
+                            .background(
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                    .fill(.regularMaterial)
+                            )
+                    }
+                }
             }
         }
     }
@@ -304,6 +363,52 @@ struct CCUUpgradeCalculatorView: View {
 
     private func exclude(_ step: CCUUpgradeCandidate) {
         excludedCCUs[step.id] = step.routeValueText
+    }
+
+    @MainActor
+    private func saveCalculationToPhotos(_ route: CCUUpgradeRoute) async {
+        guard !isExportingCalculation else { return }
+        isExportingCalculation = true
+        defer { isExportingCalculation = false }
+
+        do {
+            let image = try CCUCalculationImageGenerator.makeImage(for: route)
+            let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+            guard status == .authorized || status == .limited else {
+                throw CCUCalculationExportError.photoAccessDenied
+            }
+
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.creationRequestForAsset(from: image)
+            }
+            exportNotice = CCUCalculationExportNotice(
+                title: AppLocalizer.string("Saved to Photos"),
+                message: AppLocalizer.string("The CCU calculation image was added to your photo library.")
+            )
+        } catch {
+            exportNotice = CCUCalculationExportNotice(
+                title: AppLocalizer.string("Unable to Save Image"),
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    @MainActor
+    private func shareCalculation(_ route: CCUUpgradeRoute) async {
+        guard !isExportingCalculation else { return }
+        isExportingCalculation = true
+        defer { isExportingCalculation = false }
+
+        do {
+            exportPayload = CCUCalculationExportPayload(
+                fileURL: try CCUCalculationImageGenerator.makePNG(for: route)
+            )
+        } catch {
+            exportNotice = CCUCalculationExportNotice(
+                title: AppLocalizer.string("Unable to Share Image"),
+                message: error.localizedDescription
+            )
+        }
     }
 
     private func selectableShips(for role: CCUUpgradeShipPickerRole) -> [CCUUpgradeCatalogShip] {
@@ -885,6 +990,229 @@ private struct CCUUpgradeStepValue: View {
             Text(value)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.primary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct CCUCalculationExportButtons: View {
+    let isExporting: Bool
+    let onSave: () -> Void
+    let onShare: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onSave) {
+                Label("Save to Photos", systemImage: "square.and.arrow.down")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+
+            Button(action: onShare) {
+                Label("Share", systemImage: "square.and.arrow.up")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .disabled(isExporting)
+        .padding(.vertical, 4)
+    }
+}
+
+private struct CCUCalculationExportPayload: Identifiable {
+    let id = UUID()
+    let fileURL: URL
+}
+
+private struct CCUCalculationExportNotice: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
+private enum CCUCalculationExportError: LocalizedError {
+    case imageGenerationFailed
+    case photoAccessDenied
+
+    var errorDescription: String? {
+        switch self {
+        case .imageGenerationFailed:
+            return AppLocalizer.string("The CCU calculation image could not be created.")
+        case .photoAccessDenied:
+            return AppLocalizer.string("Photo access is required to save the CCU calculation image.")
+        }
+    }
+}
+
+private struct CCUCalculationShareSheet: UIViewControllerRepresentable {
+    let activityItems: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+@MainActor
+private enum CCUCalculationImageGenerator {
+    static func makeImage(for route: CCUUpgradeRoute) throws -> UIImage {
+        let content = CCUCalculationExportView(route: route)
+            .frame(width: 540)
+            .fixedSize(horizontal: false, vertical: true)
+
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = 2
+        guard let image = renderer.uiImage else {
+            throw CCUCalculationExportError.imageGenerationFailed
+        }
+        return image
+    }
+
+    static func makePNG(for route: CCUUpgradeRoute) throws -> URL {
+        let image = try makeImage(for: route)
+        guard let data = image.pngData() else {
+            throw CCUCalculationExportError.imageGenerationFailed
+        }
+
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Hangar-Express-CCU-\(UUID().uuidString).png")
+        try data.write(to: fileURL, options: .atomic)
+        return fileURL
+    }
+}
+
+private struct CCUCalculationExportView: View {
+    let route: CCUUpgradeRoute
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Hangar Express")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Color.accentColor)
+                    Text("Best CCU Chain")
+                        .font(.title2.weight(.bold))
+                    Text(AppLocalizer.format("%@ to %@", route.sourceShip.name, route.destinationShip.name))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text("Total Savings")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(route.totalSavingsUSD.usdString)
+                        .font(.title.weight(.bold))
+                        .foregroundStyle(route.totalSavingsUSD.isNegative ? .orange : .green)
+                }
+            }
+
+            Divider()
+
+            VStack(spacing: 12) {
+                exportSummaryRow("Destination MSRP", route.standardUpgradeValueUSD.usdString)
+                exportSummaryRow("Melt Value", route.totalEffectiveCostUSD.usdString)
+            }
+
+            HStack(alignment: .top, spacing: 18) {
+                CCUUpgradeMetricLabel(title: "CCU Purchases", value: route.totalNewPurchaseCostUSD.usdString)
+                CCUUpgradeMetricLabel(title: "Store Credit", value: route.totalStoreCreditNeededUSD.usdString)
+                CCUUpgradeMetricLabel(title: "New Money", value: route.totalNewMoneyNeededUSD.usdString)
+            }
+
+            Divider()
+
+            VStack(spacing: 0) {
+                ForEach(Array(route.steps.enumerated()), id: \.element.id) { offset, step in
+                    CCUCalculationExportStep(
+                        number: offset + 1,
+                        step: step,
+                        payment: route.paymentRequirement(for: step)
+                    )
+
+                    if offset < route.steps.count - 1 {
+                        Divider()
+                            .padding(.leading, 42)
+                    }
+                }
+            }
+
+            Text("Generated by Hangar Express")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .padding(28)
+        .background(Color(uiColor: .systemBackground))
+        .foregroundStyle(Color.primary)
+        .environment(\.colorScheme, .dark)
+    }
+
+    private func exportSummaryRow(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(AppLocalizer.string(title))
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .font(.title3.weight(.bold))
+        }
+    }
+}
+
+private struct CCUCalculationExportStep: View {
+    let number: Int
+    let step: CCUUpgradeCandidate
+    let payment: CCUUpgradePaymentRequirement?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text("\(number)")
+                .font(.caption.weight(.bold))
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.secondary.opacity(0.16)))
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(step.routeValueText)
+                        .font(.headline)
+                    Spacer()
+                    Text(step.kind.title)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+
+                HStack(spacing: 20) {
+                    exportValue("Current", step.currentValueUSD.usdString)
+                    exportValue("Cost", step.effectiveCostUSD.usdString)
+                    exportValue("Saving", step.savingsUSD.usdString)
+                }
+
+                if let payment {
+                    Text(AppLocalizer.format(
+                        "Store credit %@ • New money %@",
+                        payment.storeCreditUSD.usdString,
+                        payment.newMoneyUSD.usdString
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.vertical, 14)
+    }
+
+    private func exportValue(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(AppLocalizer.string(title))
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.weight(.semibold))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

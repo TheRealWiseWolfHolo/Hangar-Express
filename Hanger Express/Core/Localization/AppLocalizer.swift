@@ -31,10 +31,7 @@ enum AppLocalizer {
             return fixedDateFormatter(format: "yyyy/MM/dd").string(from: date)
         }
 
-        return date.formatted(
-            Date.FormatStyle(date: .abbreviated, time: .omitted)
-                .locale(currentLocale)
-        )
+        return fixedDateFormatter(format: "MM/dd/yyyy").string(from: date)
     }
 
     nonisolated static func displayDateTime(_ date: Date) -> String {
@@ -42,10 +39,11 @@ enum AppLocalizer {
             return fixedDateFormatter(format: "yyyy/MM/dd HH:mm").string(from: date)
         }
 
-        return date.formatted(
-            Date.FormatStyle(date: .abbreviated, time: .shortened)
+        let time = date.formatted(
+            Date.FormatStyle(date: .omitted, time: .shortened)
                 .locale(currentLocale)
         )
+        return "\(displayDate(date)) \(time)"
     }
 
     nonisolated static func displayDateTimeWithSeconds(_ date: Date) -> String {
@@ -53,10 +51,11 @@ enum AppLocalizer {
             return fixedDateFormatter(format: "yyyy/MM/dd HH:mm:ss").string(from: date)
         }
 
-        return date.formatted(
-            Date.FormatStyle(date: .abbreviated, time: .standard)
+        let time = date.formatted(
+            Date.FormatStyle(date: .omitted, time: .standard)
                 .locale(currentLocale)
         )
+        return "\(displayDate(date)) \(time)"
     }
 
     nonisolated private static var resolvedBundle: Bundle {
