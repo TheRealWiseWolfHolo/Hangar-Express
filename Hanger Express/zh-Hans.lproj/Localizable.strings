@@ -260,7 +260,7 @@
 "Read-Only Login" = "只读登录";
 "More information" = "更多信息";
 "Your password is stored securely in this device's Keychain and used only to sign in and authenticate with RSI services. It is never shared with the app developer or any third-party service." = "你的密码会安全地存储在此设备的钥匙串中，仅用于登录和验证 RSI 服务。密码绝不会与应用开发者或任何第三方服务共享。";
-"Continue" = "继续";
+"Log In" = "登录";
 "OR" = "或";
 "Login as Read Only" = "以只读模式登录";
 "Read-only login opens an RSI browser session. You enter your password directly on RSI's website, so it is never visible to or saved by Hangar Express. Password-confirmed features—including gifting, melting, applying upgrades, character repair, and device management—are disabled for this account." = "只读登录会打开 RSI 浏览器会话。你将在 RSI 网站上直接输入密码，因此 Hangar Express 无法看到或保存你的密码。此账户将禁用需要密码确认的功能，包括赠送、熔炼、应用升级、角色修复和设备管理。";
