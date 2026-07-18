@@ -713,6 +713,7 @@ final class AppModel {
             "Sign-in now follows RSI's launcher-style authentication flow for better regional reliability.",
             "Added read-only sign-in, which keeps your password out of Hangar Express and disables password-confirmed actions for that account.",
             "Redesigned sign-in with compact saved-account cards, account avatars, and clearer security information.",
+            "Refined sign-in labels and added complete Simplified Chinese localization for password-security popups.",
             "Authentication notices now appear beside sign-in controls and can copy diagnostic logs for support."
         ],
         "1.0.7": [
