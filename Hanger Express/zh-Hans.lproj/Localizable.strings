@@ -250,7 +250,7 @@
 "%lld pledges" = "%lld 个项目";
 "%lld buy-back item" = "%lld 个回购物品";
 "%lld buy-back items" = "%lld 个回购物品";
-"This is an unofficial Star Citizen fan app and is not affiliated with the Cloud Imperium group of companies." = "这是一个非官方的星际公民粉丝应用，与CIG没有任何关联。";
+"This is an unofficial Star Citizen fan app and is not affiliated with the Cloud Imperium group of companies" = "这是一个非官方的星际公民粉丝应用，与CIG没有任何关联";
 "Credentials" = "凭据";
 "RSI Email or Login ID" = "RSI 邮箱或登录 ID";
 "Password" = "密码";
@@ -462,7 +462,7 @@
 "Refresh Failed" = "刷新失败";
 "Hangar Express" = "机库通";
 "RSI Login" = "RSI 登录";
-"Sign in to sync your hangar and manage your fleet." = "登录以同步你的机库并管理舰队。";
+"Sign in to sync your hangar and manage your fleet" = "登录以同步你的机库并管理舰队";
 "Use a saved RSI session or manage it from the account menu." = "使用已保存的 RSI 会话，或从账户菜单中管理它。";
 "Use Saved" = "使用已保存会话";
 "Account options" = "账户选项";

@@ -156,7 +156,7 @@ struct AuthenticationFlowView: View {
                     .foregroundStyle(.primary)
             }
 
-            Text("Sign in to sync your hangar and manage your fleet.")
+            Text("Sign in to sync your hangar and manage your fleet")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
@@ -165,7 +165,7 @@ struct AuthenticationFlowView: View {
                     .foregroundStyle(Color.accentColor)
                     .padding(.top, 1)
 
-                Text("This is an unofficial Star Citizen fan app and is not affiliated with the Cloud Imperium group of companies.")
+                Text("This is an unofficial Star Citizen fan app and is not affiliated with the Cloud Imperium group of companies")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -311,7 +311,7 @@ struct AuthenticationFlowView: View {
 
                     PasswordInfoRow(
                         title: "Read Only: Your password is not saved",
-                        systemImage: "hand.raised.fill"
+                        systemImage: "eye.fill"
                     ) {
                         passwordInfoTopic = .readOnly
                     }
