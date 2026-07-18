@@ -123,8 +123,6 @@ struct CCUUpgradeCalculatorView: View {
                     }
                 } header: {
                     Text("Ships")
-                } footer: {
-                    Text("Store availability comes from the hosted Star Citizen ship feed.")
                 }
 
                 catalogStatusSection
@@ -634,7 +632,7 @@ private struct CCUUpgradeRouteSummaryCard: View {
     let route: CCUUpgradeRoute
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Best CCU Chain")
@@ -647,31 +645,39 @@ private struct CCUUpgradeRouteSummaryCard: View {
 
                 Spacer(minLength: 8)
 
-                Text(route.totalSavingsUSD.usdString)
-                    .font(.title3.weight(.bold))
-                    .foregroundStyle(route.totalSavingsUSD.isNegative ? .orange : .green)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("Total Savings")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    Text(route.totalSavingsUSD.usdString)
+                        .font(.title3.weight(.bold))
+                        .foregroundStyle(route.totalSavingsUSD.isNegative ? .orange : .green)
+                }
             }
 
-            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
-                GridRow {
-                    CCUUpgradeMetricLabel(title: "Ship MSRP", value: route.standardUpgradeValueUSD.usdString)
-                    CCUUpgradeMetricLabel(title: "Value Used", value: route.totalEffectiveCostUSD.usdString)
-                }
+            Divider()
 
-                GridRow {
-                    CCUUpgradeMetricLabel(title: "Source Value", value: route.sourceShipValueUSD.usdString)
-                    CCUUpgradeMetricLabel(title: "Savings", value: route.totalSavingsUSD.usdString)
-                }
+            VStack(spacing: 10) {
+                CCUUpgradeSummaryRow(
+                    title: "Destination MSRP",
+                    value: route.standardUpgradeValueUSD.usdString,
+                    emphasized: true
+                )
 
-                GridRow {
-                    CCUUpgradeMetricLabel(title: "CCU Purchases", value: route.totalNewPurchaseCostUSD.usdString)
-                    CCUUpgradeMetricLabel(title: "Store Credit", value: route.totalStoreCreditNeededUSD.usdString)
-                }
+                CCUUpgradeSummaryRow(
+                    title: "Melt Value",
+                    value: route.totalEffectiveCostUSD.usdString,
+                    emphasized: true
+                )
+            }
 
-                GridRow {
-                    CCUUpgradeMetricLabel(title: "New Money", value: route.totalNewMoneyNeededUSD.usdString)
-                    CCUUpgradeMetricLabel(title: "Steps", value: "\(route.steps.count)")
-                }
+            Divider()
+
+            HStack(alignment: .top, spacing: 12) {
+                CCUUpgradeMetricLabel(title: "CCU Purchases", value: route.totalNewPurchaseCostUSD.usdString)
+                CCUUpgradeMetricLabel(title: "Store Credit", value: route.totalStoreCreditNeededUSD.usdString)
+                CCUUpgradeMetricLabel(title: "New Money", value: route.totalNewMoneyNeededUSD.usdString)
             }
         }
         .padding(16)
@@ -680,6 +686,26 @@ private struct CCUUpgradeRouteSummaryCard: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Color(.secondarySystemGroupedBackground))
         )
+    }
+}
+
+private struct CCUUpgradeSummaryRow: View {
+    let title: String
+    let value: String
+    let emphasized: Bool
+
+    var body: some View {
+        HStack {
+            Text(AppLocalizer.string(title))
+                .font(emphasized ? .subheadline.weight(.semibold) : .subheadline)
+                .foregroundStyle(.secondary)
+
+            Spacer()
+
+            Text(value)
+                .font(emphasized ? .headline : .subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+        }
     }
 }
 

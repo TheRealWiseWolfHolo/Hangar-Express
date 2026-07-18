@@ -8,6 +8,7 @@
 
 ### Changed
 - Made ship selection feel smoother in the CCU calculator.
+- Simplified the CCU calculator summary to clearly show destination MSRP, melt value, total savings, and the payment breakdown.
 - Made Hangar and Fleet images appear sooner while scrolling quickly.
 - Changed Hangar Log so it opens right away and starts showing entries in groups of 10 as they load.
 
