@@ -234,7 +234,6 @@ final class AppModel {
     struct AuthenticationDraft {
         let loginIdentifier: String
         let password: String
-        let rememberMe: Bool
         let notice: String?
     }
 
@@ -710,7 +709,11 @@ final class AppModel {
             "The CCU calculator feels smoother when choosing ships.",
             "Hangar and Fleet images appear sooner while you scroll.",
             "Hangar Log opens right away and starts showing entries in small groups as they load.",
-            "Hangar Log refreshes should feel smoother and less likely to freeze the app."
+            "Hangar Log refreshes should feel smoother and less likely to freeze the app.",
+            "Sign-in now follows RSI's launcher-style authentication flow for better regional reliability.",
+            "Added read-only sign-in, which keeps your password out of Hangar Express and disables password-confirmed actions for that account.",
+            "Redesigned sign-in with compact saved-account cards, account avatars, and clearer security information.",
+            "Authentication notices now appear beside sign-in controls and can copy diagnostic logs for support."
         ],
         "1.0.7": [
             "Added Character Reset, allowing eligible users to request an RSI character repair from within Hangar Express.",
@@ -3028,7 +3031,6 @@ final class AppModel {
         pendingAuthenticationDraft = AuthenticationDraft(
             loginIdentifier: session.credentials?.loginIdentifier ?? session.email,
             password: session.credentials?.password ?? "",
-            rememberMe: true,
             notice: notice
         )
         authenticationFlowID = UUID()
