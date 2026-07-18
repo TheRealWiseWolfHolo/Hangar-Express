@@ -9,7 +9,8 @@ struct AuthenticationFlowView: View {
     @FocusState private var focusedField: InputField?
     @State private var isShowingClearKeychainAlert = false
     @State private var didCopyAuthDebugReport = false
-    @State private var isAdvancedExpanded = false
+    @State private var isShowingAdvanced = false
+    @State private var isShowingSavedAccounts = false
     @State private var passwordInfoTopic: PasswordInfoTopic?
     @State private var viewModel: AuthenticationViewModel
 
@@ -30,7 +31,7 @@ struct AuthenticationFlowView: View {
         var title: LocalizedStringKey {
             switch self {
             case .standard:
-                return "Password Security"
+                return "Your Password is Secured"
             case .readOnly:
                 return "Read-Only Login"
             }
@@ -39,9 +40,9 @@ struct AuthenticationFlowView: View {
         var message: LocalizedStringKey {
             switch self {
             case .standard:
-                return "Your password is stored securely in this device's Keychain and sent only to RSI when authentication or password confirmation is required. It is never shared with any other service."
+                return "Your password is stored securely in this device's Keychain and used only to sign in and authenticate with RSI services. It is never shared with the app developer or any third-party service."
             case .readOnly:
-                return "Your password is entered directly on RSI's website and is not saved by Hangar Express. Password-confirmed features—including gifting, melting, applying upgrades, character repair, and device management—are disabled for this account."
+                return "Read-only login opens an RSI browser session. You enter your password directly on RSI's website, so it is never visible to or saved by Hangar Express. Password-confirmed features—including gifting, melting, applying upgrades, character repair, and device management—are disabled for this account."
             }
         }
     }
@@ -56,32 +57,7 @@ struct AuthenticationFlowView: View {
             ZStack(alignment: .top) {
                 AuthenticationBackground()
 
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 24) {
-                        hero
-
-                        switch viewModel.step {
-                        case .signIn:
-                            if !quickLoginSessions.isEmpty {
-                                savedAccountsSection
-                            }
-                            signInSection
-                        case .captcha:
-                            captchaSection
-                        case .twoFactor:
-                            twoFactorSection
-                        }
-
-                        advancedSection
-                        legalNotice
-                    }
-                    .frame(maxWidth: 640)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 8)
-                    .padding(.bottom, 36)
-                    .frame(maxWidth: .infinity)
-                }
-                .scrollDismissesKeyboard(.interactively)
+                authenticationContent
             }
             .id(appLanguageRawValue)
             .navigationTitle("")
@@ -131,6 +107,34 @@ struct AuthenticationFlowView: View {
                 dismissButton: .default(Text("OK"))
             )
         }
+    }
+
+    private var authenticationContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            hero
+
+            switch viewModel.step {
+            case .signIn:
+                if !quickLoginSessions.isEmpty {
+                    savedAccountsSection
+                }
+                signInSection
+            case .captcha:
+                captchaSection
+            case .twoFactor:
+                twoFactorSection
+            }
+
+            VStack(spacing: 10) {
+                advancedSection
+                legalNotice
+            }
+        }
+        .frame(maxWidth: 640)
+        .padding(.horizontal, 20)
+        .padding(.top, -24)
+        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity)
     }
 
     private var hero: some View {
@@ -213,7 +217,6 @@ struct AuthenticationFlowView: View {
 
     private var signInSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            AuthenticationSectionHeader(title: "Credentials", systemImage: "person.badge.key.fill")
             statusMessages
 
             AuthenticationCard {
@@ -248,12 +251,6 @@ struct AuthenticationFlowView: View {
                             }
                     }
                     .authenticationInputSurface()
-
-                    Toggle(isOn: $viewModel.rememberMe) {
-                        Label("Keep me signed in", systemImage: "checkmark.shield.fill")
-                            .font(.subheadline.weight(.medium))
-                    }
-                    .tint(Color.accentColor)
 
                     PasswordInfoRow(
                         title: "Your password is secured",
@@ -313,7 +310,7 @@ struct AuthenticationFlowView: View {
                     .disabled(viewModel.isSubmitting)
 
                     PasswordInfoRow(
-                        title: "Your password is not saved",
+                        title: "Read Only: Your password is not saved",
                         systemImage: "hand.raised.fill"
                     ) {
                         passwordInfoTopic = .readOnly
@@ -386,6 +383,48 @@ struct AuthenticationFlowView: View {
     }
 
     private var savedAccountsSection: some View {
+        Button {
+            isShowingSavedAccounts = true
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "person.crop.circle.badge.checkmark")
+                    .font(.title3)
+                    .foregroundStyle(Color.accentColor)
+
+                Text("Saved Accounts")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+
+                Spacer(minLength: 8)
+
+                Text(quickLoginSessions.count, format: .number)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Color.primary.opacity(0.06), in: Capsule())
+
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, minHeight: 56)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.isSubmitting)
+        .popover(isPresented: $isShowingSavedAccounts) {
+            savedAccountsPopover
+                .presentationCompactAdaptation(.popover)
+        }
+    }
+
+    private var savedAccountsPopover: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 AuthenticationSectionHeader(title: "Saved Accounts", systemImage: "person.crop.circle.badge.checkmark")
@@ -395,36 +434,32 @@ struct AuthenticationFlowView: View {
                 Text(quickLoginSessions.count, format: .number)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(Color.primary.opacity(0.06), in: Capsule())
             }
 
-            LazyVGrid(
-                columns: [
-                    GridItem(.adaptive(minimum: 155, maximum: 260), spacing: 10, alignment: .top)
-                ],
-                alignment: .leading,
-                spacing: 10
-            ) {
-                ForEach(quickLoginSessions, id: \.id) { session in
-                    SavedQuickLoginCard(
-                        session: session,
-                        isDisabled: viewModel.isSubmitting,
-                        onSelect: {
-                            Task { await appModel.openSavedAccount(id: session.id) }
-                        },
-                        onRemove: {
-                            Task { await appModel.removeSavedAccount(id: session.id) }
-                        }
-                    )
+            ScrollView(.vertical) {
+                LazyVStack(spacing: 10) {
+                    ForEach(quickLoginSessions, id: \.id) { session in
+                        SavedQuickLoginCard(
+                            session: session,
+                            isDisabled: viewModel.isSubmitting,
+                            onSelect: {
+                                isShowingSavedAccounts = false
+                                Task { await appModel.openSavedAccount(id: session.id) }
+                            },
+                            onRemove: {
+                                Task { await appModel.removeSavedAccount(id: session.id) }
+                            }
+                        )
+                        .frame(height: savedAccountRowHeight)
+                    }
                 }
             }
-
-            Text("Use a saved RSI session or manage it from the account menu.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            .frame(height: savedAccountListHeight)
+            .scrollDisabled(quickLoginSessions.count <= 3)
+            .scrollIndicators(quickLoginSessions.count > 3 ? .visible : .hidden)
         }
+        .padding(16)
+        .frame(width: 340)
     }
 
     private var twoFactorSection: some View {
@@ -459,21 +494,6 @@ struct AuthenticationFlowView: View {
                     }
                     .authenticationInputSurface()
 
-                    HStack(spacing: 12) {
-                        Label("Remember This Device", systemImage: "clock.arrow.circlepath")
-                            .font(.subheadline.weight(.medium))
-
-                        Spacer(minLength: 8)
-
-                        Picker("Remember This Device", selection: $viewModel.trustDuration) {
-                            ForEach(TrustedDeviceDuration.allCases) { duration in
-                                Text(duration.displayName)
-                                    .tag(duration)
-                            }
-                        }
-                        .labelsHidden()
-                    }
-
                     Button {
                         focusedField = nil
                         Task { await viewModel.submitVerificationCode() }
@@ -499,42 +519,76 @@ struct AuthenticationFlowView: View {
     }
 
     private var advancedSection: some View {
-        AuthenticationCard {
-            DisclosureGroup(isExpanded: $isAdvancedExpanded) {
-                VStack(alignment: .leading, spacing: 16) {
-                    Divider()
+        Button {
+            isShowingAdvanced = true
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "gearshape.fill")
+                    .font(.title3)
+                    .foregroundStyle(Color.accentColor)
 
-                    Toggle("Show Full Auth Errors", isOn: $showsFullErrorDetails)
-                        .tint(Color.accentColor)
-
-#if DEBUG
-                    Button {
-                        Task { await viewModel.loadDemoHangar() }
-                    } label: {
-                        Label("Load Demo Hangar", systemImage: "sparkles")
-                    }
-                    .disabled(viewModel.isSubmitting)
-#endif
-
-                    Button(role: .destructive) {
-                        isShowingClearKeychainAlert = true
-                    } label: {
-                        Label("Remove Saved Keychain Content", systemImage: "key.slash.fill")
-                    }
-                    .disabled(viewModel.isSubmitting)
-
-                    Text("Removes every saved RSI account, its stored cookies, and saved credentials from Keychain without touching your local image or hangar cache.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.top, 12)
-            } label: {
-                Label("Advanced", systemImage: "gearshape.fill")
+                Text("Advanced")
                     .font(.headline)
                     .foregroundStyle(.primary)
+
+                Spacer(minLength: 8)
+
+                Image(systemName: "chevron.up")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
             }
-            .tint(.secondary)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, minHeight: 56)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+            }
         }
+        .buttonStyle(.plain)
+        .popover(
+            isPresented: $isShowingAdvanced,
+            attachmentAnchor: .rect(.bounds),
+            arrowEdge: .bottom
+        ) {
+            advancedPopover
+                .presentationCompactAdaptation(.popover)
+        }
+    }
+
+    private var advancedPopover: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            AuthenticationSectionHeader(title: "Advanced", systemImage: "gearshape.fill")
+
+            Divider()
+
+            Toggle("Show Full Auth Errors", isOn: $showsFullErrorDetails)
+                .tint(Color.accentColor)
+
+#if DEBUG
+            Button {
+                isShowingAdvanced = false
+                Task { await viewModel.loadDemoHangar() }
+            } label: {
+                Label("Load Demo Hangar", systemImage: "sparkles")
+            }
+            .disabled(viewModel.isSubmitting)
+#endif
+
+            Button(role: .destructive) {
+                isShowingAdvanced = false
+                isShowingClearKeychainAlert = true
+            } label: {
+                Label("Remove Saved Keychain Content", systemImage: "key.slash.fill")
+            }
+            .disabled(viewModel.isSubmitting)
+
+            Text("Removes every saved RSI account, its stored cookies, and saved credentials from Keychain without touching your local image or hangar cache.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .frame(width: 340)
     }
 
     private var legalNotice: some View {
@@ -555,6 +609,14 @@ struct AuthenticationFlowView: View {
 
     private var quickLoginSessions: [UserSession] {
         appModel.quickLoginSessions
+    }
+
+    private var savedAccountRowHeight: CGFloat { 66 }
+
+    private var savedAccountListHeight: CGFloat {
+        let visibleRowCount = min(quickLoginSessions.count, 3)
+        let rowSpacing = max(visibleRowCount - 1, 0) * 10
+        return (CGFloat(visibleRowCount) * savedAccountRowHeight) + CGFloat(rowSpacing)
     }
 
     private var browserChallengeBinding: Binding<AuthenticationViewModel.BrowserChallenge?> {
@@ -578,7 +640,7 @@ struct AuthenticationFlowView: View {
             errorMessage: viewModel.errorMessage,
             errorDebugDetails: viewModel.errorDebugDetails,
             loginIdentifier: viewModel.loginIdentifier,
-            rememberMe: viewModel.rememberMe,
+            rememberMe: true,
             showsFullErrors: showsFullErrorDetails,
             browserChallengeIsPresented: viewModel.browserChallenge != nil,
             helperIsPreparing: appModel.recaptchaBroker.isPreparing,

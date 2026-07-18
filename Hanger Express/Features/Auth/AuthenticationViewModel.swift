@@ -21,12 +21,10 @@ final class AuthenticationViewModel {
     var step: Step = .signIn
     var loginIdentifier = ""
     var password = ""
-    var rememberMe = true
     var verificationCode = ""
     var captchaCode = ""
     var captchaImageData: Data?
     var deviceName = AuthorizedDevice.hangarExpressDeviceName
-    var trustDuration: TrustedDeviceDuration = .year
     var noticeMessage: String?
     var errorMessage: String?
     var errorDebugDetails: String?
@@ -43,7 +41,6 @@ final class AuthenticationViewModel {
         if let draft = appModel.consumePendingAuthenticationDraft() {
             loginIdentifier = draft.loginIdentifier
             password = draft.password
-            rememberMe = draft.rememberMe
             noticeMessage = draft.notice
         }
     }
@@ -65,7 +62,7 @@ final class AuthenticationViewModel {
             let result = try await authService.signIn(
                 loginIdentifier: loginIdentifier,
                 password: password,
-                rememberMe: rememberMe,
+                rememberMe: true,
                 forceBrowserLogin: forceBrowserLogin
             )
 
@@ -126,7 +123,7 @@ final class AuthenticationViewModel {
             let session = try await authService.submitTwoFactor(
                 code: verificationCode,
                 deviceName: deviceName,
-                trustDuration: trustDuration
+                trustDuration: .year
             )
 
             password = ""
