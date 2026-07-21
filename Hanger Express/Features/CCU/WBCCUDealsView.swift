@@ -1,4 +1,5 @@
 import Foundation
+import SafariServices
 import SwiftUI
 
 struct WBCCUDealsView: View {
@@ -8,6 +9,7 @@ struct WBCCUDealsView: View {
     @State private var loadState: WBCCUDealsLoadState = .loading
     @State private var isRefreshing = false
     @State private var refreshErrorMessage: String?
+    @State private var browserDestination: WBCCUBrowserDestination?
 
     private let upgradeStoreURL = URL(string: "https://robertsspaceindustries.com/pledge-store/ship-upgrades")!
 
@@ -65,6 +67,10 @@ struct WBCCUDealsView: View {
             } message: {
                 Text(refreshErrorMessage ?? "")
             }
+            .sheet(item: $browserDestination) { destination in
+                WBCCUInAppBrowser(url: destination.url)
+                    .ignoresSafeArea()
+            }
         }
     }
 
@@ -82,8 +88,6 @@ struct WBCCUDealsView: View {
     private func dealsContent(deals: [WBCCUDeal], generatedAt: Date?) -> some View {
         ScrollView {
             LazyVStack(spacing: 16) {
-                WBCCUDealsHero(deals: deals)
-
                 if deals.isEmpty {
                     ContentUnavailableView(
                         "No WBCCU Deals",
@@ -96,14 +100,14 @@ struct WBCCUDealsView: View {
                         WBCCUDealCard(
                             deal: deal,
                             reloadToken: reloadToken,
-                            upgradeStoreURL: upgradeStoreURL
+                            onOpenStore: openUpgradeStore
                         )
                     }
                 }
 
                 WBCCUDealsSourceFooter(
                     generatedAt: generatedAt,
-                    upgradeStoreURL: upgradeStoreURL
+                    onOpenStore: openUpgradeStore
                 )
             }
             .padding(16)
@@ -111,6 +115,10 @@ struct WBCCUDealsView: View {
         .refreshable {
             await loadDeals(forceRefresh: true)
         }
+    }
+
+    private func openUpgradeStore() {
+        browserDestination = WBCCUBrowserDestination(url: upgradeStoreURL)
     }
 
     @MainActor
@@ -189,95 +197,10 @@ nonisolated struct WBCCUDeal: Identifiable, Hashable, Sendable {
     }
 }
 
-private struct WBCCUDealsHero: View {
-    let deals: [WBCCUDeal]
-
-    private var highestSavings: Decimal {
-        deals.map(\.offer.savingsUSD).max() ?? .zero
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("WARBOND WATCH")
-                        .font(.caption.weight(.heavy))
-                        .tracking(1.4)
-                        .foregroundStyle(.white.opacity(0.75))
-
-                    Text("Upgrade deals, live")
-                        .font(.title2.bold())
-                        .foregroundStyle(.white)
-
-                    Text("Current limited-time offers from StarCitizen-Info.")
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.8))
-                }
-
-                Spacer(minLength: 8)
-
-                Image(systemName: "bolt.horizontal.circle.fill")
-                    .font(.system(size: 42))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.white)
-            }
-
-            HStack(spacing: 12) {
-                WBCCUHeroMetric(
-                    value: liveDealCount,
-                    label: AppLocalizer.string("AVAILABLE")
-                )
-                WBCCUHeroMetric(
-                    value: highestSavings.usdString,
-                    label: AppLocalizer.string("BEST SAVING")
-                )
-            }
-        }
-        .padding(20)
-        .background(
-            LinearGradient(
-                colors: [Color(red: 0.03, green: 0.31, blue: 0.47), Color(red: 0.02, green: 0.57, blue: 0.54)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: RoundedRectangle(cornerRadius: 26, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .stroke(.white.opacity(0.14), lineWidth: 1)
-        )
-        .shadow(color: Color.teal.opacity(0.16), radius: 18, y: 8)
-    }
-
-    private var liveDealCount: String {
-        AppLocalizer.format("%lld Live Deals", Int64(deals.count))
-    }
-}
-
-private struct WBCCUHeroMetric: View {
-    let value: String
-    let label: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(value)
-                .font(.headline.bold())
-                .foregroundStyle(.white)
-            Text(label)
-                .font(.caption2.weight(.bold))
-                .tracking(0.8)
-                .foregroundStyle(.white.opacity(0.68))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(.white.opacity(0.11), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-    }
-}
-
 private struct WBCCUDealCard: View {
     let deal: WBCCUDeal
     let reloadToken: UUID?
-    let upgradeStoreURL: URL
+    let onOpenStore: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -319,7 +242,7 @@ private struct WBCCUDealCard: View {
 
                     Spacer()
 
-                    Link(destination: upgradeStoreURL) {
+                    Button(action: onOpenStore) {
                         Label("RSI Store", systemImage: "arrow.up.right")
                             .font(.subheadline.weight(.semibold))
                     }
@@ -414,7 +337,7 @@ private struct WBCCUDealCard: View {
 
 private struct WBCCUDealsSourceFooter: View {
     let generatedAt: Date?
-    let upgradeStoreURL: URL
+    let onOpenStore: () -> Void
 
     var body: some View {
         VStack(spacing: 10) {
@@ -432,7 +355,7 @@ private struct WBCCUDealsSourceFooter: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            Link(destination: upgradeStoreURL) {
+            Button(action: onOpenStore) {
                 Label("Open RSI Upgrade Store", systemImage: "safari")
                     .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
@@ -444,4 +367,25 @@ private struct WBCCUDealsSourceFooter: View {
         .padding(.top, 4)
         .padding(.bottom, 16)
     }
+}
+
+private struct WBCCUBrowserDestination: Identifiable {
+    let url: URL
+
+    var id: String { url.absoluteString }
+}
+
+private struct WBCCUInAppBrowser: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        let configuration = SFSafariViewController.Configuration()
+        configuration.barCollapsingEnabled = true
+
+        let browser = SFSafariViewController(url: url, configuration: configuration)
+        browser.dismissButtonStyle = .done
+        return browser
+    }
+
+    func updateUIViewController(_ browser: SFSafariViewController, context: Context) {}
 }
