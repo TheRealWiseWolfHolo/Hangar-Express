@@ -117,6 +117,87 @@ struct Hanger_ExpressTests {
         #expect(rebuiltCookie.isHTTPOnly)
     }
 
+    @Test func legacySessionsDecodeWithFullAccess() throws {
+        let original = makeUserSession(
+            handle: "legacy",
+            email: "legacy@example.com",
+            loginIdentifier: "legacy@example.com",
+            password: "secret",
+            createdAt: Date(timeIntervalSince1970: 100)
+        )
+        let encoded = try JSONEncoder().encode(original)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "accessLevel")
+
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(UserSession.self, from: legacyData)
+
+        #expect(decoded.accessLevel == .full)
+        #expect(decoded.hasStoredCredentials)
+    }
+
+    @Test func readOnlySessionsPersistWithoutCredentials() throws {
+        let session = UserSession(
+            handle: "readonly",
+            displayName: "Read Only",
+            email: "readonly@example.com",
+            authMode: .rsiNativeLogin,
+            accessLevel: .readOnly,
+            notes: "",
+            credentials: nil,
+            cookies: [makeSessionCookie(name: "Rsi-Token", value: "token")],
+            createdAt: Date(timeIntervalSince1970: 101)
+        )
+
+        let decoded = try JSONDecoder().decode(UserSession.self, from: JSONEncoder().encode(session))
+        #expect(decoded.isReadOnly)
+        #expect(!decoded.hasStoredCredentials)
+        #expect(decoded.credentials == nil)
+        #expect(decoded.updatingCookies([]).isReadOnly)
+    }
+
+    @Test func launcherResponseDecodesSessionAndDeviceTokens() throws {
+        let data = Data(#"{"success":1,"code":"OK","msg":"Success","data":{"session_id":"session-token","device_id":"device-token"}}"#.utf8)
+        let response = try JSONDecoder().decode(RSILauncherSignInResponse.self, from: data)
+
+        #expect(response.succeeded)
+        #expect(response.data?.sessionID == "session-token")
+        #expect(response.data?.deviceID == "device-token")
+    }
+
+    @Test func readOnlyAccountCannotStartPasswordConfirmedMelt() async throws {
+        let session = makeUserSession(
+            handle: "readonly-action",
+            email: "readonly-action@example.com",
+            loginIdentifier: "readonly-action@example.com",
+            password: "not-stored",
+            createdAt: Date(timeIntervalSince1970: 102),
+            accessLevel: .readOnly
+        )
+        let snapshot = PreviewHangarRepository.sampleSnapshot
+        let appModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: snapshot),
+                hangarRepository: FakeHangarRepository(hangarSnapshot: snapshot)
+            )
+        )
+        appModel.session = session
+        appModel.savedSessions = [session]
+        appModel.loadState = .loaded(snapshot)
+        let reclaimable = try #require(snapshot.packages.first { $0.canReclaim })
+        let group = try #require([reclaimable].groupedForInventoryDisplay.first)
+
+        do {
+            try await appModel.melt(packageGroup: group, quantity: 1)
+            Issue.record("Read-only melt unexpectedly succeeded")
+        } catch let error as HangarAccountActionError {
+            #expect(error == .readOnlySession)
+        }
+    }
+
     @Test func subscriptionEntitlementsClampRefreshWorkersByPlan() async throws {
         #expect(ProSubscriptionConfiguration.productIDs == Set(["0001", "0002", "HangarExpLTI"]))
         #expect(ProSubscriptionConfiguration.productIDOrder == ["0001", "0002", "HangarExpLTI"])
@@ -156,6 +237,54 @@ struct Hanger_ExpressTests {
         let subscriptionStore = SubscriptionStore(userDefaults: userDefaults, storeKitEnabled: false)
         #expect(subscriptionStore.hasLifetimePro)
         #expect(!subscriptionStore.hasActiveProSubscription)
+    }
+
+    @Test func inventoryAutoRefreshIntervalsResolveAndEvaluate() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let recentRefresh = now.addingTimeInterval(-60 * 60)
+        let staleRefresh = now.addingTimeInterval(-4 * 24 * 60 * 60)
+
+        #expect(
+            SyncPreferences.resolvedInventoryAutoRefreshInterval(from: nil)
+                == SyncPreferences.defaultInventoryAutoRefreshInterval
+        )
+        #expect(
+            SyncPreferences.resolvedInventoryAutoRefreshInterval(from: "not-a-real-interval")
+                == SyncPreferences.defaultInventoryAutoRefreshInterval
+        )
+        #expect(
+            SyncPreferences.resolvedInventoryAutoRefreshInterval(from: SyncPreferences.InventoryAutoRefreshInterval.never.rawValue)
+                == .never
+        )
+
+        #expect(
+            SyncPreferences.shouldAutoRefreshInventory(
+                lastRefreshAt: recentRefresh,
+                interval: .everyLaunch,
+                now: now
+            )
+        )
+        #expect(
+            SyncPreferences.shouldAutoRefreshInventory(
+                lastRefreshAt: staleRefresh,
+                interval: .threeDays,
+                now: now
+            )
+        )
+        #expect(
+            !SyncPreferences.shouldAutoRefreshInventory(
+                lastRefreshAt: recentRefresh,
+                interval: .threeDays,
+                now: now
+            )
+        )
+        #expect(
+            !SyncPreferences.shouldAutoRefreshInventory(
+                lastRefreshAt: staleRefresh,
+                interval: .never,
+                now: now
+            )
+        )
     }
 
     @Test func hangarLogFetchModesRespectSubscriptionLimits() async throws {
@@ -256,18 +385,19 @@ struct Hanger_ExpressTests {
             .hangarWarbond,
             .buyback
         ])
-        #expect(route.totalNewPurchaseCostUSD == 70)
-        #expect(route.totalStoreCreditNeededUSD == 50)
-        #expect(route.totalNewMoneyNeededUSD == 20)
-        #expect(route.totalEffectiveCostUSD == 125)
-        #expect(route.totalSavingsUSD == 35)
+        #expect(route.totalNewPurchaseCostUSD == 80)
+        #expect(route.totalStoreCreditNeededUSD == 0)
+        #expect(route.totalNewMoneyNeededUSD == 80)
+        #expect(route.sourceShipValueUSD == 30)
+        #expect(route.totalEffectiveCostUSD == 165)
+        #expect(route.totalSavingsUSD == 25)
         #expect(!route.hasUnavailableStoreStep)
 
         let buybackStep = try #require(route.steps.first { $0.kind == .buyback })
         let buybackPayment = try #require(route.paymentRequirement(for: buybackStep))
-        #expect(buybackPayment.purchaseCostUSD == 70)
-        #expect(buybackPayment.storeCreditUSD == 50)
-        #expect(buybackPayment.newMoneyUSD == 20)
+        #expect(buybackPayment.purchaseCostUSD == 80)
+        #expect(buybackPayment.storeCreditUSD == 0)
+        #expect(buybackPayment.newMoneyUSD == 80)
     }
 
     @Test func ccuPlannerChoosesHighestSavingOwnedWarbondUpgrade() throws {
@@ -371,6 +501,45 @@ struct Hanger_ExpressTests {
         #expect(storePayment.newMoneyUSD == 40)
     }
 
+    @Test func ccuPlannerValuesBuybackUpgradeAtShipPriceDifference() throws {
+        let catalogShips = CCUUpgradeCatalogShip.makeShips(from: makeCCUTestCatalog())
+        let snapshot = makeCCUTestSnapshot(
+            packages: [],
+            buyback: [
+                BuybackPledge(
+                    id: 202,
+                    title: "300i to Zeus Mk II MR CCU",
+                    recoveredValueUSD: 0,
+                    addedToBuybackAt: Date(timeIntervalSince1970: 2_000),
+                    notes: "Recovered from buy back."
+                )
+            ]
+        )
+
+        let source = try #require(catalogShips.first { $0.name == "300i" })
+        let destination = try #require(catalogShips.first { $0.name == "Zeus Mk II MR" })
+        let route = try #require(
+            CCUUpgradePlanner.bestRoute(
+                from: source,
+                to: destination,
+                snapshot: snapshot,
+                catalogShips: catalogShips
+            )
+        )
+
+        #expect(route.steps.map(\.kind) == [.buyback])
+        let buybackStep = try #require(route.steps.first)
+        #expect(buybackStep.currentValueUSD == 130)
+        #expect(buybackStep.effectiveCostUSD == 130)
+        #expect(buybackStep.newPurchaseCostUSD == 130)
+        #expect(route.totalSavingsUSD == 0)
+
+        let payment = try #require(route.paymentRequirement(for: buybackStep))
+        #expect(payment.purchaseCostUSD == 130)
+        #expect(payment.storeCreditUSD == 0)
+        #expect(payment.newMoneyUSD == 130)
+    }
+
     @Test func ccuPlannerUsesStoreWarbondCCUAsNewMoneyOnlyPurchase() throws {
         let catalog = makeCCUTestCatalog(
             storeUpgradeOffers: [
@@ -408,7 +577,8 @@ struct Hanger_ExpressTests {
         #expect(route.totalNewPurchaseCostUSD == 65)
         #expect(route.totalStoreCreditNeededUSD == 0)
         #expect(route.totalNewMoneyNeededUSD == 65)
-        #expect(route.totalEffectiveCostUSD == 65)
+        #expect(route.sourceShipValueUSD == 30)
+        #expect(route.totalEffectiveCostUSD == 95)
         #expect(route.totalSavingsUSD == 15)
 
         let storeWarbondStep = try #require(route.steps.first)
@@ -486,6 +656,104 @@ struct Hanger_ExpressTests {
         #expect(route.totalStoreCreditNeededUSD == 0)
         #expect(route.totalNewMoneyNeededUSD == 200)
         #expect(route.totalSavingsUSD == 25)
+    }
+
+    @Test func ccuPlannerUsesOwnedSourceShipMeltValue() throws {
+        let catalogShips = CCUUpgradeCatalogShip.makeShips(from: makeCCUTestCatalog())
+        let snapshot = makeCCUTestSnapshot(
+            fleet: [makeCCUTestFleetShip(id: 1, name: "300i", meltValueUSD: 45)],
+            packages: [],
+            buyback: []
+        )
+        let source = try #require(catalogShips.first { $0.name == "300i" })
+        let destination = try #require(catalogShips.first { $0.name == "Cutlass Black" })
+
+        let route = try #require(CCUUpgradePlanner.bestRoute(
+            from: source,
+            to: destination,
+            snapshot: snapshot,
+            catalogShips: catalogShips
+        ))
+
+        #expect(route.sourceShipValueUSD == 45)
+        #expect(route.totalEffectiveCostUSD == 95)
+        #expect(route.totalSavingsUSD == 15)
+    }
+
+    @Test func ccuPlannerRequiresSelectionForDifferentOwnedSourceValues() throws {
+        let catalogShips = CCUUpgradeCatalogShip.makeShips(from: makeCCUTestCatalog())
+        let snapshot = makeCCUTestSnapshot(
+            fleet: [
+                makeCCUTestFleetShip(id: 1, name: "300i", meltValueUSD: 40),
+                makeCCUTestFleetShip(id: 2, name: "300i", meltValueUSD: 50)
+            ],
+            packages: [],
+            buyback: []
+        )
+        let source = try #require(catalogShips.first { $0.name == "300i" })
+        let destination = try #require(catalogShips.first { $0.name == "Cutlass Black" })
+
+        #expect(CCUUpgradePlanner.bestRoute(
+            from: source,
+            to: destination,
+            snapshot: snapshot,
+            catalogShips: catalogShips
+        ) == nil)
+
+        let route = try #require(CCUUpgradePlanner.bestRoute(
+            from: source,
+            to: destination,
+            snapshot: snapshot,
+            catalogShips: catalogShips,
+            selectedSourceMeltValueUSD: 50
+        ))
+        #expect(route.sourceShipValueUSD == 50)
+        #expect(route.totalEffectiveCostUSD == 100)
+    }
+
+    @Test func ccuPlannerRecalculatesWithoutExcludedCCU() throws {
+        let catalogShips = CCUUpgradeCatalogShip.makeShips(from: makeCCUTestCatalog())
+        let snapshot = makeCCUTestSnapshot(
+            packages: [
+                makeCCUTestUpgradePackage(
+                    id: 100,
+                    title: "300i to Cutlass Black Best Upgrade",
+                    source: "300i",
+                    target: "Cutlass Black",
+                    currentValueUSD: 50,
+                    meltValueUSD: 20
+                ),
+                makeCCUTestUpgradePackage(
+                    id: 101,
+                    title: "300i to Cutlass Black Alternate Upgrade",
+                    source: "300i",
+                    target: "Cutlass Black",
+                    currentValueUSD: 50,
+                    meltValueUSD: 30
+                )
+            ],
+            buyback: []
+        )
+        let source = try #require(catalogShips.first { $0.name == "300i" })
+        let destination = try #require(catalogShips.first { $0.name == "Cutlass Black" })
+        let originalRoute = try #require(CCUUpgradePlanner.bestRoute(
+            from: source,
+            to: destination,
+            snapshot: snapshot,
+            catalogShips: catalogShips
+        ))
+        let excludedID = try #require(originalRoute.steps.first?.id)
+
+        let recalculatedRoute = try #require(CCUUpgradePlanner.bestRoute(
+            from: source,
+            to: destination,
+            snapshot: snapshot,
+            catalogShips: catalogShips,
+            excludedCandidateIDs: [excludedID]
+        ))
+
+        #expect(recalculatedRoute.steps.first?.title == "300i to Cutlass Black Alternate Upgrade")
+        #expect(recalculatedRoute.steps.first?.effectiveCostUSD == 30)
     }
 
     @Test func fileSnapshotStorePersistsSnapshotsByAccountKey() async throws {
@@ -908,6 +1176,111 @@ struct Hanger_ExpressTests {
         #expect(package.upgradedShipDisplayTitle == nil)
     }
 
+    @Test func standaloneLTIShipWithoutUpgradesIsOriginalConceptShip() async throws {
+        let package = HangarPackage(
+            id: 101,
+            title: "Standalone Ships - Fortune with Silverado Paint",
+            status: "Attributed",
+            insurance: "LTI",
+            insuranceOptions: ["LTI"],
+            acquiredAt: .now,
+            originalValueUSD: 275,
+            currentValueUSD: 300,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: false,
+            contents: [
+                PackageItem(
+                    id: "ship-101",
+                    title: "Fortune",
+                    detail: "MISC",
+                    category: .ship,
+                    imageURL: nil,
+                    upgradePricing: nil
+                ),
+                PackageItem(
+                    id: "paint-101",
+                    title: "Silverado Paint",
+                    detail: "Paint",
+                    category: .flair,
+                    imageURL: nil,
+                    upgradePricing: nil
+                ),
+                PackageItem(
+                    id: "insurance-101",
+                    title: "Lifetime Insurance",
+                    detail: "Insurance",
+                    category: .perk,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+
+        #expect(package.isOriginalConceptShip)
+    }
+
+    @Test func upgradedOrUpgradeContainingPledgesAreNotOriginalConceptShips() async throws {
+        let upgradedPackage = HangarPackage(
+            id: 102,
+            title: "Standalone Ships - UTV plus Wilderness Camo Paint",
+            status: "Attributed",
+            insurance: "LTI",
+            insuranceOptions: ["LTI"],
+            acquiredAt: .now,
+            originalValueUSD: 35,
+            currentValueUSD: 40,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: false,
+            isUpgradedStatusFlag: true,
+            contents: [
+                PackageItem(
+                    id: "ship-102",
+                    title: "Mustang Gamma",
+                    detail: "Consolidated Outland (CNOU)",
+                    category: .ship,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+        let upgradePackage = HangarPackage(
+            id: 103,
+            title: "Standalone Ships - Aurora MR with Upgrade",
+            status: "Attributed",
+            insurance: "LTI",
+            insuranceOptions: ["LTI"],
+            acquiredAt: .now,
+            originalValueUSD: 30,
+            currentValueUSD: 45,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: false,
+            contents: [
+                PackageItem(
+                    id: "ship-103",
+                    title: "Aurora MR",
+                    detail: "Roberts Space Industries",
+                    category: .ship,
+                    imageURL: nil,
+                    upgradePricing: nil
+                ),
+                PackageItem(
+                    id: "upgrade-103",
+                    title: "Aurora MR to 300i Upgrade",
+                    detail: "Upgrade",
+                    category: .upgrade,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+
+        #expect(!upgradedPackage.isOriginalConceptShip)
+        #expect(!upgradePackage.isOriginalConceptShip)
+    }
+
     @Test func missingUpgradedStatusFlagDoesNotMarkPledgeAsUpgraded() async throws {
         let package = HangarPackage(
             id: 101,
@@ -1115,6 +1488,55 @@ struct Hanger_ExpressTests {
 
         #expect(package.isUpgradeOnlyPledge)
         #expect(package.displayedInsurance == "LTI")
+    }
+
+    @Test func lifetimeInsuranceDetectionDoesNotMatchUltiFlexSubstring() async throws {
+        #expect(!HangarPackage.containsLifetimeInsuranceToken("UltiFlex Novian 'Xy'kara' Crossbow"))
+        #expect(HangarPackage.containsLifetimeInsuranceToken("LTI"))
+        #expect(HangarPackage.containsLifetimeInsuranceToken("Lifetime Insurance"))
+
+        let normalizedLevels = HangarPackage.normalizedInsuranceLevels([
+            "Syulen - Xy'kara Paint",
+            "UltiFlex Novian 'Xy'kara' Crossbow",
+            "Syang Fabrications Xy'kara Helmet"
+        ])
+        #expect(!normalizedLevels.contains("LTI"))
+
+        let cachedGearPackage = HangarPackage(
+            id: 108990477,
+            title: "Gear - Xy'kara - Bundle",
+            status: "Attributed",
+            insurance: "LTI",
+            insuranceOptions: ["LTI"],
+            acquiredAt: .now,
+            originalValueUSD: 20,
+            currentValueUSD: 20,
+            canGift: true,
+            canReclaim: true,
+            canUpgrade: false,
+            contents: [
+                PackageItem(
+                    id: "108990477-0",
+                    title: "Syulen - Xy'kara Paint",
+                    detail: "Gatac Manufacture ( GAMA )",
+                    category: .flair,
+                    imageURL: nil,
+                    upgradePricing: nil
+                ),
+                PackageItem(
+                    id: "108990477-1",
+                    title: "UltiFlex Novian 'Xy'kara' Crossbow",
+                    detail: "Unknown",
+                    category: .perk,
+                    imageURL: nil,
+                    upgradePricing: nil
+                )
+            ]
+        )
+
+        #expect(!cachedGearPackage.hasInsuranceBearingContent)
+        #expect(!cachedGearPackage.hasLifetimeInsurance)
+        #expect(cachedGearPackage.displayedInsurance == nil)
     }
 
     @Test func upgradeOnlyPledgePrefersHighestInsuranceButKeepsAllLevelsForDetails() async throws {
@@ -1662,7 +2084,8 @@ struct Hanger_ExpressTests {
 
         let service = RSIAuthService(
             recaptchaBroker: webSession,
-            diagnostics: AuthenticationDiagnosticsStore()
+            diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false
         )
         let outcome = try await service.signIn(
             loginIdentifier: "pilot@example.com",
@@ -1674,6 +2097,8 @@ struct Hanger_ExpressTests {
         switch outcome {
         case .requiresTwoFactor:
             break
+        case .requiresCaptcha:
+            Issue.record("Expected the auth flow to require a verification code, not a CAPTCHA.")
         case .authenticated:
             Issue.record("Expected the auth flow to require a verification code.")
         case let .requiresBrowserChallenge(message):
@@ -1703,6 +2128,7 @@ struct Hanger_ExpressTests {
         let service = RSIAuthService(
             recaptchaBroker: webSession,
             diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false,
             accountFetcher: { cookies in
                 #expect(cookies.map(\.name).sorted() == ["Rsi-Token", "_rsi_device"])
                 return AuthenticatedAccount(
@@ -1729,6 +2155,8 @@ struct Hanger_ExpressTests {
             #expect(session.cookies.count == 2)
         case .requiresTwoFactor:
             Issue.record("Expected browserless sign-in to authenticate immediately when RSI had already issued reusable session cookies.")
+        case .requiresCaptcha:
+            Issue.record("Expected browserless sign-in to authenticate immediately, not request a CAPTCHA.")
         case let .requiresBrowserChallenge(message):
             Issue.record("Expected browserless sign-in to authenticate immediately, but the service requested browser login instead: \(message)")
         }
@@ -1762,6 +2190,7 @@ struct Hanger_ExpressTests {
         let service = RSIAuthService(
             recaptchaBroker: webSession,
             diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false,
             accountFetcher: { cookies in
                 #expect(cookies.map(\.name).sorted() == ["Rsi-Token"])
                 return AuthenticatedAccount(
@@ -1803,6 +2232,76 @@ struct Hanger_ExpressTests {
         #expect(session.credentials?.loginIdentifier == "pilot@example.com")
     }
 
+    @Test func signInAutomaticallyStartsBrowserChallengeWhenHelperInitializationIsSlow() async throws {
+        let webSession = FakeAuthenticationWebSession(
+            signInResponse: BrowserGraphQLResponse(statusCode: 200, body: #"{"data":{"account_signin":null},"errors":[]}"#),
+            cookies: [
+                makeSessionCookie(name: "Rsi-Token", value: "rsi-token")
+            ],
+            resetError: AuthenticationError.unavailable("The RSI verification helper took more than 1.5 seconds to initialize.")
+        )
+
+        let service = RSIAuthService(
+            recaptchaBroker: webSession,
+            diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false,
+            accountFetcher: { cookies in
+                #expect(cookies.map(\.name) == ["Rsi-Token"])
+                return AuthenticatedAccount(
+                    avatar: "/avatar.png",
+                    displayname: "Pilot Example",
+                    email: "pilot@example.com",
+                    username: "PilotHandle"
+                )
+            }
+        )
+
+        do {
+            _ = try await service.signIn(
+                loginIdentifier: "pilot@example.com",
+                password: "secret-password",
+                rememberMe: true,
+                forceBrowserLogin: false
+            )
+            Issue.record("Expected a slow helper initialization to start browser-assisted sign-in.")
+        } catch let error as AuthenticationError {
+            guard case let .requiresBrowserChallenge(message) = error else {
+                Issue.record("Expected browser challenge fallback, got \(error).")
+                return
+            }
+
+            #expect(message.contains("in-app browser"))
+        } catch {
+            Issue.record("Expected AuthenticationError, got \(error).")
+        }
+
+        let session = try await service.completeBrowserAuthentication(
+            cookies: [
+                makeSessionCookie(name: "Rsi-Token", value: "rsi-token")
+            ],
+            trustBrowserSession: true
+        )
+
+        #expect(session.displayName == "Pilot Example")
+        #expect(session.credentials?.loginIdentifier == "pilot@example.com")
+    }
+
+    @Test func cloudflareIPRegionParserIdentifiesMainlandChina() {
+        let countryCode = CloudflareAuthenticationIPRegionChecker.countryCode(
+            fromCloudflareTrace: """
+            fl=123
+            h=www.cloudflare.com
+            loc=cn
+            tls=TLSv1.3
+            """
+        )
+
+        #expect(countryCode == "CN")
+        #expect(AuthenticationIPRegionCheckResult(countryCode: countryCode, errorDescription: nil).isMainlandChina)
+        #expect(!AuthenticationIPRegionCheckResult(countryCode: "HK", errorDescription: nil).isMainlandChina)
+        #expect(!AuthenticationIPRegionCheckResult(countryCode: "TW", errorDescription: nil).isMainlandChina)
+    }
+
     @Test func signInHumanizesInvalidCredentialsErrors() async throws {
         let webSession = FakeAuthenticationWebSession(
             signInResponse: BrowserGraphQLResponse(
@@ -1830,7 +2329,8 @@ struct Hanger_ExpressTests {
 
         let service = RSIAuthService(
             recaptchaBroker: webSession,
-            diagnostics: AuthenticationDiagnosticsStore()
+            diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false
         )
 
         do {
@@ -1880,7 +2380,8 @@ struct Hanger_ExpressTests {
 
         let service = RSIAuthService(
             recaptchaBroker: webSession,
-            diagnostics: AuthenticationDiagnosticsStore()
+            diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false
         )
 
         do {
@@ -1931,7 +2432,8 @@ struct Hanger_ExpressTests {
 
         let service = RSIAuthService(
             recaptchaBroker: webSession,
-            diagnostics: AuthenticationDiagnosticsStore()
+            diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false
         )
 
         do {
@@ -2004,7 +2506,8 @@ struct Hanger_ExpressTests {
 
         let service = RSIAuthService(
             recaptchaBroker: webSession,
-            diagnostics: AuthenticationDiagnosticsStore()
+            diagnostics: AuthenticationDiagnosticsStore(),
+            usesLauncherAPI: false
         )
         _ = try await service.signIn(
             loginIdentifier: "pilot@example.com",
@@ -2037,6 +2540,39 @@ struct Hanger_ExpressTests {
 
         #expect(path.sourceShipName == "Cutlass Black")
         #expect(path.targetShipName == "Zeus Mk II MR")
+    }
+
+    @Test func ccuCatalogShipsExcludeNonUpgradeableShips() throws {
+        let catalog = makeCCUTestCatalog(
+            additionalShips: [
+                makeCCUTestCatalogShip(
+                    id: 5,
+                    name: "Pioneer",
+                    manufacturer: "Consolidated Outland",
+                    msrpUSD: 850,
+                    storeAvailable: true
+                ),
+                makeCCUTestCatalogShip(
+                    id: 6,
+                    name: "Idris-M",
+                    manufacturer: "Aegis",
+                    msrpUSD: 1000,
+                    storeAvailable: true
+                ),
+                makeCCUTestCatalogShip(
+                    id: 7,
+                    name: "Idris-P",
+                    manufacturer: "Aegis",
+                    msrpUSD: 1900,
+                    storeAvailable: true
+                )
+            ]
+        )
+        let names = Set(CCUUpgradeCatalogShip.makeShips(from: catalog).map(\.name))
+
+        #expect(!names.contains("Pioneer"))
+        #expect(names.contains("Idris-M"))
+        #expect(!names.contains("Idris-P"))
     }
 
     @Test func shipCatalogMatchesHangarNamesWithManufacturerPrefixes() async throws {
@@ -2261,6 +2797,60 @@ struct Hanger_ExpressTests {
         #expect(offer.priceUSD == 95)
         #expect(offer.savingsUSD == 15)
         #expect(offer.available)
+    }
+
+    @Test func hostedShipCatalogStoreForceRefreshBypassesCachedCatalog() async throws {
+        let testID = UUID().uuidString
+        let feedURL = try #require(URL(string: "https://translation.example.com/\(testID)/ships.json"))
+        let stalePayload = Data(
+            """
+            {
+              "ships": [
+                {
+                  "id": "1",
+                  "name": "Stale Ship",
+                  "msrpUsd": 100
+                }
+              ]
+            }
+            """.utf8
+        )
+        let freshPayload = Data(
+            """
+            {
+              "ships": [
+                {
+                  "id": "2",
+                  "name": "Fresh Ship",
+                  "msrpUsd": 110
+                }
+              ]
+            }
+            """.utf8
+        )
+        let store = HostedShipCatalogStore()
+
+        TranslationMockURLProtocol.register(.response(statusCode: 200, data: stalePayload), for: feedURL)
+        let staleSession = makeTranslationMockURLSession()
+        let staleCatalog = try await store.catalog(
+            using: HostedShipCatalogClient(urls: [feedURL], urlSession: staleSession)
+        )
+        #expect(staleCatalog.matchShip(named: "Stale Ship") != nil)
+
+        TranslationMockURLProtocol.register(.response(statusCode: 200, data: freshPayload), for: feedURL)
+        let freshSession = makeTranslationMockURLSession()
+        let cachedCatalog = try await store.catalog(
+            using: HostedShipCatalogClient(urls: [feedURL], urlSession: freshSession)
+        )
+        #expect(cachedCatalog.matchShip(named: "Stale Ship") != nil)
+        #expect(cachedCatalog.matchShip(named: "Fresh Ship") == nil)
+
+        let refreshedCatalog = try await store.catalog(
+            using: HostedShipCatalogClient(urls: [feedURL], urlSession: freshSession),
+            forceRefresh: true
+        )
+        #expect(refreshedCatalog.matchShip(named: "Stale Ship") == nil)
+        #expect(refreshedCatalog.matchShip(named: "Fresh Ship") != nil)
     }
 
     @Test func hostedShipCatalogSplitsMultiRoleShipsIntoDistinctCategories() async throws {
@@ -2605,6 +3195,20 @@ struct Hanger_ExpressTests {
         #expect(
             adjacentTermText.restoringTerms(in: "HXTERM0000HX - HXTERM0001HX到HXTERM0002HXHXTERM0003HX")
                 == "升级 - 防卫者 到 瑞伦 标准版"
+        )
+
+        let splitEditionText = MaskedHangarItemText(
+            maskedText: "",
+            replacements: [
+                MaskedHangarItemText.Replacement(token: "HXTERM0000HX", translation: "战争债券"),
+                MaskedHangarItemText.Replacement(token: "HXTERM0001HX", translation: "版"),
+                MaskedHangarItemText.Replacement(token: "HXTERM0002HX", translation: "标准"),
+                MaskedHangarItemText.Replacement(token: "HXTERM0003HX", translation: "版")
+            ]
+        )
+        #expect(
+            splitEditionText.restoringTerms(in: "HXTERM0000HXHXTERM0001HX / HXTERM0002HXHXTERM0003HX")
+                == "战争债券版 / 标准版"
         )
 
         let spacingDictionary = try HangarItemTranslationDictionary(
@@ -3988,6 +4592,34 @@ struct Hanger_ExpressTests {
         #expect(await repository.giftRequests().isEmpty)
     }
 
+    @Test func characterRepairUsesSavedPasswordAndShowsCompletionBanner() async throws {
+        let session = makeUserSession(
+            handle: "repair-action",
+            email: "repair-action@example.com",
+            loginIdentifier: "repair-action@example.com",
+            password: "secret-repair",
+            createdAt: Date(timeIntervalSince1970: 911)
+        )
+        let repository = FakeHangarRepository()
+        let appModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: nil),
+                hangarRepository: repository
+            )
+        )
+        appModel.session = session
+        appModel.savedSessions = [session]
+
+        try await appModel.requestCharacterRepair()
+
+        #expect(await repository.characterRepairPasswords() == ["secret-repair"])
+        #expect(appModel.transientBanner?.title == "Success")
+        #expect(appModel.transientBanner?.message == "Your character has been reset")
+    }
+
     @Test func successfulUpgradeRemovesConsumedUpgradeImmediatelyWithoutVisibleRefreshState() async throws {
         let session = makeUserSession(
             handle: "upgrade-action",
@@ -4399,6 +5031,7 @@ private func makeCCUTestCatalogShip(
 
 private func makeCCUTestSnapshot(
     storeCreditUSD: Decimal = 0,
+    fleet: [FleetShip] = [],
     packages: [HangarPackage],
     buyback: [BuybackPledge]
 ) -> HangarSnapshot {
@@ -4407,8 +5040,23 @@ private func makeCCUTestSnapshot(
         lastSyncedAt: Date(timeIntervalSince1970: 1_000),
         storeCreditUSD: storeCreditUSD,
         packages: packages,
-        fleet: [],
+        fleet: fleet,
         buyback: buyback
+    )
+}
+
+private func makeCCUTestFleetShip(id: Int, name: String, meltValueUSD: Decimal) -> FleetShip {
+    FleetShip(
+        id: id,
+        displayName: name,
+        manufacturer: "Origin",
+        role: "Touring",
+        insurance: "6 Months",
+        sourcePackageID: id,
+        sourcePackageName: name,
+        meltValueUSD: meltValueUSD,
+        canGift: true,
+        canReclaim: true
     )
 }
 
@@ -4460,16 +5108,20 @@ private func makeUserSession(
     password: String,
     createdAt: Date,
     avatarURL: URL? = nil,
-    cookies: [SessionCookie] = []
+    cookies: [SessionCookie] = [],
+    accessLevel: UserSession.AccessLevel = .full
 ) -> UserSession {
     UserSession(
         handle: handle,
         displayName: handle,
         email: email,
         authMode: .rsiNativeLogin,
+        accessLevel: accessLevel,
         notes: "",
         avatarURL: avatarURL,
-        credentials: AccountCredentials(loginIdentifier: loginIdentifier, password: password),
+        credentials: accessLevel.isReadOnly
+            ? nil
+            : AccountCredentials(loginIdentifier: loginIdentifier, password: password),
         cookies: cookies,
         createdAt: createdAt
     )
@@ -4494,6 +5146,7 @@ private func makeTestAppEnvironment(
         sensitiveActionAuthorizer: PreviewSensitiveActionAuthorizer(),
         authService: PreviewAuthenticationService(diagnostics: diagnostics),
         recaptchaBroker: recaptchaBroker,
+        authIPRegionChecker: PreviewAuthenticationIPRegionChecker(),
         authDiagnostics: diagnostics,
         refreshDiagnostics: refreshDiagnostics,
         subscriptionStore: SubscriptionStore(storeKitEnabled: false)
@@ -4715,19 +5368,26 @@ private final class FakeAuthenticationWebSession: AuthenticationWebSessionProvid
     let signInResponse: BrowserGraphQLResponse
     let twoFactorResponse: BrowserGraphQLResponse
     let cookies: [SessionCookie]
+    let resetError: Error?
 
     init(
         signInResponse: BrowserGraphQLResponse,
         twoFactorResponse: BrowserGraphQLResponse = BrowserGraphQLResponse(statusCode: 200, body: #"{"data":{"account_multistep":null},"errors":[]}"#),
-        cookies: [SessionCookie] = []
+        cookies: [SessionCookie] = [],
+        resetError: Error? = nil
     ) {
         self.signInResponse = signInResponse
         self.twoFactorResponse = twoFactorResponse
         self.cookies = cookies
+        self.resetError = resetError
     }
 
     @MainActor
-    func resetAuthenticationSession() async throws {}
+    func resetAuthenticationSession() async throws {
+        if let resetError {
+            throw resetError
+        }
+    }
 
     @MainActor
     func signIn(loginIdentifier: String, password: String, rememberMe: Bool, query: String) async throws -> BrowserGraphQLResponse {
@@ -4942,6 +5602,7 @@ private actor FakeHangarRepository: HangarRepository {
     private var invokedScopes: [String] = []
     private var recordedMeltRequests: [[Int]] = []
     private var recordedGiftRequests: [[Int]] = []
+    private var recordedCharacterRepairPasswords: [String] = []
 
     init(
         snapshot: HangarSnapshot? = nil,
@@ -5027,7 +5688,8 @@ private actor FakeHangarRepository: HangarRepository {
         for session: UserSession,
         from snapshot: HangarSnapshot,
         mode _: HangarLogFetchMode,
-        progress: @escaping RefreshProgressHandler
+        progress: @escaping RefreshProgressHandler,
+        batchHandler _: HangarLogBatchHandler?
     ) async throws -> HangarSnapshot {
         invokedScopes.append("hangarLog")
         return snapshot
@@ -5113,6 +5775,20 @@ private actor FakeHangarRepository: HangarRepository {
         )
     }
 
+    func requestCharacterRepair(
+        for session: UserSession,
+        password: String
+    ) async throws -> CharacterRepairResult {
+        invokedScopes.append("characterRepair")
+        recordedCharacterRepairPasswords.append(password)
+
+        return CharacterRepairResult(
+            wasSuccessful: true,
+            failureMessage: nil,
+            updatedCookies: session.cookies
+        )
+    }
+
     func prepareBuybackCheckout(
         for session: UserSession,
         pledge: BuybackPledge
@@ -5189,5 +5865,9 @@ private actor FakeHangarRepository: HangarRepository {
 
     func giftRequests() -> [[Int]] {
         recordedGiftRequests
+    }
+
+    func characterRepairPasswords() -> [String] {
+        recordedCharacterRepairPasswords
     }
 }

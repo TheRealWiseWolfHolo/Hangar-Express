@@ -23,7 +23,7 @@ enum HangarItemLanguage: String, CaseIterable, Identifiable, Sendable {
     var label: some View {
         switch self {
         case .original:
-            Text("Original")
+            Text("English")
         case .simplifiedChinese:
             Text("简体中文")
         }
@@ -541,6 +541,8 @@ nonisolated struct MaskedHangarItemText: Equatable, Sendable {
                 with: " ",
                 options: .regularExpression
             )
+            .replacingOccurrences(of: "战争债券 版", with: "战争债券版")
+            .replacingOccurrences(of: "标准 版", with: "标准版")
             .replacingOccurrences(
                 of: #" ([,.;:!?，。！？；：、）】》])"#,
                 with: "$1",

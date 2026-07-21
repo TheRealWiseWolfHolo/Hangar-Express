@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct HangarLogView: View {
     private enum TimeFilter: CaseIterable, Identifiable {
@@ -50,6 +51,11 @@ struct HangarLogView: View {
         }
     }
 
+    private enum PresentationSyncPolicy {
+        case immediate
+        case buffered
+    }
+
     let appModel: AppModel
 
     @Environment(\.dismiss) private var dismiss
@@ -58,27 +64,32 @@ struct HangarLogView: View {
     @State private var timeFilter: TimeFilter = .all
     @State private var actionFilter: ActionFilter = .all
     @State private var didAttemptInitialLoad = false
-    @State private var visibleEntryCount = HangarLogFetchMode.initial.entryLimit
-    @State private var isRequestingOlderEntries = false
-    @State private var lastRemoteExpansionBaselineCount: Int?
+    @State private var isInitialRefreshPending = true
+    @State private var isDiagnosticsPresented = false
+    @State private var displayedPresentation = HangarLogPresentationSnapshot.empty
+    @State private var pendingPresentation: HangarLogPresentationSnapshot?
+    @State private var refreshViewState = HangarLogRefreshViewState()
+    @State private var isPresentationInteractionCoolingDown = false
+    @State private var presentationIdleTask: Task<Void, Never>?
     @State private var itemTranslationState = HangarItemTranslationViewState()
     @State private var translationService = OnDeviceHangarItemTranslationService.shared
+    @GestureState private var isLogListDragActive = false
     @Namespace private var logNavigationNamespace
 
     private var hangarLogs: [HangarLogEntry] {
-        appModel.snapshot?.hangarLogs ?? []
+        displayedPresentation.hangarLogs
     }
 
     private var currentPackageGroups: [GroupedHangarPackage] {
-        appModel.snapshot?.packages.groupedForInventoryDisplay ?? []
+        displayedPresentation.packageGroups
     }
 
     private var currentShipGroups: [GroupedFleetShip] {
-        appModel.snapshot?.fleet.groupedForFleetDisplay ?? []
+        displayedPresentation.shipGroups
     }
 
     private var planLimitedHangarLogs: [HangarLogEntry] {
-        Array(hangarLogs.prefix(appModel.hangarLogEntryLimit))
+        Array(hangarLogs.prefix(displayedPresentation.hangarLogEntryLimit))
     }
 
     private var filteredHangarLogs: [HangarLogEntry] {
@@ -87,28 +98,16 @@ struct HangarLogView: View {
         }
     }
 
-    private var displayedHangarLogs: [HangarLogEntry] {
-        Array(filteredHangarLogs.prefix(visibleEntryCount))
-    }
-
-    private var hasHiddenResults: Bool {
-        filteredHangarLogs.count > displayedHangarLogs.count
-    }
-
-    private var entryBatchSize: Int {
-        appModel.isPro ? 50 : appModel.hangarLogEntryLimit
-    }
-
     var body: some View {
         let currentItemTranslator = itemTranslator
+        let filteredLogs = filteredHangarLogs
 
         NavigationStack {
             List {
                 Section {
                     IMEAwareSearchRow(
                         text: $searchText,
-                        prompt: AppLocalizer.string("Search log entries"),
-                        onCommittedTextChange: resetVisibleEntryCount
+                        prompt: AppLocalizer.string("Search log entries")
                     )
 
                     HStack(spacing: 12) {
@@ -140,7 +139,7 @@ struct HangarLogView: View {
 
                         Spacer()
 
-                        Text("\(filteredHangarLogs.count)")
+                        Text("\(filteredLogs.count)")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
@@ -148,7 +147,7 @@ struct HangarLogView: View {
                     Text("Search items, pledge IDs, orders, or raw log text. Filters can narrow results by action and time window.")
                 }
 
-                if appModel.isRefreshing(.hangarLog), hangarLogs.isEmpty {
+                if isLoadingEmptyHangarLog {
                     Section {
                         VStack(alignment: .leading, spacing: 12) {
                             ProgressView()
@@ -158,43 +157,47 @@ struct HangarLogView: View {
                         }
                         .padding(.vertical, 12)
                     }
-                } else if filteredHangarLogs.isEmpty {
+                } else if filteredLogs.isEmpty {
                     Section {
-                        ContentUnavailableView(
-                            "No Log Entries",
-                            systemImage: "doc.text.magnifyingglass",
-                            description: Text(emptyStateDescription)
-                        )
-                    }
-                } else {
-                    Section {
-                        ForEach(displayedHangarLogs) { entry in
-                            logRow(for: entry, itemTranslator: currentItemTranslator)
+                        ContentUnavailableView {
+                            Label("No Log Entries", systemImage: "doc.text.magnifyingglass")
+                        } description: {
+                            Text(emptyStateDescription)
+                        } actions: {
+                            Button("Show Refresh Logs") {
+                                isDiagnosticsPresented = true
+                            }
+                            .buttonStyle(.bordered)
                         }
                     }
-
-                    if hasHiddenResults {
+                } else {
+                    if hasPendingPresentationUpdate {
                         Section {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text("Showing \(displayedHangarLogs.count) of \(filteredHangarLogs.count) log entries.")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-
+                            Button {
+                                applyPendingPresentation(force: true)
+                            } label: {
                                 HStack(spacing: 12) {
-                                    Button("Load More") {
-                                        revealNextBatch()
+                                    if refreshViewState.isHangarLogRefreshing {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    } else {
+                                        Image(systemName: "arrow.down.doc")
+                                            .foregroundStyle(Color.accentColor)
                                     }
-                                    .buttonStyle(.bordered)
 
-                                    Button("Load All") {
-                                        visibleEntryCount = filteredHangarLogs.count
-                                    }
-                                    .buttonStyle(.borderedProminent)
+                                    Text(AppLocalizer.format("Show %lld loaded log entries", pendingLoadedEntryCount))
+                                        .font(.subheadline.weight(.semibold))
 
                                     Spacer()
                                 }
+                                .contentShape(Rectangle())
                             }
-                            .padding(.vertical, 6)
+                        }
+                    }
+
+                    Section {
+                        ForEach(filteredLogs) { entry in
+                            logRow(for: entry, itemTranslator: currentItemTranslator)
                         }
                     }
 
@@ -218,6 +221,12 @@ struct HangarLogView: View {
                 }
             }
             .listStyle(.insetGrouped)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 2)
+                    .updating($isLogListDragActive) { _, state, _ in
+                        state = true
+                    }
+            )
             .navigationTitle("Hangar Log")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -226,51 +235,79 @@ struct HangarLogView: View {
                     }
                 }
 
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        syncRefreshViewStateFromAppModel()
+                        isDiagnosticsPresented = true
+                    } label: {
+                        Label("Logs", systemImage: "doc.text.magnifyingglass")
+                    }
+
                     Button {
                         Task {
                             await appModel.refresh(scope: .hangarLog)
+                            syncPresentationFromAppModel(policy: .buffered)
                         }
                     } label: {
-                        Text(appModel.isRefreshing(.hangarLog) ? LocalizedStringKey("Refreshing...") : LocalizedStringKey("Refresh"))
+                        Text(refreshViewState.isHangarLogRefreshing ? LocalizedStringKey("Refreshing...") : LocalizedStringKey("Refresh"))
                     }
-                    .disabled(appModel.isRefreshing)
+                    .disabled(refreshViewState.isAnyRefreshing)
                 }
             }
+            .sheet(isPresented: $isDiagnosticsPresented) {
+                HangarLogDiagnosticsView(
+                    entries: refreshViewState.diagnosticsEntries,
+                    progress: refreshViewState.progress,
+                    errorMessage: refreshViewState.errorMessage
+                )
+            }
             .task {
+                syncPresentationFromAppModel(policy: .immediate)
                 guard !didAttemptInitialLoad else {
                     return
                 }
 
                 didAttemptInitialLoad = true
-                resetVisibleEntryCount()
                 guard hangarLogs.isEmpty else {
+                    isInitialRefreshPending = false
+                    return
+                }
+
+                isInitialRefreshPending = true
+                defer {
+                    isInitialRefreshPending = false
+                }
+
+                await Task.yield()
+                guard !Task.isCancelled,
+                      hangarLogs.isEmpty else {
                     return
                 }
 
                 await appModel.refresh(scope: .hangarLog)
             }
+            .task {
+                await runPresentationSynchronizationLoop()
+            }
             .task(id: hangarItemLanguageRawValue) {
                 await loadItemTranslationDictionary()
-                resetVisibleEntryCount()
-            }
-            .onChange(of: searchText) { _, _ in
-                resetVisibleEntryCount()
-            }
-            .onChange(of: timeFilter) { _, _ in
-                resetVisibleEntryCount()
-            }
-            .onChange(of: actionFilter) { _, _ in
-                resetVisibleEntryCount()
             }
             .onChange(of: hangarLogs.count) { _, newCount in
-                if let lastRemoteExpansionBaselineCount,
-                   newCount > lastRemoteExpansionBaselineCount {
-                    self.lastRemoteExpansionBaselineCount = nil
+                if newCount > 0 {
+                    isInitialRefreshPending = false
                 }
             }
-            .onChange(of: appModel.isPro) { _, _ in
-                resetVisibleEntryCount()
+            .onChange(of: isLogListDragActive) { _, isActive in
+                updatePresentationInteractionState(isActive: isActive)
+            }
+            .onChange(of: isDiagnosticsPresented) { _, isPresented in
+                if isPresented {
+                    syncRefreshViewStateFromAppModel()
+                }
+            }
+            .onDisappear {
+                presentationIdleTask?.cancel()
+                presentationIdleTask = nil
             }
         }
     }
@@ -283,8 +320,128 @@ struct HangarLogView: View {
         await itemTranslationState.loadDictionary(for: hangarItemLanguageRawValue)
     }
 
+    @MainActor
+    private func runPresentationSynchronizationLoop() async {
+        syncPresentationFromAppModel(policy: .buffered)
+
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(for: .milliseconds(500))
+            } catch {
+                return
+            }
+
+            syncPresentationFromAppModel(policy: .buffered)
+        }
+    }
+
+    @MainActor
+    private func syncPresentationFromAppModel(policy: PresentationSyncPolicy) {
+        syncRefreshViewStateFromAppModel()
+
+        guard let sourceSnapshot = appModel.hangarLogPresentationSnapshot else {
+            return
+        }
+
+        let nextPresentation = HangarLogPresentationSnapshot(
+            snapshot: sourceSnapshot,
+            isPro: appModel.isPro,
+            hangarLogEntryLimit: appModel.hangarLogEntryLimit,
+            imageReloadToken: appModel.hangarFleetImageReloadToken,
+            reusing: displayedPresentation
+        )
+
+        guard !nextPresentation.hasSameDisplay(as: displayedPresentation) else {
+            pendingPresentation = nil
+            return
+        }
+
+        let shouldApplyImmediately = policy == .immediate
+            || displayedPresentation.hangarLogs.isEmpty
+            || (!refreshViewState.isHangarLogRefreshing && !isPresentationInteractionCoolingDown)
+
+        if shouldApplyImmediately {
+            displayedPresentation = nextPresentation
+            pendingPresentation = nil
+        } else {
+            pendingPresentation = nextPresentation
+        }
+    }
+
+    @MainActor
+    private func syncRefreshViewStateFromAppModel() {
+        let nextState = HangarLogRefreshViewState(
+            isAnyRefreshing: appModel.isRefreshing,
+            isHangarLogRefreshing: appModel.isRefreshing(.hangarLog),
+            progress: appModel.refreshProgress,
+            errorMessage: appModel.lastRefreshErrorMessage,
+            diagnosticsEntries: appModel.refreshDiagnostics.entries
+        )
+
+        if nextState != refreshViewState {
+            refreshViewState = nextState
+        }
+    }
+
+    @MainActor
+    private func applyPendingPresentation(force: Bool) {
+        guard let pendingPresentation,
+              !pendingPresentation.hasSameDisplay(as: displayedPresentation) else {
+            self.pendingPresentation = nil
+            return
+        }
+
+        guard force || (!refreshViewState.isHangarLogRefreshing && !isPresentationInteractionCoolingDown) else {
+            return
+        }
+
+        displayedPresentation = pendingPresentation
+        self.pendingPresentation = nil
+    }
+
+    @MainActor
+    private func updatePresentationInteractionState(isActive: Bool) {
+        if isActive {
+            isPresentationInteractionCoolingDown = true
+            presentationIdleTask?.cancel()
+            presentationIdleTask = nil
+            return
+        }
+
+        presentationIdleTask?.cancel()
+        presentationIdleTask = Task {
+            do {
+                try await Task.sleep(for: .milliseconds(900))
+            } catch {
+                return
+            }
+
+            await MainActor.run {
+                isPresentationInteractionCoolingDown = false
+                syncPresentationFromAppModel(policy: .buffered)
+                applyPendingPresentation(force: false)
+            }
+        }
+    }
+
     private var shouldShowProLogLimitMessage: Bool {
-        !appModel.isPro && hangarLogs.count >= appModel.hangarLogEntryLimit
+        !displayedPresentation.isPro && hangarLogs.count >= displayedPresentation.hangarLogEntryLimit
+    }
+
+    private var isLoadingEmptyHangarLog: Bool {
+        hangarLogs.isEmpty && (isInitialRefreshPending || refreshViewState.isHangarLogRefreshing)
+    }
+
+    private var hasPendingPresentationUpdate: Bool {
+        guard let pendingPresentation else {
+            return false
+        }
+
+        return !pendingPresentation.hasSameDisplay(as: displayedPresentation)
+    }
+
+    private var pendingLoadedEntryCount: Int {
+        pendingPresentation?.hangarLogs.count ?? hangarLogs.count
     }
 
     private var emptyStateDescription: String {
@@ -312,9 +469,6 @@ struct HangarLogView: View {
                     destinationSummary: destination?.rowSummary(using: itemTranslator)
                 )
             }
-            .onAppear {
-                loadMoreIfNeeded(currentEntry: entry)
-            }
         case let .ship(shipGroup):
             NavigationLink {
                 destinationView(for: .ship(shipGroup), itemTranslator: itemTranslator)
@@ -334,9 +488,6 @@ struct HangarLogView: View {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                 )
             }
-            .onAppear {
-                loadMoreIfNeeded(currentEntry: entry)
-            }
         case nil:
             HangarLogRow(
                 entry: entry,
@@ -344,9 +495,6 @@ struct HangarLogView: View {
                 itemTranslator: itemTranslator,
                 destinationSummary: nil
             )
-            .onAppear {
-                loadMoreIfNeeded(currentEntry: entry)
-            }
         }
     }
 
@@ -361,13 +509,13 @@ struct HangarLogView: View {
                 appModel: appModel,
                 packageGroup: packageGroup,
                 itemTranslator: itemTranslator,
-                reloadToken: appModel.hangarFleetImageReloadToken
+                reloadToken: displayedPresentation.imageReloadToken
             )
         case let .ship(shipGroup):
             FleetShipDetailView(
                 shipGroup: shipGroup,
                 itemTranslator: itemTranslator,
-                reloadToken: appModel.hangarFleetImageReloadToken,
+                reloadToken: displayedPresentation.imageReloadToken,
                 transitionNamespace: logNavigationNamespace
             )
         }
@@ -495,9 +643,7 @@ struct HangarLogView: View {
         }
 
         for pledgeID in navigationPledgeIDs(for: entry) {
-            if let package = currentPackageGroups
-                .flatMap(\.packages)
-                .first(where: { $0.id == pledgeID }) {
+            if let package = displayedPresentation.packageByPledgeID[pledgeID] {
                 return package
             }
         }
@@ -506,19 +652,11 @@ struct HangarLogView: View {
     }
 
     private func packageGroup(containingPledgeID pledgeID: Int) -> GroupedHangarPackage? {
-        currentPackageGroups.first { packageGroup in
-            packageGroup.packages.contains { package in
-                package.id == pledgeID
-            }
-        }
+        displayedPresentation.packageGroupByPledgeID[pledgeID]
     }
 
     private func shipGroup(sourcePackageID pledgeID: Int) -> GroupedFleetShip? {
-        currentShipGroups.first { shipGroup in
-            shipGroup.ships.contains { ship in
-                ship.sourcePackageID == pledgeID
-            }
-        }
+        displayedPresentation.shipGroupBySourcePackageID[pledgeID]
     }
 
     private func packageGroup(matchingTitle rawTitle: String) -> GroupedHangarPackage? {
@@ -527,20 +665,17 @@ struct HangarLogView: View {
             return nil
         }
 
-        return currentPackageGroups.first { packageGroup in
-            packageGroup.packages.contains { package in
-                normalizedLookupText(package.title) == normalizedTitle
-                    || package.contents.contains { item in
-                        normalizedLookupText(item.title) == normalizedTitle
-                    }
-            }
-        }
+        return displayedPresentation.packageGroupByNormalizedTitle[normalizedTitle]
     }
 
     private func shipGroup(matchingName rawName: String) -> GroupedFleetShip? {
         let normalizedName = normalizedLookupText(rawName)
         guard !normalizedName.isEmpty else {
             return nil
+        }
+
+        if let exactMatch = displayedPresentation.shipGroupByNormalizedName[normalizedName] {
+            return exactMatch
         }
 
         return currentShipGroups.first { shipGroup in
@@ -566,10 +701,7 @@ struct HangarLogView: View {
     }
 
     private func normalizedLookupText(_ value: String) -> String {
-        value
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .localizedLowercase
+        hangarLogNormalizedLookupText(value)
     }
 
     @ViewBuilder
@@ -652,52 +784,302 @@ struct HangarLogView: View {
         }
     }
 
-    private func resetVisibleEntryCount() {
-        visibleEntryCount = min(entryBatchSize, filteredHangarLogs.count)
-        lastRemoteExpansionBaselineCount = nil
+}
+
+private struct HangarLogRefreshViewState: Equatable {
+    var isAnyRefreshing = false
+    var isHangarLogRefreshing = false
+    var progress: RefreshProgress?
+    var errorMessage: String?
+    var diagnosticsEntries: [RefreshDiagnosticsStore.Entry] = []
+}
+
+private struct HangarLogPresentationSnapshot {
+    static let empty = HangarLogPresentationSnapshot(
+        hangarLogs: [],
+        packageGroups: [],
+        shipGroups: [],
+        packageSignature: .empty,
+        fleetSignature: .empty,
+        isPro: false,
+        hangarLogEntryLimit: ProSubscriptionConfiguration.standardHangarLogEntryLimit,
+        imageReloadToken: UUID()
+    )
+
+    let hangarLogs: [HangarLogEntry]
+    let packageGroups: [GroupedHangarPackage]
+    let shipGroups: [GroupedFleetShip]
+    let packageSignature: HangarLogCollectionSignature<Int>
+    let fleetSignature: HangarLogCollectionSignature<Int>
+    let isPro: Bool
+    let hangarLogEntryLimit: Int
+    let imageReloadToken: UUID
+    let packageByPledgeID: [Int: HangarPackage]
+    let packageGroupByPledgeID: [Int: GroupedHangarPackage]
+    let packageGroupByNormalizedTitle: [String: GroupedHangarPackage]
+    let shipGroupBySourcePackageID: [Int: GroupedFleetShip]
+    let shipGroupByNormalizedName: [String: GroupedFleetShip]
+    private let displayIdentity: HangarLogPresentationIdentity
+
+    init(
+        snapshot: HangarSnapshot,
+        isPro: Bool,
+        hangarLogEntryLimit: Int,
+        imageReloadToken: UUID,
+        reusing previous: HangarLogPresentationSnapshot?
+    ) {
+        let packageSignature = HangarLogCollectionSignature(values: snapshot.packages.map(\.id))
+        let fleetSignature = HangarLogCollectionSignature(values: snapshot.fleet.map(\.id))
+        let packageGroups = previous?.packageSignature == packageSignature
+            ? previous?.packageGroups ?? []
+            : snapshot.packages.groupedForInventoryDisplay
+        let shipGroups = previous?.fleetSignature == fleetSignature
+            ? previous?.shipGroups ?? []
+            : snapshot.fleet.groupedForFleetDisplay
+
+        self.init(
+            hangarLogs: snapshot.hangarLogs,
+            packageGroups: packageGroups,
+            shipGroups: shipGroups,
+            packageSignature: packageSignature,
+            fleetSignature: fleetSignature,
+            isPro: isPro,
+            hangarLogEntryLimit: hangarLogEntryLimit,
+            imageReloadToken: imageReloadToken
+        )
     }
 
-    private func loadMoreIfNeeded(currentEntry: HangarLogEntry) {
-        guard hasHiddenResults else {
-            attemptRemoteExpansionIfNeeded(currentEntry: currentEntry)
-            return
-        }
+    private init(
+        hangarLogs: [HangarLogEntry],
+        packageGroups: [GroupedHangarPackage],
+        shipGroups: [GroupedFleetShip],
+        packageSignature: HangarLogCollectionSignature<Int>,
+        fleetSignature: HangarLogCollectionSignature<Int>,
+        isPro: Bool,
+        hangarLogEntryLimit: Int,
+        imageReloadToken: UUID
+    ) {
+        self.hangarLogs = hangarLogs
+        self.packageGroups = packageGroups
+        self.shipGroups = shipGroups
+        self.packageSignature = packageSignature
+        self.fleetSignature = fleetSignature
+        self.isPro = isPro
+        self.hangarLogEntryLimit = hangarLogEntryLimit
+        self.imageReloadToken = imageReloadToken
 
-        let trailingEntries = displayedHangarLogs.suffix(8)
-        guard trailingEntries.contains(where: { $0.id == currentEntry.id }) else {
-            return
-        }
+        var packageByPledgeID: [Int: HangarPackage] = [:]
+        var packageGroupByPledgeID: [Int: GroupedHangarPackage] = [:]
+        var packageGroupByNormalizedTitle: [String: GroupedHangarPackage] = [:]
+        for packageGroup in packageGroups {
+            for package in packageGroup.packages {
+                packageByPledgeID[package.id] = package
+                packageGroupByPledgeID[package.id] = packageGroup
 
-        revealNextBatch()
-    }
+                let packageTitle = hangarLogNormalizedLookupText(package.title)
+                if !packageTitle.isEmpty, packageGroupByNormalizedTitle[packageTitle] == nil {
+                    packageGroupByNormalizedTitle[packageTitle] = packageGroup
+                }
 
-    private func revealNextBatch() {
-        visibleEntryCount = min(visibleEntryCount + entryBatchSize, filteredHangarLogs.count)
-    }
-
-    private func attemptRemoteExpansionIfNeeded(currentEntry: HangarLogEntry) {
-        guard searchText.isEmpty,
-              timeFilter == .all,
-              actionFilter == .all,
-              appModel.isPro,
-              !appModel.isRefreshing(.hangarLog),
-              !isRequestingOlderEntries,
-              displayedHangarLogs.last?.id == currentEntry.id,
-              displayedHangarLogs.count == planLimitedHangarLogs.count,
-              hangarLogs.count >= HangarLogFetchMode.initial.entryLimit,
-              hangarLogs.count < appModel.hangarLogEntryLimit,
-              lastRemoteExpansionBaselineCount != hangarLogs.count else {
-            return
-        }
-
-        lastRemoteExpansionBaselineCount = hangarLogs.count
-        isRequestingOlderEntries = true
-
-        Task {
-            await appModel.loadMoreHangarLogEntries()
-            await MainActor.run {
-                isRequestingOlderEntries = false
+                for item in package.contents {
+                    let itemTitle = hangarLogNormalizedLookupText(item.title)
+                    if !itemTitle.isEmpty, packageGroupByNormalizedTitle[itemTitle] == nil {
+                        packageGroupByNormalizedTitle[itemTitle] = packageGroup
+                    }
+                }
             }
+        }
+
+        var shipGroupBySourcePackageID: [Int: GroupedFleetShip] = [:]
+        var shipGroupByNormalizedName: [String: GroupedFleetShip] = [:]
+        for shipGroup in shipGroups {
+            for ship in shipGroup.ships {
+                shipGroupBySourcePackageID[ship.sourcePackageID] = shipGroup
+
+                let shipName = hangarLogNormalizedLookupText(ship.displayName)
+                if !shipName.isEmpty, shipGroupByNormalizedName[shipName] == nil {
+                    shipGroupByNormalizedName[shipName] = shipGroup
+                }
+            }
+        }
+
+        self.packageByPledgeID = packageByPledgeID
+        self.packageGroupByPledgeID = packageGroupByPledgeID
+        self.packageGroupByNormalizedTitle = packageGroupByNormalizedTitle
+        self.shipGroupBySourcePackageID = shipGroupBySourcePackageID
+        self.shipGroupByNormalizedName = shipGroupByNormalizedName
+        displayIdentity = HangarLogPresentationIdentity(
+            logIDs: hangarLogs.map(\.id),
+            packageSignature: packageSignature,
+            fleetSignature: fleetSignature,
+            isPro: isPro,
+            hangarLogEntryLimit: hangarLogEntryLimit,
+            imageReloadToken: imageReloadToken
+        )
+    }
+
+    func hasSameDisplay(as other: HangarLogPresentationSnapshot) -> Bool {
+        displayIdentity == other.displayIdentity
+    }
+}
+
+private struct HangarLogPresentationIdentity: Equatable {
+    let logIDs: [String]
+    let packageSignature: HangarLogCollectionSignature<Int>
+    let fleetSignature: HangarLogCollectionSignature<Int>
+    let isPro: Bool
+    let hangarLogEntryLimit: Int
+    let imageReloadToken: UUID
+}
+
+private struct HangarLogCollectionSignature<Value: Equatable>: Equatable {
+    static var empty: Self {
+        HangarLogCollectionSignature(values: [])
+    }
+
+    let values: [Value]
+}
+
+private func hangarLogNormalizedLookupText(_ value: String) -> String {
+    value
+        .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .localizedLowercase
+}
+
+private struct HangarLogDiagnosticsView: View {
+    let entries: [RefreshDiagnosticsStore.Entry]
+    let progress: RefreshProgress?
+    let errorMessage: String?
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let progress {
+                    Section("Current Refresh") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(progress.stage.title)
+                                .font(.headline)
+                            Text(progress.detail)
+                                .foregroundStyle(.secondary)
+                            if let fraction = progress.displayFractionCompleted {
+                                ProgressView(value: fraction)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
+                if let errorMessage,
+                   !errorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Section("Last Error") {
+                        Text(errorMessage)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if entries.isEmpty {
+                    Section {
+                        ContentUnavailableView(
+                            "No Refresh Logs",
+                            systemImage: "doc.text.magnifyingglass",
+                            description: Text("Run a Hangar Log refresh, then open this view again.")
+                        )
+                    }
+                } else {
+                    Section("Refresh Logs") {
+                        ForEach(entries.reversed()) { entry in
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text(entry.timestampLabel)
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+
+                                    Text(entry.level.rawValue)
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(color(for: entry.level))
+
+                                    Text(entry.stage)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Text(entry.summary)
+                                    .font(.subheadline.weight(.semibold))
+
+                                if let detail = entry.detail {
+                                    Text(detail)
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Refresh Logs")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Copy") {
+                        UIPasteboard.general.string = reportText
+                    }
+                    .disabled(reportText.isEmpty)
+                }
+            }
+        }
+    }
+
+    private var reportText: String {
+        var sections: [String] = []
+
+        if let progress {
+            sections.append("Current Refresh")
+            sections.append("\(progress.stage.title)\n\(progress.detail)")
+        }
+
+        if let errorMessage,
+           !errorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            sections.append("Last Error")
+            sections.append(errorMessage)
+        }
+
+        if !entries.isEmpty {
+            sections.append("Refresh Logs")
+            sections.append(
+                entries.map { entry in
+                    let base = "[\(entry.timestampLabel)] \(entry.level.rawValue) \(entry.stage)\n\(entry.summary)"
+                    guard let detail = entry.detail else {
+                        return base
+                    }
+
+                    return "\(base)\n\(detail)"
+                }
+                .joined(separator: "\n\n")
+            )
+        }
+
+        return sections.joined(separator: "\n\n")
+    }
+
+    private func color(for level: RefreshDiagnosticsStore.Entry.Level) -> Color {
+        switch level {
+        case .info:
+            return .secondary
+        case .warning:
+            return .orange
+        case .error:
+            return .red
         }
     }
 }

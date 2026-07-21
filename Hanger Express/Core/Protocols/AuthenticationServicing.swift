@@ -81,7 +81,9 @@ protocol AuthenticationServicing: Sendable {
         rememberMe: Bool,
         forceBrowserLogin: Bool
     ) async throws -> SignInOutcome
+    func submitCaptcha(_ code: String) async throws -> SignInOutcome
     func submitTwoFactor(code: String, deviceName: String, trustDuration: TrustedDeviceDuration) async throws -> UserSession
+    func beginReadOnlySignIn() async throws -> SignInOutcome
     func rememberBrowserExportedCookies(_ cookies: [SessionCookie]) async
     func canCompleteBrowserAuthentication(cookies: [SessionCookie]) async -> Bool
     func completeBrowserAuthentication(cookies: [SessionCookie], trustBrowserSession: Bool) async throws -> UserSession
@@ -90,6 +92,7 @@ protocol AuthenticationServicing: Sendable {
 
 enum SignInOutcome: Sendable {
     case authenticated(UserSession)
+    case requiresCaptcha(Data)
     case requiresTwoFactor
     case requiresBrowserChallenge(String)
 }

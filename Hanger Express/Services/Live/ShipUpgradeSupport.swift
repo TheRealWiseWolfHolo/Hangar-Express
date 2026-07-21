@@ -516,8 +516,12 @@ actor HostedShipCatalogStore {
 
     private var cachedCatalog: RSIShipCatalog?
 
-    func catalog(using client: HostedShipCatalogClient) async throws -> RSIShipCatalog {
-        if let cachedCatalog {
+    func catalog(
+        using client: HostedShipCatalogClient,
+        forceRefresh: Bool = false
+    ) async throws -> RSIShipCatalog {
+        if !forceRefresh,
+           let cachedCatalog {
             return cachedCatalog
         }
 

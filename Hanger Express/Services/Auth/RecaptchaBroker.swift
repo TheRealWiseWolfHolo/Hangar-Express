@@ -26,14 +26,17 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
     // so the login mutations must run inside the web view instead of a separate URLSession.
     static let helperURL = URL(string: "https://robertsspaceindustries.com/en/")!
     static let siteKey = "6LerBOgUAAAAAKPg6vsAFPTN66Woz-jBClxdQU-o"
+    private static let helperInitializationTimeoutNanoseconds: UInt64 = 1_500_000_000
 
     private let diagnostics: AuthenticationDiagnosticsStore
     private weak var webView: WKWebView?
     private var isReady = false
     private var readyError: Error?
+    private var preparationGeneration = 0
     private var readyContinuations: [CheckedContinuation<Void, Error>] = []
-    var isPreparing = true
+    var isPreparing = false
     var statusMessage = "Preparing RSI sign-in services."
+    var prefersBrowserAssistedLogin = false
 
     init(diagnostics: AuthenticationDiagnosticsStore) {
         self.diagnostics = diagnostics
@@ -44,8 +47,8 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
         self.webView = webView
         isReady = false
         readyError = nil
-        isPreparing = true
         statusMessage = "Preparing RSI sign-in services."
+        beginPreparationTimeout()
         diagnostics.record(
             stage: "recaptcha.attach",
             summary: "Attached the RSI verification helper web view."
@@ -58,6 +61,7 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
         }
 
         self.webView = nil
+        preparationGeneration &+= 1
         isPreparing = false
         diagnostics.record(
             stage: "recaptcha.detach",
@@ -69,9 +73,14 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
 
     func markReady() {
         isReady = true
-        readyError = nil
         isPreparing = false
-        statusMessage = "RSI sign-in is ready."
+        if prefersBrowserAssistedLogin {
+            readyError = slowHelperError()
+            statusMessage = "RSI sign-in will continue in the in-app browser."
+        } else {
+            readyError = nil
+            statusMessage = "RSI sign-in is ready."
+        }
         diagnostics.record(
             stage: "recaptcha.ready",
             summary: "The RSI verification helper finished loading and is ready."
@@ -79,10 +88,15 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
 
         let continuations = readyContinuations
         readyContinuations.removeAll()
-        continuations.forEach { $0.resume() }
+        if let readyError {
+            continuations.forEach { $0.resume(throwing: readyError) }
+        } else {
+            continuations.forEach { $0.resume() }
+        }
     }
 
     func markFailed(_ error: Error) {
+        preparationGeneration &+= 1
         isPreparing = false
         statusMessage = "RSI sign-in warmup hit a problem."
         diagnostics.record(
@@ -95,6 +109,20 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
     }
 
     func resetAuthenticationSession() async throws {
+        if prefersBrowserAssistedLogin {
+            throw slowHelperError()
+        }
+
+        guard webView != nil else {
+            isPreparing = false
+            diagnostics.record(
+                stage: "recaptcha.reset",
+                summary: "The RSI verification helper was not initialized before a reset was requested.",
+                level: .warning
+            )
+            throw AuthenticationError.unavailable("The RSI verification helper is not initialized.")
+        }
+
         isPreparing = true
         statusMessage = "Refreshing the RSI sign-in session."
         diagnostics.record(
@@ -297,6 +325,10 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
     }
 
     private func awaitReady() async throws {
+        if prefersBrowserAssistedLogin {
+            throw slowHelperError()
+        }
+
         if let readyError {
             throw readyError
         }
@@ -345,8 +377,8 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
 
         isReady = false
         readyError = nil
-        isPreparing = true
         statusMessage = "Preparing the RSI sign-in page."
+        beginPreparationTimeout()
         diagnostics.record(
             stage: "recaptcha.reload",
             summary: "Reloading the RSI sign-in helper page."
@@ -389,6 +421,36 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
         return BrowserGraphQLResponse(statusCode: statusValue.intValue, body: body)
     }
 
+    private func beginPreparationTimeout() {
+        isPreparing = true
+        preparationGeneration &+= 1
+        let generation = preparationGeneration
+
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.helperInitializationTimeoutNanoseconds)
+            guard let self,
+                  self.preparationGeneration == generation,
+                  self.isPreparing else {
+                return
+            }
+
+            self.prefersBrowserAssistedLogin = true
+            self.isPreparing = false
+            self.statusMessage = "RSI sign-in will continue in the in-app browser."
+            let error = self.slowHelperError()
+            self.diagnostics.record(
+                stage: "recaptcha.timeout",
+                summary: "The RSI verification helper took longer than 1.5 seconds to initialize, so Hangar Express will use browser-assisted sign-in.",
+                level: .warning
+            )
+            self.failReadyWaiters(with: error)
+        }
+    }
+
+    private func slowHelperError() -> AuthenticationError {
+        AuthenticationError.unavailable("The RSI verification helper took more than 1.5 seconds to initialize.")
+    }
+
     private func failReadyWaiters(with error: Error) {
         readyError = error
         isReady = false
@@ -427,6 +489,7 @@ struct RecaptchaBridgeView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        configuration.mediaTypesRequiringUserActionForPlayback = .all
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false

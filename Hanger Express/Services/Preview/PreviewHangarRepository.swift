@@ -114,7 +114,8 @@ struct PreviewHangarRepository: HangarRepository {
         for session: UserSession,
         from snapshot: HangarSnapshot,
         mode _: HangarLogFetchMode,
-        progress: @escaping RefreshProgressHandler
+        progress: @escaping RefreshProgressHandler,
+        batchHandler _: HangarLogBatchHandler?
     ) async throws -> HangarSnapshot {
         progress(
             RefreshProgress(
@@ -237,6 +238,17 @@ struct PreviewHangarRepository: HangarRepository {
         ApplyUpgradeResult(
             upgradeItemPledgeID: upgradeItemPledgeID,
             targetPledgeID: targetPledgeID,
+            wasSuccessful: true,
+            failureMessage: nil,
+            updatedCookies: session.cookies
+        )
+    }
+
+    func requestCharacterRepair(
+        for session: UserSession,
+        password _: String
+    ) async throws -> CharacterRepairResult {
+        CharacterRepairResult(
             wasSuccessful: true,
             failureMessage: nil,
             updatedCookies: session.cookies

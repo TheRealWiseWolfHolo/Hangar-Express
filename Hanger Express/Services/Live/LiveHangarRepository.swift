@@ -12,6 +12,7 @@ final class LiveHangarRepository: HangarRepository {
     private let buybackPageSize = 100
     private let maxPledgePages = 200
     private let maxBuybackPages = 100
+    private let hangarLogBatchSize = 10
 
     init(diagnostics: RefreshDiagnosticsStore) {
         refreshDiagnostics = diagnostics
@@ -283,14 +284,16 @@ final class LiveHangarRepository: HangarRepository {
         for session: UserSession,
         from snapshot: HangarSnapshot,
         mode: HangarLogFetchMode,
-        progress: @escaping RefreshProgressHandler
+        progress: @escaping RefreshProgressHandler,
+        batchHandler: HangarLogBatchHandler?
     ) async throws -> HangarSnapshot {
         if session.authMode == .developerPreview {
             return try await previewRepository.refreshHangarLogData(
                 for: session,
                 from: snapshot,
                 mode: mode,
-                progress: progress
+                progress: progress,
+                batchHandler: batchHandler
             )
         }
 
@@ -301,6 +304,7 @@ final class LiveHangarRepository: HangarRepository {
             using: session.cookies,
             existingLogs: snapshot.hangarLogs,
             mode: mode,
+            batchHandler: batchHandler,
             progress: progress,
             stepNumber: 2,
             stepCount: 2
@@ -574,6 +578,24 @@ final class LiveHangarRepository: HangarRepository {
             using: session.cookies,
             upgradeItemPledgeID: upgradeItemPledgeID,
             targetPledgeID: targetPledgeID,
+            password: password
+        )
+    }
+
+    func requestCharacterRepair(
+        for session: UserSession,
+        password: String
+    ) async throws -> CharacterRepairResult {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.requestCharacterRepair(
+                for: session,
+                password: password
+            )
+        }
+
+        try validate(session: session)
+        return try await browser.requestCharacterRepair(
+            using: session.cookies,
             password: password
         )
     }
@@ -1793,6 +1815,7 @@ final class LiveHangarRepository: HangarRepository {
         using cookies: [SessionCookie],
         existingLogs: [HangarLogEntry],
         mode: HangarLogFetchMode = .initial,
+        batchHandler: HangarLogBatchHandler?,
         browser activeBrowser: RSIAccountPageBrowser? = nil,
         progress: @escaping RefreshProgressHandler,
         stepNumber: Int,
@@ -1826,13 +1849,28 @@ final class LiveHangarRepository: HangarRepository {
         )
 
         let activeBrowser = activeBrowser ?? browser
-        let result: RemoteHangarLogPage
+        let entryLimit = mode.entryLimit
+        let batchSize = min(hangarLogBatchSize, entryLimit)
+        let knownRawTexts = hangarLogStopMarkers(from: existingLogs)
+        var fetchedLogs: [HangarLogEntry] = []
+        var hangarLogs = existingLogs
+        var page = 1
+        var pageCount: Int?
+        var lastResult: RemoteHangarLogPage?
+
+        while fetchedLogs.count < entryLimit {
+            let requestedEntryCount = min(batchSize, entryLimit - fetchedLogs.count)
+            guard requestedEntryCount > 0 else {
+                break
+            }
+
+            let result: RemoteHangarLogPage
         do {
             result = try await activeBrowser.fetchHangarLogPage(
                 using: cookies,
-                page: 1,
-                maxEntries: mode.entryLimit,
-                knownRawTexts: hangarLogStopMarkers(from: existingLogs)
+                page: page,
+                maxEntries: requestedEntryCount,
+                knownRawTexts: knownRawTexts
             )
         } catch {
             recordRefreshDiagnostics(
@@ -1843,6 +1881,8 @@ final class LiveHangarRepository: HangarRepository {
             )
             throw error
         }
+
+        lastResult = result
 
         if result.accessDenied {
             recordRefreshDiagnostics(
@@ -1885,26 +1925,76 @@ final class LiveHangarRepository: HangarRepository {
             throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
         }
 
-        let fetchedLogs = Array(HangarLogParser.parse(result.items).prefix(mode.entryLimit))
-        let hangarLogs = mergedHangarLogs(
-            fetchedLogs: fetchedLogs,
+        let previousFetchedLogCount = fetchedLogs.count
+        let processedHangarLogs = await Self.processHangarLogItems(
+            result.items,
+            previousFetchedLogs: fetchedLogs,
             existingLogs: existingLogs,
-            entryLimit: mode.entryLimit
+            entryLimit: entryLimit
+        )
+        fetchedLogs = processedHangarLogs.fetchedLogs
+        hangarLogs = processedHangarLogs.mergedLogs
+        pageCount = result.pageCount ?? pageCount
+
+        recordRefreshDiagnostics(
+            stage: "hangar-log.batch",
+            summary: "Loaded a hangar log batch from RSI.",
+            detail: [
+                "page=\(page)",
+                "requestedEntries=\(requestedEntryCount)",
+                "returnedItems=\(result.items.count)",
+                "newParsedEntries=\(fetchedLogs.count - previousFetchedLogCount)",
+                "fetchedTotal=\(fetchedLogs.count)",
+                "mergedTotal=\(hangarLogs.count)",
+                "pageCount=\(pageCount.map(String.init) ?? "unknown")",
+                "hitKnownEntry=\(result.hitKnownEntry == true)",
+                "debugSummary=\(result.debugSummary ?? "none")"
+            ].joined(separator: "\n")
         )
 
+        if fetchedLogs.count > previousFetchedLogCount {
+            batchHandler?(hangarLogs)
+            progress(
+                makeProgress(
+                    stage: .hangarLog,
+                    stepNumber: stepNumber,
+                    stepCount: stepCount,
+                    detail: AppLocalizer.format("Loaded %lld hangar log entries from RSI.", fetchedLogs.count),
+                    completedUnitCount: fetchedLogs.count,
+                    totalUnitCount: entryLimit,
+                    trackerID: trackerID,
+                    trackerTitle: trackerTitle,
+                    displayRange: DisplayProgressRange.pages
+                )
+            )
+        }
+
+        let reachedPageCount = pageCount.map { page >= $0 } ?? false
+        if result.items.isEmpty ||
+            result.hitKnownEntry == true ||
+            fetchedLogs.count == previousFetchedLogCount ||
+            fetchedLogs.count >= entryLimit ||
+            reachedPageCount {
+            break
+        }
+
+        page += 1
+        }
+
         if hangarLogs.isEmpty {
+            let result = lastResult
             recordRefreshDiagnostics(
                 stage: "hangar-log.response",
                 summary: "RSI returned an empty hangar log payload.",
                 detail: [
-                    "statusCode=\(result.statusCode)",
-                    "returnedItems=\(result.items.count)",
-                    "debugSummary=\(result.debugSummary ?? "none")"
+                    "statusCode=\(result?.statusCode ?? 0)",
+                    "returnedItems=\(result?.items.count ?? 0)",
+                    "debugSummary=\(result?.debugSummary ?? "none")"
                 ].joined(separator: "\n"),
                 level: .error
             )
             throw LiveHangarRepositoryError.unexpectedMarkup(
-                result.debugSummary
+                result?.debugSummary
                 ?? "RSI opened the hangar log window, but no log entries were discovered."
             )
         }
@@ -1912,11 +2002,11 @@ final class LiveHangarRepository: HangarRepository {
         let addedEntryCount = max(hangarLogs.count - existingLogs.count, 0)
         let detail: String
         if existingLogs.isEmpty {
-            detail = hangarLogs.count >= mode.entryLimit
+            detail = hangarLogs.count >= entryLimit
                 ? AppLocalizer.format(
                     "Loaded %lld hangar log entries from RSI (cap %lld).",
                     hangarLogs.count,
-                    mode.entryLimit
+                    entryLimit
                 )
                 : AppLocalizer.format("Loaded %lld hangar log entries from RSI.", hangarLogs.count)
         } else if addedEntryCount > 0 {
@@ -1947,13 +2037,12 @@ final class LiveHangarRepository: HangarRepository {
                 "fetchedEntries=\(fetchedLogs.count)",
                 "mergedEntries=\(hangarLogs.count)",
                 "addedEntries=\(addedEntryCount)",
-                "statusCode=\(result.statusCode)"
+                "statusCode=\(lastResult?.statusCode ?? 0)",
+                "pageCount=\(pageCount.map(String.init) ?? "unknown")"
             ].joined(separator: ", ")
         )
 
-        return hangarLogs.sorted { lhs, rhs in
-            lhs.occurredAt > rhs.occurredAt
-        }
+        return hangarLogs
     }
 
     private func hangarLogStopMarkers(from existingLogs: [HangarLogEntry]) -> [String] {
@@ -1965,7 +2054,33 @@ final class LiveHangarRepository: HangarRepository {
         )
     }
 
-    private func mergedHangarLogs(
+    private nonisolated static func processHangarLogItems(
+        _ items: [RemoteHangarLogItem],
+        previousFetchedLogs: [HangarLogEntry] = [],
+        existingLogs: [HangarLogEntry],
+        entryLimit: Int
+    ) async -> (fetchedLogs: [HangarLogEntry], mergedLogs: [HangarLogEntry]) {
+        await Task.detached(priority: .userInitiated) {
+            let parsedLogs = HangarLogParser.parse(items)
+            let fetchedLogs = mergedHangarLogs(
+                fetchedLogs: previousFetchedLogs + parsedLogs,
+                existingLogs: [],
+                entryLimit: entryLimit
+            )
+            let mergedLogs = mergedHangarLogs(
+                fetchedLogs: fetchedLogs,
+                existingLogs: existingLogs,
+                entryLimit: entryLimit
+            )
+            .sorted { lhs, rhs in
+                lhs.occurredAt > rhs.occurredAt
+            }
+
+            return (fetchedLogs, mergedLogs)
+        }.value
+    }
+
+    private nonisolated static func mergedHangarLogs(
         fetchedLogs: [HangarLogEntry],
         existingLogs: [HangarLogEntry],
         entryLimit: Int
@@ -2528,7 +2643,8 @@ final class LiveHangarRepository: HangarRepository {
             return "Hangar entitlement"
         }
 
-        if lowercasedTitle.contains("insurance") || lowercasedTitle.contains("lti") {
+        if lowercasedTitle.contains("insurance")
+            || HangarPackage.containsLifetimeInsuranceToken(lowercasedTitle) {
             return "Insurance"
         }
 
@@ -2746,7 +2862,7 @@ final class LiveHangarRepository: HangarRepository {
         var results: [String] = []
         let lowercased = value.localizedLowercase
 
-        if lowercased.contains("lti") || lowercased.contains("lifetime") {
+        if HangarPackage.containsLifetimeInsuranceToken(lowercased) {
             results.append("LTI")
         }
 
@@ -3194,6 +3310,13 @@ private struct RemoteUpgradeTargetCandidate: Decodable {
 }
 
 private struct RemoteApplyUpgradeExecution: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
+private struct RemoteCharacterRepairExecution: Decodable {
     let accessDenied: Bool
     let status: String
     let failureMessage: String?
@@ -4707,6 +4830,48 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             wasSuccessful: shouldTreatAsSuccess,
             failureMessage: failureMessage,
             updatedCookies: updatedCookies
+        )
+    }
+
+    fileprivate func requestCharacterRepair(
+        using cookies: [SessionCookie],
+        password: String
+    ) async throws -> CharacterRepairResult {
+        let url = try storefrontURL(path: "/en/account/reset")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let result = try await evaluate(
+            script: Self.requestCharacterRepairScript,
+            arguments: [
+                "reason": "Character reset",
+                "issueCouncilURL": "",
+                "currentPassword": password
+            ],
+            as: RemoteCharacterRepairExecution.self
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        let shouldTreatAsSuccess = result.status == "ok"
+        let failureMessage: String?
+        if shouldTreatAsSuccess {
+            failureMessage = nil
+        } else {
+            failureMessage = [result.failureMessage, result.debugSummary]
+                .compactMap { value in
+                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                }
+                .joined(separator: "\n\n")
+                .nilIfEmpty
+        }
+
+        return CharacterRepairResult(
+            wasSuccessful: shouldTreatAsSuccess,
+            failureMessage: failureMessage,
+            updatedCookies: await currentRSICookies()
         )
     }
 
@@ -7615,6 +7780,9 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     const resolvedMaxEntries = Number.isFinite(Number(maxEntries)) && Number(maxEntries) > 0
       ? Math.min(Math.floor(Number(maxEntries)), 500)
       : 10;
+    const requestedPage = Number.isFinite(Number(page)) && Number(page) > 0
+      ? Math.floor(Number(page))
+      : 1;
     const knownFullTexts = new Set(
       (Array.isArray(knownRawTexts) ? knownRawTexts : [])
         .map((value) => normalizeText(value))
@@ -7750,8 +7918,9 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       };
     }
 
-    const hangarLogButton = findHangarLogButton();
-    if (!hangarLogButton) {
+    const existingLogEntry = document.querySelector('.pledge-log-entry');
+    const hangarLogButton = existingLogEntry ? null : findHangarLogButton();
+    if (!existingLogEntry && !hangarLogButton) {
       return {
         accessDenied: false,
         statusCode: 200,
@@ -7781,7 +7950,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       requestHeaders['x-rsi-device'] = rsiDevice;
     }
 
-    const modalAppeared = await waitFor(
+    const modalAppeared = existingLogEntry || await waitFor(
       () =>
         document.querySelector('.pledge-log-entry') ||
         document.querySelector('[class*=\"modal\"] [class*=\"pledge\"]') ||
@@ -7800,13 +7969,16 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       };
     }
 
-    let items = dedupeEntries(onlyUnknownEntries(collectEntries()));
+    let items = requestedPage <= 1
+      ? dedupeEntries(onlyUnknownEntries(collectEntries()))
+      : [];
     let stablePasses = 0;
     let pagedFetchStatus = 'not-started';
     let pagedFetchPageCount = null;
-    let pagedFetchStoppedAt = 1;
+    let pagedFetchStoppedAt = requestedPage;
+    let hitKnownEntry = false;
 
-    for (let index = 0; index < 80 && items.length < resolvedMaxEntries; index += 1) {
+    for (let index = 0; requestedPage <= 1 && index < 80 && items.length < resolvedMaxEntries; index += 1) {
       const beforeCount = items.length;
 
       for (const container of findScrollableContainers()) {
@@ -7830,14 +8002,16 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       }
     }
 
-    items = dedupeEntries(onlyUnknownEntries(collectEntries())).slice(0, resolvedMaxEntries);
+    if (requestedPage <= 1) {
+      items = dedupeEntries(onlyUnknownEntries(collectEntries())).slice(0, resolvedMaxEntries);
+    }
 
     try {
       const pageOneResponse = await fetch('/api/account/pledgeLog', {
         method: 'POST',
         credentials: 'include',
         headers: requestHeaders,
-        body: JSON.stringify({ page: 1 })
+        body: JSON.stringify({ page: requestedPage })
       });
 
       const pageOneRawBody = await pageOneResponse.text();
@@ -7849,6 +8023,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       if (pageOneResponse.ok && pageOnePayload?.data) {
         const apiItems = parseRenderedEntries(pageOnePayload.data.rendered);
         const pageOneHitKnown = apiItems.some(isKnownEntry);
+        hitKnownEntry = hitKnownEntry || pageOneHitKnown;
         const pageOneNewItems = onlyUnknownEntries(apiItems);
         if (pageOneNewItems.length > 0) {
           items = dedupeEntries(pageOneNewItems.concat(items));
@@ -7857,10 +8032,11 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         const reportedPageCount = Number.parseInt(String(pageOnePayload.data.pagecount || ''), 10);
         const pageCount = Number.isFinite(reportedPageCount) && reportedPageCount > 0 ? reportedPageCount : null;
         pagedFetchPageCount = pageCount;
-        pagedFetchStatus = pageOneHitKnown ? 'page-1-hit-known' : 'page-1-ok';
+        pagedFetchStoppedAt = requestedPage;
+        pagedFetchStatus = pageOneHitKnown ? `page-${requestedPage}-hit-known` : `page-${requestedPage}-ok`;
 
         if (!pageOneHitKnown) {
-          for (let page = 2; page <= (pageCount || 100) && items.length < resolvedMaxEntries; page += 1) {
+          for (let page = requestedPage + 1; page <= (pageCount || requestedPage + 99) && items.length < resolvedMaxEntries; page += 1) {
             const response = await fetch('/api/account/pledgeLog', {
               method: 'POST',
               credentials: 'include',
@@ -7900,6 +8076,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             }
 
             const pageHitKnown = pageItems.some(isKnownEntry);
+            hitKnownEntry = hitKnownEntry || pageHitKnown;
             const newPageItems = onlyUnknownEntries(pageItems);
             const beforeCount = items.length;
             if (newPageItems.length > 0) {
@@ -7925,20 +8102,23 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
           pagedFetchStatus = `cap-${resolvedMaxEntries}`;
         }
       } else {
-        pagedFetchStatus = `page-1-http-${pageOneResponse.status}`;
+        pagedFetchStatus = `page-${requestedPage}-http-${pageOneResponse.status}`;
       }
     } catch (error) {
       pagedFetchStatus = `fetch-error:${normalizeText(error?.message || String(error))}`;
     }
 
     items = dedupeEntries(items).slice(0, resolvedMaxEntries);
+    const buttonLabel = hangarLogButton
+      ? normalizeText(hangarLogButton.textContent || hangarLogButton.value || '')
+      : 'already-open';
 
     const failureMessage = items.length === 0 && knownFullTexts.size === 0
       ? 'RSI opened the Hangar log flow, but no .pledge-log-entry rows were rendered.'
       : null;
 
     const debugSummary = [
-      `button=${normalizeText(hangarLogButton.textContent || hangarLogButton.value || '')}`,
+      `button=${buttonLabel}`,
       `entries=${items.length}`,
       `max=${resolvedMaxEntries}`,
       `knownMarkers=${knownFullTexts.size}`,
@@ -7954,6 +8134,9 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       accessDenied: false,
       statusCode: 200,
       items,
+      page: requestedPage,
+      pageCount: pagedFetchPageCount,
+      hitKnownEntry,
       failureMessage,
       debugSummary
     };
@@ -9916,6 +10099,193 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     };
     """
 
+    private static let requestCharacterRepairScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const repairReason = typeof reason === 'string' && reason.trim() ? reason.trim() : 'Character reset';
+    const issueCouncilValue = typeof issueCouncilURL === 'string' ? issueCouncilURL.trim() : '';
+    const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
+    const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        failureMessage: 'The RSI character repair page reported access denied before the request started.',
+        debugSummary: null
+      };
+    }
+
+    if (!currentPasswordValue) {
+      return {
+        accessDenied: false,
+        status: 'missing-password',
+        failureMessage: 'Hangar Express does not have a saved RSI password for the character repair request.',
+        debugSummary: 'passwordPresent=no'
+      };
+    }
+
+    const isVisible = (element) => {
+      if (!element) {
+        return false;
+      }
+      const style = window.getComputedStyle(element);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+        return false;
+      }
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+
+    const setFieldValue = (element, value) => {
+      if (!element) {
+        return false;
+      }
+      element.focus?.();
+      element.value = value;
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    };
+
+    const findRequestRepairButton = () => {
+      const preferred = document.querySelector('.js-reset-account');
+      if (preferred) {
+        return preferred;
+      }
+
+      return Array.from(document.querySelectorAll('a, button'))
+        .find((element) => normalizeText(element.textContent).toLowerCase() === 'request repair') || null;
+    };
+
+    const findRepairForm = () => {
+      const forms = Array.from(document.querySelectorAll('form[name="reset-account"], form[action*="/account/reset"]'))
+        .filter((form) =>
+          form.querySelector('[name="reason"]') &&
+          form.querySelector('[name="link_council_report"]') &&
+          form.querySelector('[name="current_password"]')
+        );
+
+      if (!forms.length) {
+        return null;
+      }
+
+      const visibleForms = forms.filter(isVisible);
+      const candidates = visibleForms.length ? visibleForms : forms;
+      return candidates.find((form) => {
+        const action = normalizeText(form.getAttribute('action') || form.action || '');
+        return action.includes('/account/reset') || action === '';
+      }) || candidates[candidates.length - 1];
+    };
+
+    const requestButton = findRequestRepairButton();
+    if (requestButton) {
+      requestButton.click();
+    }
+
+    let form = null;
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      form = findRepairForm();
+      if (form) {
+        break;
+      }
+      await wait(100);
+    }
+
+    if (!form) {
+      return {
+        accessDenied: false,
+        status: 'missing-form',
+        failureMessage: 'Hangar Express could not find the RSI character repair request form.',
+        debugSummary: normalizeText(document.body.innerText).slice(0, 700)
+      };
+    }
+
+    const reasonField = form.querySelector('[name="reason"]');
+    const issueCouncilField = form.querySelector('[name="link_council_report"]');
+    const passwordField = form.querySelector('[name="current_password"]');
+    setFieldValue(reasonField, repairReason);
+    setFieldValue(issueCouncilField, issueCouncilValue);
+    setFieldValue(passwordField, currentPasswordValue);
+
+    const formData = new FormData(form);
+    formData.set('reason', repairReason);
+    formData.set('link_council_report', issueCouncilValue);
+    formData.set('current_password', currentPasswordValue);
+
+    const submitURL = new URL(form.getAttribute('action') || window.location.href, window.location.href).toString();
+    const requestBody = new URLSearchParams(formData);
+    const response = await fetch(submitURL, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'
+      },
+      body: requestBody.toString(),
+      redirect: 'follow'
+    });
+
+    const responseText = await response.text();
+    const parsedDocument = new DOMParser().parseFromString(responseText, 'text/html');
+    const responseBodyText = normalizeText(parsedDocument.body?.innerText || responseText);
+    const resetScopes = Array.from(parsedDocument.querySelectorAll('#reset-account'))
+      .filter((element) =>
+        element.querySelector('form[name="reset-account"]') ||
+        element.querySelector('.error-message') ||
+        element.querySelector('.success-message')
+      );
+    const messageScopes = resetScopes.length ? resetScopes : [parsedDocument];
+    const collectMessages = (selector) => messageScopes
+      .flatMap((scope) => Array.from(scope.querySelectorAll(selector)))
+      .map((element) => normalizeText(element.textContent))
+      .filter(Boolean);
+    const errorMessages = collectMessages('.js-error-message, .error-message, .alert-danger, .flash-error');
+    const successMessages = collectMessages('.js-success-message, .success-message, .alert-success, .flash-success');
+    const responseLooksAccessDenied =
+      response.status === 401 ||
+      response.status === 403 ||
+      parsedDocument.title.toLowerCase().includes('access denied') ||
+      responseBodyText.includes('Access denied');
+
+    if (responseLooksAccessDenied) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        failureMessage: errorMessages[0] || `RSI rejected the character repair request with HTTP ${response.status}.`,
+        debugSummary: `httpStatus=${response.status}, responseURL=${response.url || 'n/a'}`
+      };
+    }
+
+    if (!response.ok) {
+      return {
+        accessDenied: false,
+        status: 'failed',
+        failureMessage: errorMessages[0] || `RSI returned HTTP ${response.status} while requesting character repair.`,
+        debugSummary: `httpStatus=${response.status}, responsePreview=${responseBodyText.slice(0, 500) || 'n/a'}`
+      };
+    }
+
+    if (errorMessages.length) {
+      return {
+        accessDenied: false,
+        status: 'failed',
+        failureMessage: errorMessages.join('\\n'),
+        debugSummary: `httpStatus=${response.status}, responseURL=${response.url || 'n/a'}, successMessages=${successMessages.length}`
+      };
+    }
+
+    return {
+      accessDenied: false,
+      status: 'ok',
+      failureMessage: null,
+      debugSummary: `httpStatus=${response.status}, responseURL=${response.url || 'n/a'}, requestButtonClicked=${requestButton ? 'yes' : 'no'}, successMessages=${successMessages.length}`
+    };
+    """
+
     private static let applyUpgradeScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
     const cookieValue = (name) => {
@@ -10498,15 +10868,18 @@ private nonisolated struct RemoteLimitedShipCartInsertion: Decodable {
     let debugLog: [String]
 }
 
-private nonisolated struct RemoteHangarLogPage: Decodable {
+private nonisolated struct RemoteHangarLogPage: Decodable, Sendable {
     let accessDenied: Bool
     let statusCode: Int
     let items: [RemoteHangarLogItem]
+    let page: Int?
+    let pageCount: Int?
+    let hitKnownEntry: Bool?
     let failureMessage: String?
     let debugSummary: String?
 }
 
-private nonisolated struct RemoteHangarLogItem: Decodable {
+private nonisolated struct RemoteHangarLogItem: Decodable, Sendable {
     let timeText: String
     let itemName: String
     let fullText: String
@@ -10527,119 +10900,159 @@ private nonisolated enum HangarLogParser {
     private static let giveawayPattern = #"^#(\d+?) - (.*?)$"#
 
     static func parse(_ items: [RemoteHangarLogItem]) -> [HangarLogEntry] {
-        items.compactMap(parse)
+        let parser = BatchParser()
+        return items.compactMap(parser.parse)
     }
 
-    private static func parse(_ item: RemoteHangarLogItem) -> HangarLogEntry? {
-        let occurredAt = parsedDate(from: item.timeText) ?? .distantPast
-        let content = item.contentText.trimmingCharacters(in: .whitespacesAndNewlines)
+    private final class BatchParser {
+        private let dateFormatter: DateFormatter = {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = .current
+            formatter.dateFormat = "MMM d yyyy, h:mm a"
+            return formatter
+        }()
 
-        var action: HangarLogAction = .unknown
-        var priceUSD: Decimal?
-        var orderCode: String?
-        var sourcePledgeID: String?
-        var targetPledgeID: String?
-        var operatorName: String?
-        var reason: String?
-        var upgradeContext: HangarLogUpgradeContext?
+        private let createdExpression = BatchParser.expression(HangarLogParser.createdPattern)
+        private let reclaimedExpression = BatchParser.expression(HangarLogParser.reclaimedPattern)
+        private let consumedExpression = BatchParser.expression(HangarLogParser.consumedPattern)
+        private let appliedUpgradeExpression = BatchParser.expression(HangarLogParser.appliedUpgradePattern)
+        private let buybackExpression = BatchParser.expression(HangarLogParser.buybackPattern)
+        private let giftExpression = BatchParser.expression(HangarLogParser.giftPattern)
+        private let giftClaimedExpression = BatchParser.expression(HangarLogParser.giftClaimedPattern)
+        private let giftCancelledExpression = BatchParser.expression(HangarLogParser.giftCancelledPattern)
+        private let nameChangeExpression = BatchParser.expression(HangarLogParser.nameChangePattern)
+        private let nameChangeReclaimedExpression = BatchParser.expression(HangarLogParser.nameChangeReclaimedPattern)
+        private let giveawayExpression = BatchParser.expression(HangarLogParser.giveawayPattern)
 
-        if let groups = match(createdPattern, in: content) {
-            action = .created
-            targetPledgeID = groupValue(groups, 0)
-            operatorName = groupValue(groups, 1)
-            orderCode = groupValue(groups, 2)
-            priceUSD = parseMoney(groupValue(groups, 3))
-        } else if let groups = match(reclaimedPattern, in: content) {
-            action = .reclaimed
-            targetPledgeID = groupValue(groups, 0)
-            operatorName = groupValue(groups, 1)
-            priceUSD = parseMoney(groupValue(groups, 2))
-        } else if let groups = match(consumedPattern, in: content) {
-            action = .consumed
-            targetPledgeID = groupValue(groups, 0)
-            operatorName = groupValue(groups, 1)
-            sourcePledgeID = groupValue(groups, 2)
-            priceUSD = parseMoney(groupValue(groups, 3))
-        } else if let groups = match(appliedUpgradePattern, in: content) {
-            action = .appliedUpgrade
-            targetPledgeID = groupValue(groups, 0)
-            sourcePledgeID = groupValue(groups, 1)
-            reason = groupValue(groups, 2)
-            priceUSD = parseMoney(groupValue(groups, 3))
-            operatorName = "CIG"
-            upgradeContext = HangarLogUpgradeContext.inferred(
-                from: [
-                    reason,
-                    item.itemName
-                ]
+        func parse(_ item: RemoteHangarLogItem) -> HangarLogEntry? {
+            let occurredAt = dateFormatter.date(from: item.timeText) ?? .distantPast
+            let content = item.contentText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            var action: HangarLogAction = .unknown
+            var priceUSD: Decimal?
+            var orderCode: String?
+            var sourcePledgeID: String?
+            var targetPledgeID: String?
+            var operatorName: String?
+            var reason: String?
+            var upgradeContext: HangarLogUpgradeContext?
+
+            if let groups = match(createdExpression, in: content) {
+                action = .created
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                operatorName = HangarLogParser.groupValue(groups, 1)
+                orderCode = HangarLogParser.groupValue(groups, 2)
+                priceUSD = HangarLogParser.parseMoney(HangarLogParser.groupValue(groups, 3))
+            } else if let groups = match(reclaimedExpression, in: content) {
+                action = .reclaimed
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                operatorName = HangarLogParser.groupValue(groups, 1)
+                priceUSD = HangarLogParser.parseMoney(HangarLogParser.groupValue(groups, 2))
+            } else if let groups = match(consumedExpression, in: content) {
+                action = .consumed
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                operatorName = HangarLogParser.groupValue(groups, 1)
+                sourcePledgeID = HangarLogParser.groupValue(groups, 2)
+                priceUSD = HangarLogParser.parseMoney(HangarLogParser.groupValue(groups, 3))
+            } else if let groups = match(appliedUpgradeExpression, in: content) {
+                action = .appliedUpgrade
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                sourcePledgeID = HangarLogParser.groupValue(groups, 1)
+                reason = HangarLogParser.groupValue(groups, 2)
+                priceUSD = HangarLogParser.parseMoney(HangarLogParser.groupValue(groups, 3))
+                operatorName = "CIG"
+                upgradeContext = HangarLogUpgradeContext.inferred(
+                    from: [
+                        reason,
+                        item.itemName
+                    ]
+                )
+            } else if let groups = match(buybackExpression, in: content) {
+                action = .buyback
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                operatorName = HangarLogParser.groupValue(groups, 1)
+                orderCode = HangarLogParser.groupValue(groups, 2)
+            } else if let groups = match(giftExpression, in: content) {
+                action = .gift
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                operatorName = HangarLogParser.groupValue(groups, 1)
+                priceUSD = HangarLogParser.parseMoney(HangarLogParser.groupValue(groups, 2))
+            } else if let groups = match(giftClaimedExpression, in: content) {
+                action = .giftClaimed
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                operatorName = HangarLogParser.groupValue(groups, 1)
+                priceUSD = HangarLogParser.parseMoney(HangarLogParser.groupValue(groups, 2))
+            } else if let groups = match(giftCancelledExpression, in: content) {
+                action = .giftCancelled
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                operatorName = HangarLogParser.groupValue(groups, 1)
+                priceUSD = HangarLogParser.parseMoney(HangarLogParser.groupValue(groups, 2))
+            } else if let groups = match(nameChangeExpression, in: content) {
+                action = .nameChange
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                sourcePledgeID = HangarLogParser.groupValue(groups, 1)
+                reason = HangarLogParser.groupValue(groups, 2)
+            } else if let groups = match(nameChangeReclaimedExpression, in: content) {
+                action = .nameChangeReclaimed
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                sourcePledgeID = HangarLogParser.groupValue(groups, 1)
+                reason = HangarLogParser.groupValue(groups, 2)
+            } else if let groups = match(giveawayExpression, in: content) {
+                action = .giveaway
+                targetPledgeID = HangarLogParser.groupValue(groups, 0)
+                reason = HangarLogParser.groupValue(groups, 1)
+            }
+
+            let resolvedOperatorName = operatorName?.nilIfEmpty ?? "CIG"
+            let resolvedTargetID = targetPledgeID?.nilIfEmpty
+            let identifier = [
+                action.rawValue,
+                resolvedTargetID ?? "unknown",
+                String(Int(occurredAt.timeIntervalSince1970)),
+                content
+            ].joined(separator: "#")
+
+            return HangarLogEntry(
+                id: identifier,
+                occurredAt: occurredAt,
+                action: action,
+                itemName: item.itemName.nilIfEmpty ?? "Unknown item",
+                operatorName: resolvedOperatorName,
+                priceUSD: priceUSD,
+                sourcePledgeID: sourcePledgeID?.nilIfEmpty,
+                targetPledgeID: resolvedTargetID,
+                orderCode: orderCode?.nilIfEmpty,
+                reason: reason?.nilIfEmpty,
+                rawText: item.fullText.nilIfEmpty ?? content,
+                upgradeContext: upgradeContext
             )
-        } else if let groups = match(buybackPattern, in: content) {
-            action = .buyback
-            targetPledgeID = groupValue(groups, 0)
-            operatorName = groupValue(groups, 1)
-            orderCode = groupValue(groups, 2)
-        } else if let groups = match(giftPattern, in: content) {
-            action = .gift
-            targetPledgeID = groupValue(groups, 0)
-            operatorName = groupValue(groups, 1)
-            priceUSD = parseMoney(groupValue(groups, 2))
-        } else if let groups = match(giftClaimedPattern, in: content) {
-            action = .giftClaimed
-            targetPledgeID = groupValue(groups, 0)
-            operatorName = groupValue(groups, 1)
-            priceUSD = parseMoney(groupValue(groups, 2))
-        } else if let groups = match(giftCancelledPattern, in: content) {
-            action = .giftCancelled
-            targetPledgeID = groupValue(groups, 0)
-            operatorName = groupValue(groups, 1)
-            priceUSD = parseMoney(groupValue(groups, 2))
-        } else if let groups = match(nameChangePattern, in: content) {
-            action = .nameChange
-            targetPledgeID = groupValue(groups, 0)
-            sourcePledgeID = groupValue(groups, 1)
-            reason = groupValue(groups, 2)
-        } else if let groups = match(nameChangeReclaimedPattern, in: content) {
-            action = .nameChangeReclaimed
-            targetPledgeID = groupValue(groups, 0)
-            sourcePledgeID = groupValue(groups, 1)
-            reason = groupValue(groups, 2)
-        } else if let groups = match(giveawayPattern, in: content) {
-            action = .giveaway
-            targetPledgeID = groupValue(groups, 0)
-            reason = groupValue(groups, 1)
         }
 
-        let resolvedOperatorName = operatorName?.nilIfEmpty ?? "CIG"
-        let resolvedTargetID = targetPledgeID?.nilIfEmpty
-        let identifier = [
-            action.rawValue,
-            resolvedTargetID ?? "unknown",
-            String(Int(occurredAt.timeIntervalSince1970)),
-            content
-        ].joined(separator: "#")
+        private static func expression(_ pattern: String) -> NSRegularExpression {
+            do {
+                return try NSRegularExpression(pattern: pattern)
+            } catch {
+                preconditionFailure("Invalid hangar log regex: \(pattern)")
+            }
+        }
 
-        return HangarLogEntry(
-            id: identifier,
-            occurredAt: occurredAt,
-            action: action,
-            itemName: item.itemName.nilIfEmpty ?? "Unknown item",
-            operatorName: resolvedOperatorName,
-            priceUSD: priceUSD,
-            sourcePledgeID: sourcePledgeID?.nilIfEmpty,
-            targetPledgeID: resolvedTargetID,
-            orderCode: orderCode?.nilIfEmpty,
-            reason: reason?.nilIfEmpty,
-            rawText: item.fullText.nilIfEmpty ?? content,
-            upgradeContext: upgradeContext
-        )
-    }
+        private func match(_ expression: NSRegularExpression, in text: String) -> [String]? {
+            let range = NSRange(text.startIndex ..< text.endIndex, in: text)
+            guard let match = expression.firstMatch(in: text, options: [], range: range) else {
+                return nil
+            }
 
-    private static func parsedDate(from rawValue: String) -> Date? {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "MMM d yyyy, h:mm a"
-        return formatter.date(from: rawValue)
+            return (1 ..< match.numberOfRanges).compactMap { index in
+                let captureRange = match.range(at: index)
+                guard captureRange.location != NSNotFound,
+                      let range = Range(captureRange, in: text) else {
+                    return nil
+                }
+
+                return String(text[range])
+            }
+        }
     }
 
     private static func parseMoney(_ rawValue: String?) -> Decimal? {
@@ -10656,27 +11069,6 @@ private nonisolated enum HangarLogParser {
         }
 
         return groups[index]
-    }
-
-    private static func match(_ pattern: String, in text: String) -> [String]? {
-        guard let expression = try? NSRegularExpression(pattern: pattern) else {
-            return nil
-        }
-
-        let range = NSRange(text.startIndex ..< text.endIndex, in: text)
-        guard let match = expression.firstMatch(in: text, options: [], range: range) else {
-            return nil
-        }
-
-        return (1 ..< match.numberOfRanges).compactMap { index in
-            let captureRange = match.range(at: index)
-            guard captureRange.location != NSNotFound,
-                  let range = Range(captureRange, in: text) else {
-                return nil
-            }
-
-            return String(text[range])
-        }
     }
 }
 

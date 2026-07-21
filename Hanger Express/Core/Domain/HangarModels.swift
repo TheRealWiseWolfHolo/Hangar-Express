@@ -113,6 +113,13 @@ nonisolated struct StoredSessionsPayload: Hashable, Sendable, Codable {
 nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
     let id: UUID
 
+    enum AccessLevel: String, Hashable, Sendable, Codable {
+        case full
+        case readOnly = "read_only"
+
+        var isReadOnly: Bool { self == .readOnly }
+    }
+
     enum AuthMode: String, Hashable, Sendable, Codable {
         case rsiNativeLogin = "RSI Login"
         case importedCookies = "Imported cookies"
@@ -139,6 +146,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
     let displayName: String
     let email: String
     let authMode: AuthMode
+    let accessLevel: AccessLevel
     let notes: String
     let avatarURL: URL?
     let credentials: AccountCredentials?
@@ -146,8 +154,10 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
     let createdAt: Date
 
     var hasStoredCredentials: Bool {
-        credentials != nil
+        accessLevel == .full && credentials != nil
     }
+
+    var isReadOnly: Bool { accessLevel.isReadOnly }
 
     var accountKey: String {
         if let loginIdentifier = credentials?.loginIdentifier.normalizedAccountKeyComponent {
@@ -170,6 +180,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
         displayName: "WiseWolfHolo",
         email: "preview@hangerexpress.invalid",
         authMode: .developerPreview,
+        accessLevel: .full,
         notes: "Uses local sample data while the live RSI integration is being built.",
         avatarURL: nil,
         credentials: nil,
@@ -183,6 +194,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
         displayName: String,
         email: String,
         authMode: AuthMode,
+        accessLevel: AccessLevel = .full,
         notes: String,
         avatarURL: URL? = nil,
         credentials: AccountCredentials?,
@@ -194,6 +206,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
         self.displayName = displayName
         self.email = email
         self.authMode = authMode
+        self.accessLevel = accessLevel
         self.notes = notes
         self.avatarURL = avatarURL
         self.credentials = credentials
@@ -207,6 +220,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
         case displayName
         case email
         case authMode
+        case accessLevel
         case notes
         case avatarURL
         case credentials
@@ -222,6 +236,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
         displayName = try container.decodeIfPresent(String.self, forKey: .displayName) ?? handle
         email = try container.decodeIfPresent(String.self, forKey: .email) ?? ""
         authMode = try container.decodeIfPresent(AuthMode.self, forKey: .authMode) ?? .rsiNativeLogin
+        accessLevel = try container.decodeIfPresent(AccessLevel.self, forKey: .accessLevel) ?? .full
         notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
         avatarURL = try container.decodeIfPresent(URL.self, forKey: .avatarURL)
         credentials = try container.decodeIfPresent(AccountCredentials.self, forKey: .credentials)
@@ -236,6 +251,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
             displayName: displayName,
             email: email,
             authMode: authMode,
+            accessLevel: accessLevel,
             notes: notes ?? self.notes,
             avatarURL: avatarURL,
             credentials: credentials,
@@ -251,6 +267,7 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
             displayName: displayName,
             email: email,
             authMode: authMode,
+            accessLevel: accessLevel,
             notes: notes ?? self.notes,
             avatarURL: avatarURL,
             credentials: credentials,
@@ -1012,12 +1029,36 @@ nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
         packageThumbnailURL ?? contents.compactMap(\.imageURL).first
     }
 
+    var hasInsuranceBearingContent: Bool {
+        if contents.isEmpty {
+            return primaryInsurance != nil
+        }
+
+        return contents.contains { item in
+            item.isShipLike || item.category == .gamePackage || item.category == .upgrade
+        } || isOwnedUpgradeItem || isUpgradeOnlyPledge
+    }
+
     var hasLifetimeInsurance: Bool {
-        allInsuranceLevels.contains(where: { $0.localizedCaseInsensitiveContains("LTI") })
+        hasInsuranceBearingContent
+            && allInsuranceLevels.contains(where: { Self.containsLifetimeInsuranceToken($0) })
     }
 
     var hasUpgradeItems: Bool {
         contents.contains(where: { $0.category == .upgrade })
+    }
+
+    var isOriginalConceptShip: Bool {
+        let lowercasedTitle = title.localizedLowercase
+        let hasStandaloneShipTitle = lowercasedTitle.contains("standalone ship")
+            || lowercasedTitle.contains("standalone vehicle")
+
+        return hasStandaloneShipTitle
+            && hasLifetimeInsurance
+            && !hasUpgradeItems
+            && !isOwnedUpgradeItem
+            && !isUpgradedShipPledge
+            && contents.contains(where: \.isShipLike)
     }
 
     var isOwnedUpgradeItem: Bool {
@@ -1043,6 +1084,10 @@ nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
     }
 
     var displayedInsurance: String? {
+        guard hasInsuranceBearingContent else {
+            return nil
+        }
+
         guard let trimmedInsurance = primaryInsurance else {
             return nil
         }
@@ -1061,6 +1106,10 @@ nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
     }
 
     var detailInsuranceText: String? {
+        guard hasInsuranceBearingContent else {
+            return nil
+        }
+
         let levels = allInsuranceLevels
 
         if !levels.isEmpty {
@@ -1079,18 +1128,25 @@ nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
     }
 
     var searchableInsuranceText: String {
-        let rawInsurance = insurance.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if let detailInsuranceText {
-            if rawInsurance.isEmpty
-                || detailInsuranceText.localizedCaseInsensitiveCompare(rawInsurance) == .orderedSame {
-                return detailInsuranceText
-            }
-
-            return [detailInsuranceText, rawInsurance].joined(separator: " ")
+        guard hasInsuranceBearingContent else {
+            return ""
         }
 
-        return rawInsurance
+        let rawInsuranceTokens = ([insurance] + (insuranceOptions ?? []))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        if let detailInsuranceText {
+            var tokens = [detailInsuranceText]
+            for rawInsuranceToken in rawInsuranceTokens where !tokens.contains(where: {
+                $0.localizedCaseInsensitiveCompare(rawInsuranceToken) == .orderedSame
+            }) {
+                tokens.append(rawInsuranceToken)
+            }
+            return tokens.joined(separator: " ")
+        }
+
+        return rawInsuranceTokens.joined(separator: " ")
     }
 
     var isMultiShipPackage: Bool {
@@ -1232,7 +1288,7 @@ nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
 
         let lowercased = trimmedValue.localizedLowercase
 
-        if lowercased.contains("lti") || lowercased.contains("lifetime") {
+        if containsLifetimeInsuranceToken(lowercased) {
             return "LTI"
         }
 
@@ -1275,7 +1331,7 @@ nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
         let normalizedValue = normalizedInsuranceLabel(from: rawValue) ?? rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowercased = normalizedValue.localizedLowercase
 
-        if lowercased.contains("lti") || lowercased.contains("lifetime") {
+        if containsLifetimeInsuranceToken(lowercased) {
             return "LTI"
         }
 
@@ -1294,7 +1350,7 @@ nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
         let normalizedValue = normalizedInsuranceLabel(from: value) ?? value
         let lowercased = normalizedValue.localizedLowercase
 
-        if lowercased == "lti" {
+        if containsLifetimeInsuranceToken(lowercased) {
             return (priority: 2, months: .max)
         }
 
@@ -1321,6 +1377,19 @@ nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
         }
 
         return Int(text[captureRange])
+    }
+
+    nonisolated static func containsLifetimeInsuranceToken(_ rawValue: String) -> Bool {
+        let lowercased = rawValue
+            .replacingOccurrences(of: "-", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .localizedLowercase
+        guard !lowercased.isEmpty else {
+            return false
+        }
+
+        return lowercased.range(of: #"\bl[\s.]?t[\s.]?i\b"#, options: .regularExpression) != nil
+            || lowercased.range(of: #"\blifetime\b"#, options: .regularExpression) != nil
     }
 }
 
