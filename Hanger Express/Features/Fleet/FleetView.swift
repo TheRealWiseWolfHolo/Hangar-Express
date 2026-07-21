@@ -562,6 +562,7 @@ struct FleetView: View {
 
 enum FleetTool: String, CaseIterable, Identifiable, Hashable {
     case allShips
+    case wbccuDeals
     case authorizedDevices
     case ccuChainCalculator
     case resetCharacter
@@ -572,6 +573,8 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .allShips:
             return AppLocalizer.string("All Ships")
+        case .wbccuDeals:
+            return AppLocalizer.string("WBCCU Deals")
         case .authorizedDevices:
             return AppLocalizer.string("View Logged In Devices")
         case .ccuChainCalculator:
@@ -585,6 +588,8 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .allShips:
             return AppLocalizer.string("Browse the Star Citizen ship catalog")
+        case .wbccuDeals:
+            return AppLocalizer.string("See live Warbond upgrade savings")
         case .authorizedDevices:
             return AppLocalizer.string("Review and remove logged-in RSI devices")
         case .ccuChainCalculator:
@@ -598,6 +603,8 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .allShips:
             return "airplane.circle"
+        case .wbccuDeals:
+            return "tag.circle"
         case .authorizedDevices:
             return "iphone"
         case .ccuChainCalculator:
@@ -609,6 +616,7 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
 
     var isAvailable: Bool {
         self == .allShips
+            || self == .wbccuDeals
             || self == .authorizedDevices
             || self == .ccuChainCalculator
             || self == .resetCharacter
