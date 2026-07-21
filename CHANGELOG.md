@@ -2,6 +2,9 @@
 
 ## v1.0.9 (In Progress)
 
+### Added
+- Added a WBCCU Deals tool that displays current StarCitizen-Info Warbond upgrade offers with ship artwork, standard and Warbond values, savings, feed freshness, and a link to the RSI upgrade store.
+
 ### Changed
 - Started the `1.0.9` release branch and release-note tracking for ongoing work.
 

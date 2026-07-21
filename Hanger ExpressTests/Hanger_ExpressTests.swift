@@ -2797,6 +2797,12 @@ struct Hanger_ExpressTests {
         #expect(offer.priceUSD == 95)
         #expect(offer.savingsUSD == 15)
         #expect(offer.available)
+        #expect(catalog.generatedAt == Date(timeIntervalSince1970: 1_778_961_600))
+
+        let deals = WBCCUDeal.makeDeals(from: catalog)
+        #expect(deals.count == 1)
+        #expect(deals.first?.targetShip?.id == 3)
+        #expect(deals.first?.standardValueUSD == 110)
     }
 
     @Test func hostedShipCatalogStoreForceRefreshBypassesCachedCatalog() async throws {
