@@ -1,3 +1,4 @@
+import Photos
 import SwiftUI
 import UIKit
 
@@ -44,9 +45,11 @@ struct HangarDashboardView: View {
     let snapshot: HangarSnapshot
     private let allPackageGroups: [GroupedHangarPackage]
 
+    @Environment(\.displayScale) private var displayScale
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
     @AppStorage(DisplayPreferences.hangarUpgradedShipDisplayModeKey) private var showsUpgradedShipInHangar = DisplayPreferences.hangarUpgradedShipDisplayEnabledByDefault
+    @AppStorage(DisplayPreferences.compositeUpgradeThumbnailModeKey) private var usesCompositeUpgradeThumbnails = DisplayPreferences.compositeUpgradeThumbnailsEnabledByDefault
     @AppStorage(DisplayPreferences.hangarGiftedHighlightKey) private var highlightsGiftedHangarRows = DisplayPreferences.hangarGiftedHighlightEnabledByDefault
     @AppStorage(DisplayPreferences.hangarUpgradedHighlightKey) private var highlightsUpgradedHangarRows = DisplayPreferences.hangarUpgradedHighlightEnabledByDefault
     @AppStorage(DisplayPreferences.sharePictureAutoCopiesDebugLogKey) private var autoCopiesSharePictureDebugLog = DisplayPreferences.sharePictureAutoCopiesDebugLogEnabledByDefault
@@ -61,10 +64,15 @@ struct HangarDashboardView: View {
     @State private var presentedBulkAction: HangarBulkActionRequest?
     @State private var sharePicturePayload: HangarSharePicturePayload?
     @State private var sharePictureError: HangarSharePictureError?
+    @State private var photoSaveNotice: HangarPhotoSaveNotice?
     @State private var isGeneratingSharePicture = false
     @State private var itemTranslationState = HangarItemTranslationViewState()
     @State private var translationService = OnDeviceHangarItemTranslationService.shared
     @State private var searchHaystackCache = HangarPackageSearchHaystackCache()
+    @State private var hangarImagePrefetchTask: Task<Void, Never>?
+
+    private static let hangarImagePrefetchLookaheadCount = 10
+    private static let hangarThumbnailPointSize = CGSize(width: 76, height: 76)
 
     init(appModel: AppModel, snapshot: HangarSnapshot) {
         self.appModel = appModel
@@ -149,7 +157,7 @@ struct HangarDashboardView: View {
                 }
 
                 Section {
-                    ForEach(visiblePackageGroups) { packageGroup in
+                    ForEach(Array(visiblePackageGroups.enumerated()), id: \.element.id) { offset, packageGroup in
                         let isSelected = selectedPackageGroupIDs.contains(packageGroup.id)
 
                         if isSelectingPackages {
@@ -164,6 +172,9 @@ struct HangarDashboardView: View {
                                 )
                             }
                             .buttonStyle(.plain)
+                            .onAppear {
+                                scheduleHangarImagePrefetch(startingAt: offset, in: visiblePackageGroups)
+                            }
                             .listRowBackground(
                                 hangarRowBackground(
                                     for: packageGroup.representative,
@@ -186,6 +197,15 @@ struct HangarDashboardView: View {
                                 )
                             }
                             .contextMenu {
+                                Button {
+                                    Task {
+                                        await savePictureToPhotos(for: packageGroup)
+                                    }
+                                } label: {
+                                    Label("Save to Photos", systemImage: "square.and.arrow.down")
+                                }
+                                .disabled(isGeneratingSharePicture)
+
                                 Button {
                                     Task {
                                         await presentSharePicture(for: packageGroup)
@@ -211,6 +231,9 @@ struct HangarDashboardView: View {
                                     Label("Share Raw Card Data", systemImage: "square.and.arrow.up")
                                 }
                             }
+                            .onAppear {
+                                scheduleHangarImagePrefetch(startingAt: offset, in: visiblePackageGroups)
+                            }
                             .listRowBackground(hangarRowBackground(for: packageGroup.representative))
                         }
                     }
@@ -221,6 +244,13 @@ struct HangarDashboardView: View {
             .id(appLanguageRawValue)
             .task(id: hangarItemLanguageRawValue) {
                 await loadItemTranslationDictionary()
+            }
+            .task(id: hangarImagePrefetchID(for: visiblePackageGroups)) {
+                await prefetchHangarImages(startingAt: 0, in: visiblePackageGroups)
+            }
+            .onDisappear {
+                hangarImagePrefetchTask?.cancel()
+                hangarImagePrefetchTask = nil
             }
             .onChange(of: isSearchPresented) { _, isPresented in
                 guard !isPresented else {
@@ -272,6 +302,13 @@ struct HangarDashboardView: View {
                     dismissButton: .default(Text("OK"))
                 )
             }
+            .alert(item: $photoSaveNotice) { notice in
+                Alert(
+                    title: Text(notice.title),
+                    message: Text(notice.message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
             .overlay {
                 if isGeneratingSharePicture {
                     HangarSharePictureProgressOverlay()
@@ -309,6 +346,96 @@ struct HangarDashboardView: View {
         }
     }
 
+    private func hangarImagePrefetchID(for packageGroups: [GroupedHangarPackage]) -> String {
+        [
+            appModel.hangarFleetImageReloadToken.uuidString,
+            showsUpgradedShipInHangar ? "upgraded" : "package",
+            usesCompositeUpgradeThumbnails ? "composite" : "single",
+            packageGroups.prefix(Self.hangarImagePrefetchLookaheadCount).map(\.id).joined(separator: ","),
+            "\(packageGroups.count)"
+        ].joined(separator: "|")
+    }
+
+    private func scheduleHangarImagePrefetch(
+        startingAt startIndex: Int,
+        in packageGroups: [GroupedHangarPackage]
+    ) {
+        hangarImagePrefetchTask?.cancel()
+        let requests = hangarImagePrefetchRequests(startingAt: startIndex, in: packageGroups)
+        hangarImagePrefetchTask = Task(priority: .utility) {
+            await URLCachedImageStore.shared.prefetchCompositeImages(for: requests.composites)
+            await URLCachedImageStore.shared.prefetchImages(for: requests.remotes)
+        }
+    }
+
+    private func prefetchHangarImages(
+        startingAt startIndex: Int,
+        in packageGroups: [GroupedHangarPackage]
+    ) async {
+        let requests = hangarImagePrefetchRequests(startingAt: startIndex, in: packageGroups)
+        await URLCachedImageStore.shared.prefetchCompositeImages(for: requests.composites)
+        await URLCachedImageStore.shared.prefetchImages(for: requests.remotes)
+    }
+
+    private func hangarImagePrefetchRequests(
+        startingAt startIndex: Int,
+        in packageGroups: [GroupedHangarPackage]
+    ) -> (remotes: [RemoteImagePrefetchRequest], composites: [UpgradeCompositeImagePrefetchRequest]) {
+        guard startIndex < packageGroups.count else {
+            return ([], [])
+        }
+
+        let thumbnailSize = Self.hangarThumbnailPointSize
+        var remoteRequests: [RemoteImagePrefetchRequest] = []
+        var compositeRequests: [UpgradeCompositeImagePrefetchRequest] = []
+        let window = packageGroups
+            .dropFirst(max(0, startIndex))
+            .prefix(Self.hangarImagePrefetchLookaheadCount)
+
+        for packageGroup in window {
+            let package = packageGroup.representative
+            if usesCompositeUpgradeThumbnails,
+               let upgradePricing = compositeUpgradePricing(for: package),
+               upgradePricing.sourceShipImageURL != nil || upgradePricing.targetShipImageURL != nil {
+                compositeRequests.append(
+                    UpgradeCompositeImagePrefetchRequest(
+                        sourceURL: upgradePricing.sourceShipImageURL,
+                        targetURL: upgradePricing.targetShipImageURL,
+                        targetPointSize: thumbnailSize,
+                        displayScale: displayScale
+                    )
+                )
+            } else if let thumbnailURL = displayThumbnailURL(for: package) {
+                remoteRequests.append(
+                    RemoteImagePrefetchRequest(
+                        url: thumbnailURL,
+                        targetPointSize: thumbnailSize,
+                        displayScale: displayScale
+                    )
+                )
+            }
+        }
+
+        return (remoteRequests, compositeRequests)
+    }
+
+    private func compositeUpgradePricing(for package: HangarPackage) -> PackageItem.UpgradePricing? {
+        guard package.isUpgradeOnlyPledge else {
+            return nil
+        }
+
+        return package.contents.compactMap(\.upgradePricing).first
+    }
+
+    private func displayThumbnailURL(for package: HangarPackage) -> URL? {
+        if showsUpgradedShipInHangar,
+           let upgradedShipThumbnailURL = package.upgradedShipThumbnailURL {
+            return upgradedShipThumbnailURL
+        }
+
+        return package.packageThumbnailURL
+    }
+
     private var hasStoredCredentials: Bool {
         appModel.session?.hasStoredCredentials == true
     }
@@ -342,6 +469,9 @@ struct HangarDashboardView: View {
         }
 
         if !hasStoredCredentials {
+            if appModel.session?.isReadOnly == true {
+                return AppLocalizer.string("Bulk gift and reclaim are disabled for this read-only account.")
+            }
             return AppLocalizer.string("Bulk gift and reclaim need a fresh sign-in with saved credentials.")
         }
 
@@ -529,6 +659,42 @@ struct HangarDashboardView: View {
         }
     }
 
+    @MainActor
+    private func savePictureToPhotos(for packageGroup: GroupedHangarPackage) async {
+        guard !isGeneratingSharePicture else { return }
+        isGeneratingSharePicture = true
+        defer { isGeneratingSharePicture = false }
+
+        let authorization = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard authorization == .authorized || authorization == .limited else {
+            photoSaveNotice = HangarPhotoSaveNotice(
+                title: AppLocalizer.string("Unable to Save Image"),
+                message: AppLocalizer.string("Photo access is required to save the hangar picture.")
+            )
+            return
+        }
+
+        do {
+            let fileURL = try await HangarSharePictureGenerator.makeJPEG(
+                for: packageGroup,
+                fleet: snapshot.fleet,
+                itemTranslator: itemTranslator
+            )
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: fileURL)
+            }
+            photoSaveNotice = HangarPhotoSaveNotice(
+                title: AppLocalizer.string("Saved to Photos"),
+                message: AppLocalizer.string("The hangar picture was added to your photo library.")
+            )
+        } catch {
+            photoSaveNotice = HangarPhotoSaveNotice(
+                title: AppLocalizer.string("Unable to Save Image"),
+                message: error.localizedDescription
+            )
+        }
+    }
+
     @ViewBuilder
     private func hangarRowBackground(for package: HangarPackage, isSelected: Bool = false) -> some View {
         let baseColor = Color(uiColor: .secondarySystemGroupedBackground)
@@ -611,7 +777,11 @@ private struct HangarBulkSelectionSummaryView: View {
                 .disabled(!canGift)
 
                 Button(role: .destructive, action: onReclaim) {
-                    Label("Reclaim", systemImage: "arrow.3.trianglepath")
+                    Label {
+                        Text(AppLocalizer.string("Reclaim"))
+                    } icon: {
+                        Image(systemName: "arrow.3.trianglepath")
+                    }
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -797,7 +967,11 @@ struct HangarPackageGroupRow: View {
     }
 
     private var insuranceBadgeText: String? {
-        visibleInsurance
+        package.isOriginalConceptShip ? "OC" : visibleInsurance
+    }
+
+    private var insuranceBadgeStyle: HangarInsuranceBadge.Style {
+        package.isOriginalConceptShip ? .originalConcept : .standard
     }
 
     var body: some View {
@@ -813,7 +987,10 @@ struct HangarPackageGroupRow: View {
                     )
 
                     if let insuranceBadgeText {
-                        HangarInsuranceBadge(text: insuranceBadgeText)
+                        HangarInsuranceBadge(
+                            text: insuranceBadgeText,
+                            style: insuranceBadgeStyle
+                        )
                             .padding(6)
                     }
                 }
@@ -967,7 +1144,13 @@ private struct HangarSelectablePackageGroupRow: View {
 private struct HangarInsuranceBadge: View {
     @Environment(\.colorScheme) private var colorScheme
 
+    enum Style {
+        case standard
+        case originalConcept
+    }
+
     let text: String
+    let style: Style
 
     private var palette: HangarInsuranceBadgePalette {
         HangarInsuranceBadgePalette(colorScheme: colorScheme)
@@ -975,11 +1158,25 @@ private struct HangarInsuranceBadge: View {
 
     var body: some View {
         Text(text)
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(palette.foregroundColor)
+            .font(.caption2.weight(style == .originalConcept ? .heavy : .semibold))
+            .foregroundStyle(foregroundStyle)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .modifier(HangarInsuranceBadgeGlassStyle(palette: palette))
+            .modifier(
+                HangarInsuranceBadgeGlassStyle(
+                    palette: palette,
+                    style: style
+                )
+            )
+    }
+
+    private var foregroundStyle: Color {
+        switch style {
+        case .standard:
+            return palette.foregroundColor
+        case .originalConcept:
+            return Color(red: 0.92, green: 0.78, blue: 0.32)
+        }
     }
 }
 
@@ -1013,18 +1210,69 @@ private struct HangarInsuranceBadgePalette {
 
 private struct HangarInsuranceBadgeGlassStyle: ViewModifier {
     let palette: HangarInsuranceBadgePalette
+    let style: HangarInsuranceBadge.Style
 
     func body(content: Content) -> some View {
         content
             .background(
                 Capsule(style: .continuous)
-                    .fill(palette.backgroundColor)
-                    .shadow(color: palette.shadowColor, radius: 3, x: 0, y: 1)
+                    .fill(backgroundStyle)
+                    .shadow(
+                        color: shadowColor,
+                        radius: style == .originalConcept ? 8 : 3,
+                        x: 0,
+                        y: style == .originalConcept ? 3 : 1
+                    )
             )
             .overlay {
                 Capsule(style: .continuous)
-                    .stroke(palette.strokeColor, lineWidth: 0.8)
+                    .strokeBorder(strokeStyle, lineWidth: style == .originalConcept ? 1 : 0.8)
             }
+    }
+
+    private var backgroundStyle: AnyShapeStyle {
+        switch style {
+        case .standard:
+            return AnyShapeStyle(palette.backgroundColor)
+        case .originalConcept:
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.72),
+                        Color.black.opacity(0.46)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+        }
+    }
+
+    private var strokeStyle: AnyShapeStyle {
+        switch style {
+        case .standard:
+            return AnyShapeStyle(palette.strokeColor)
+        case .originalConcept:
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.92, green: 0.78, blue: 0.32).opacity(0.42),
+                        Color(red: 0.92, green: 0.78, blue: 0.32).opacity(0.16)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+        }
+    }
+
+    private var shadowColor: Color {
+        switch style {
+        case .standard:
+            return palette.shadowColor
+        case .originalConcept:
+            return Color.black.opacity(0.32)
+        }
     }
 }
 
@@ -1246,7 +1494,7 @@ struct HangarPackageDetailView: View {
                     }
                     .padding(.vertical, 4)
                 } header: {
-                    Text("Also Contains")
+                    Text(AppLocalizer.string("Also Contains"))
                 }
             }
 
@@ -1256,7 +1504,7 @@ struct HangarPackageDetailView: View {
                         presentedActionSheet = .gift
                     } label: {
                         HangarActionTile(
-                            title: "Gift",
+                            title: AppLocalizer.string("Gift"),
                             systemImage: "gift.fill",
                             accentColor: .green,
                             isEnabled: canUseGiftAction
@@ -1269,7 +1517,7 @@ struct HangarPackageDetailView: View {
                         presentedActionSheet = .upgrade
                     } label: {
                         HangarActionTile(
-                            title: "Upgrade",
+                            title: AppLocalizer.string("Upgrade"),
                             systemImage: "chevron.up.2",
                             accentColor: .blue,
                             isEnabled: canUseUpgradeAction
@@ -1282,7 +1530,7 @@ struct HangarPackageDetailView: View {
                         presentedActionSheet = .melt
                     } label: {
                         HangarActionTile(
-                            title: "Reclaim",
+                            title: AppLocalizer.string("Reclaim"),
                             systemImage: "arrow.3.trianglepath",
                             accentColor: .red,
                             isEnabled: canUseReclaimAction
@@ -1300,7 +1548,11 @@ struct HangarPackageDetailView: View {
             } footer: {
                 VStack(alignment: .leading, spacing: 6) {
                     if hasAnySupportedLiveAction && !hasStoredCredentials {
-                        Text("Grey actions need a fresh sign-in with saved credentials before Hangar Express can send live RSI requests.")
+                        if appModel.session?.isReadOnly == true {
+                            Text("Gift, upgrade, and reclaim are disabled for this read-only account.")
+                        } else {
+                            Text("Grey actions need a fresh sign-in with saved credentials before Hangar Express can send live RSI requests.")
+                        }
                     } else if hasAnySupportedLiveAction {
                         Text("Hangar Express will confirm with Face ID or your iPhone passcode before sending any live RSI action.")
                     } else {
@@ -1480,6 +1732,12 @@ private struct HangarSharePicturePayload: Identifiable {
 
 private struct HangarSharePictureError: Identifiable {
     let id = UUID()
+    let message: String
+}
+
+private struct HangarPhotoSaveNotice: Identifiable {
+    let id = UUID()
+    let title: String
     let message: String
 }
 
@@ -1792,7 +2050,7 @@ private enum HangarSharePictureGenerator {
         }
 
         return lowercased.contains("insurance")
-            || lowercased.contains("lti")
+            || HangarPackage.containsLifetimeInsuranceToken(lowercased)
             || lowercased.range(of: #"\d+\s*(month|months|mo|year|years|yr)\b"#, options: .regularExpression) != nil
     }
 
@@ -3473,7 +3731,7 @@ private struct HangarBulkSelectedPledgesSummaryView: View {
 }
 
 private struct HangarActionTile: View {
-    let title: LocalizedStringKey
+    let title: String
     let systemImage: String
     let accentColor: Color
     let isEnabled: Bool

@@ -104,6 +104,7 @@ nonisolated struct RefreshProgress: Hashable, Sendable {
 
 typealias RefreshProgressHandler = @MainActor @Sendable (RefreshProgress) -> Void
 typealias LimitedShipCartLogHandler = @MainActor @Sendable (String) -> Void
+typealias HangarLogBatchHandler = @MainActor @Sendable ([HangarLogEntry]) -> Void
 
 nonisolated enum HangarLogFetchMode: Hashable, Sendable {
     case initial
@@ -249,6 +250,12 @@ nonisolated struct UpgradeTargetCandidate: Hashable, Sendable, Codable, Identifi
 nonisolated struct ApplyUpgradeResult: Hashable, Sendable {
     let upgradeItemPledgeID: Int
     let targetPledgeID: Int
+    let wasSuccessful: Bool
+    let failureMessage: String?
+    let updatedCookies: [SessionCookie]
+}
+
+nonisolated struct CharacterRepairResult: Hashable, Sendable {
     let wasSuccessful: Bool
     let failureMessage: String?
     let updatedCookies: [SessionCookie]
@@ -502,7 +509,8 @@ protocol HangarRepository: Sendable {
         for session: UserSession,
         from snapshot: HangarSnapshot,
         mode: HangarLogFetchMode,
-        progress: @escaping RefreshProgressHandler
+        progress: @escaping RefreshProgressHandler,
+        batchHandler: HangarLogBatchHandler?
     ) async throws -> HangarSnapshot
 
     func refreshAccountData(
@@ -536,6 +544,11 @@ protocol HangarRepository: Sendable {
         targetPledgeID: Int,
         password: String
     ) async throws -> ApplyUpgradeResult
+
+    func requestCharacterRepair(
+        for session: UserSession,
+        password: String
+    ) async throws -> CharacterRepairResult
 
     func prepareBuybackCheckout(
         for session: UserSession,
@@ -572,13 +585,29 @@ extension HangarRepository {
     func refreshHangarLogData(
         for session: UserSession,
         from snapshot: HangarSnapshot,
+        mode: HangarLogFetchMode,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot {
+        try await refreshHangarLogData(
+            for: session,
+            from: snapshot,
+            mode: mode,
+            progress: progress,
+            batchHandler: nil
+        )
+    }
+
+    func refreshHangarLogData(
+        for session: UserSession,
+        from snapshot: HangarSnapshot,
         progress: @escaping RefreshProgressHandler
     ) async throws -> HangarSnapshot {
         try await refreshHangarLogData(
             for: session,
             from: snapshot,
             mode: .initial,
-            progress: progress
+            progress: progress,
+            batchHandler: nil
         )
     }
 }

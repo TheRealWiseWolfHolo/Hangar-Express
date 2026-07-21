@@ -150,20 +150,27 @@ final class SubscriptionStore {
         }
 
         guard !didStart else {
+            if products.isEmpty {
+                await loadProducts()
+            }
             await refreshPurchasedProducts()
             return
         }
 
         didStart = true
         observeTransactionUpdates()
-        await refreshPurchasedProducts()
         await loadProducts()
+        await refreshPurchasedProducts()
     }
 
     func loadProducts() async {
         guard storeKitEnabled else {
             products = []
             productLoadErrorMessage = nil
+            return
+        }
+
+        guard !isLoadingProducts else {
             return
         }
 

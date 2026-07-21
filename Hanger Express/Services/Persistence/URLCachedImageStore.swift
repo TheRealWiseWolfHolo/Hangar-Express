@@ -4,6 +4,47 @@ import ImageIO
 import UIKit
 import WebKit
 
+nonisolated struct RemoteImagePrefetchRequest: Hashable, Sendable {
+    let url: URL
+    let targetPointSize: CGSize?
+    let displayScale: CGFloat
+    let maxRetries: Int
+
+    init(
+        url: URL,
+        targetPointSize: CGSize? = nil,
+        displayScale: CGFloat = 1,
+        maxRetries: Int = 2
+    ) {
+        self.url = url
+        self.targetPointSize = targetPointSize
+        self.displayScale = displayScale
+        self.maxRetries = maxRetries
+    }
+}
+
+nonisolated struct UpgradeCompositeImagePrefetchRequest: Hashable, Sendable {
+    let sourceURL: URL?
+    let targetURL: URL?
+    let targetPointSize: CGSize
+    let displayScale: CGFloat
+    let maxRetries: Int
+
+    init(
+        sourceURL: URL?,
+        targetURL: URL?,
+        targetPointSize: CGSize,
+        displayScale: CGFloat = 1,
+        maxRetries: Int = 2
+    ) {
+        self.sourceURL = sourceURL
+        self.targetURL = targetURL
+        self.targetPointSize = targetPointSize
+        self.displayScale = displayScale
+        self.maxRetries = maxRetries
+    }
+}
+
 actor URLCachedImageStore: RemoteImageCaching {
     static let shared = URLCachedImageStore()
 
@@ -180,6 +221,55 @@ actor URLCachedImageStore: RemoteImageCaching {
         } catch {
             inFlightFleetCardTasks[descriptor.identifier] = nil
             throw error
+        }
+    }
+
+    func prefetchImages(for requests: [RemoteImagePrefetchRequest]) async {
+        for request in Self.uniquePreservingOrder(requests) {
+            guard !Task.isCancelled else {
+                return
+            }
+
+            _ = try? await image(
+                for: request.url,
+                targetPointSize: request.targetPointSize,
+                displayScale: request.displayScale,
+                maxRetries: request.maxRetries
+            )
+        }
+    }
+
+    func prefetchCompositeImages(for requests: [UpgradeCompositeImagePrefetchRequest]) async {
+        for request in Self.uniquePreservingOrder(requests) {
+            guard !Task.isCancelled else {
+                return
+            }
+
+            _ = try? await compositeImage(
+                sourceURL: request.sourceURL,
+                targetURL: request.targetURL,
+                targetPointSize: request.targetPointSize,
+                displayScale: request.displayScale,
+                maxRetries: request.maxRetries
+            )
+        }
+    }
+
+    func prefetchFleetCardBaseImages(
+        for recipes: [FleetCardBaseSnapshotRecipe],
+        displayScale: CGFloat = 1,
+        maxRetries: Int = 2
+    ) async {
+        for recipe in Self.uniquePreservingOrder(recipes) {
+            guard !Task.isCancelled else {
+                return
+            }
+
+            _ = try? await fleetCardBaseImage(
+                for: recipe,
+                displayScale: displayScale,
+                maxRetries: maxRetries
+            )
         }
     }
 
@@ -737,6 +827,18 @@ actor URLCachedImageStore: RemoteImageCaching {
 
     private nonisolated static func hash(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private nonisolated static func uniquePreservingOrder<Value: Hashable>(_ values: [Value]) -> [Value] {
+        var seen: Set<Value> = []
+        var uniqueValues: [Value] = []
+        uniqueValues.reserveCapacity(values.count)
+
+        for value in values where seen.insert(value).inserted {
+            uniqueValues.append(value)
+        }
+
+        return uniqueValues
     }
 }
 

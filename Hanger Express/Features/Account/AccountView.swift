@@ -88,7 +88,12 @@ struct AccountView: View {
                 }
 
                 Section {
-                    FleetToolsSection(showsHeader: false) { tool in
+                    FleetToolsSection(
+                        showsHeader: false,
+                        disabledTools: appModel.session?.isReadOnly == true
+                            ? [.authorizedDevices, .resetCharacter]
+                            : []
+                    ) { tool in
                         handleToolSelection(tool)
                     }
                     .padding(.vertical, 4)
@@ -184,7 +189,7 @@ struct AccountView: View {
                 case .authorizedDevices:
                     AuthorizedDevicesView(appModel: appModel)
                 case .resetCharacter:
-                    EmptyView()
+                    CharacterRepairView(appModel: appModel)
                 }
             }
             .alert("Account Total Value", isPresented: $isShowingAccountTotalValueExplanation) {
@@ -548,6 +553,204 @@ struct AccountView: View {
         }
 
         return score
+    }
+}
+
+private struct CharacterRepairView: View {
+    let appModel: AppModel
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var isRequesting = false
+    @State private var errorMessage: String?
+    @State private var successMessage: String?
+
+    private var hasSavedPassword: Bool {
+        let password = appModel.session?.credentials?.password.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !password.isEmpty
+    }
+
+    private var canRequestRepair: Bool {
+        appModel.session != nil && hasSavedPassword && !appModel.isRefreshing && !isRequesting
+    }
+
+    private var accountDisplayName: String {
+        let candidates = [
+            appModel.session?.displayName,
+            appModel.session?.handle,
+            appModel.session?.credentials?.loginIdentifier,
+            appModel.session?.email
+        ]
+
+        for candidate in candidates {
+            let trimmedCandidate = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmedCandidate.isEmpty {
+                return trimmedCandidate
+            }
+        }
+
+        return AppLocalizer.string("Current RSI Account")
+    }
+
+    private var requestFooterMessage: String {
+        if appModel.session == nil {
+            return AppLocalizer.string("Sign in to RSI before requesting a character repair.")
+        }
+
+        if !hasSavedPassword {
+            return AppLocalizer.string("Sign in again with saved credentials before Hangar Express can submit a character repair request.")
+        }
+
+        if appModel.isRefreshing {
+            return AppLocalizer.string("Wait for the current refresh or account action to finish before requesting a character repair.")
+        }
+
+        return AppLocalizer.string("Face ID or passcode verification is required before the request is sent.")
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let successMessage {
+                    Section {
+                        VStack(spacing: 12) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 46, weight: .semibold))
+                                .foregroundStyle(.green)
+                                .accessibilityHidden(true)
+
+                            Text(AppLocalizer.string("Success"))
+                                .font(.title3.bold())
+
+                            Text(successMessage)
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 20)
+                    }
+
+                    Section {
+                        Button {
+                            dismiss()
+                        } label: {
+                            Text(AppLocalizer.string("Done"))
+                                .font(.headline)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.green)
+                    }
+                } else {
+                    Section {
+                        Label {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(AppLocalizer.string("Character Repair"))
+                                    .font(.headline)
+
+                                Text(AppLocalizer.string("This action cannot be undone"))
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                        } icon: {
+                            Image(systemName: "person.crop.circle.badge.exclamationmark")
+                                .font(.title2.weight(.semibold))
+                                .foregroundStyle(.red)
+                        }
+                        .padding(.vertical, 4)
+                    }
+
+                    Section {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(AppLocalizer.string("Please verify the account you are trying to reset."))
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+
+                            Text(accountDisplayName)
+                                .font(.headline)
+                                .fontWeight(.bold)
+                                .foregroundStyle(.primary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 4)
+                    }
+
+                    Section {
+                        Button(role: .destructive) {
+                            Task {
+                                await requestRepair()
+                            }
+                        } label: {
+                            HStack {
+                                if isRequesting {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+
+                                Text(AppLocalizer.string(isRequesting ? "Requesting Repair..." : "Request Character Repair"))
+                                    .font(.headline)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .disabled(!canRequestRepair)
+                    } footer: {
+                        Text(requestFooterMessage)
+                    }
+                }
+            }
+            .navigationTitle(successMessage == nil ? AppLocalizer.string("Character Repair") : AppLocalizer.string("Success"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(AppLocalizer.string("Done")) {
+                        dismiss()
+                    }
+                    .disabled(isRequesting)
+                }
+            }
+            .alert(AppLocalizer.string("Unable to Request Repair"), isPresented: errorAlertBinding) {
+                Button(AppLocalizer.string("OK"), role: .cancel) {}
+            } message: {
+                Text(errorMessage ?? "")
+            }
+        }
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
+        .interactiveDismissDisabled(isRequesting)
+    }
+
+    private var errorAlertBinding: Binding<Bool> {
+        Binding {
+            errorMessage != nil
+        } set: { isPresented in
+            if !isPresented {
+                errorMessage = nil
+            }
+        }
+    }
+
+    private func requestRepair() async {
+        guard !isRequesting else {
+            return
+        }
+
+        isRequesting = true
+        errorMessage = nil
+        defer {
+            isRequesting = false
+        }
+
+        do {
+            try await appModel.requestCharacterRepair()
+            successMessage = AppLocalizer.string("Your character has been reset")
+        } catch let error as SensitiveActionAuthorizationError where error.isCancellation {
+            return
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
 

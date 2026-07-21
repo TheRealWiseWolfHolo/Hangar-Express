@@ -7,6 +7,7 @@ import WebKit
 final class AuthenticationViewModel {
     enum Step {
         case signIn
+        case captcha
         case twoFactor
     }
 
@@ -20,10 +21,10 @@ final class AuthenticationViewModel {
     var step: Step = .signIn
     var loginIdentifier = ""
     var password = ""
-    var rememberMe = true
     var verificationCode = ""
+    var captchaCode = ""
+    var captchaImageData: Data?
     var deviceName = AuthorizedDevice.hangarExpressDeviceName
-    var trustDuration: TrustedDeviceDuration = .year
     var noticeMessage: String?
     var errorMessage: String?
     var errorDebugDetails: String?
@@ -40,7 +41,6 @@ final class AuthenticationViewModel {
         if let draft = appModel.consumePendingAuthenticationDraft() {
             loginIdentifier = draft.loginIdentifier
             password = draft.password
-            rememberMe = draft.rememberMe
             noticeMessage = draft.notice
         }
     }
@@ -62,24 +62,11 @@ final class AuthenticationViewModel {
             let result = try await authService.signIn(
                 loginIdentifier: loginIdentifier,
                 password: password,
-                rememberMe: rememberMe,
+                rememberMe: true,
                 forceBrowserLogin: forceBrowserLogin
             )
 
-            switch result {
-            case let .authenticated(session):
-                password = ""
-                await appModel.completeAuthentication(session)
-            case .requiresTwoFactor:
-                step = .twoFactor
-                verificationCode = ""
-            case let .requiresBrowserChallenge(message):
-                browserChallenge = BrowserChallenge(
-                    message: message,
-                    loginIdentifier: loginIdentifier,
-                    password: password
-                )
-            }
+            await handle(result, browserLoginIdentifier: loginIdentifier, browserPassword: password)
         } catch {
             if case let AuthenticationError.requiresBrowserChallenge(message) = error {
                 browserChallenge = BrowserChallenge(
@@ -90,6 +77,34 @@ final class AuthenticationViewModel {
                 return
             }
 
+            showError(error)
+        }
+    }
+
+    func submitCaptcha() async {
+        guard !isSubmitting else { return }
+        clearMessages()
+        isSubmitting = true
+        defer { isSubmitting = false }
+
+        do {
+            let result = try await authService.submitCaptcha(captchaCode)
+            await handle(result, browserLoginIdentifier: loginIdentifier, browserPassword: password)
+        } catch {
+            showError(error)
+        }
+    }
+
+    func beginReadOnlySignIn() async {
+        guard !isSubmitting else { return }
+        clearMessages()
+        isSubmitting = true
+        defer { isSubmitting = false }
+
+        do {
+            let result = try await authService.beginReadOnlySignIn()
+            await handle(result, browserLoginIdentifier: "", browserPassword: "")
+        } catch {
             showError(error)
         }
     }
@@ -108,7 +123,7 @@ final class AuthenticationViewModel {
             let session = try await authService.submitTwoFactor(
                 code: verificationCode,
                 deviceName: deviceName,
-                trustDuration: trustDuration
+                trustDuration: .year
             )
 
             password = ""
@@ -170,6 +185,8 @@ final class AuthenticationViewModel {
     func cancelBrowserChallenge() {
         browserChallenge = nil
         verificationCode = ""
+        captchaCode = ""
+        captchaImageData = nil
         step = .signIn
 
         Task {
@@ -180,10 +197,39 @@ final class AuthenticationViewModel {
     func returnToSignIn() {
         clearMessages()
         verificationCode = ""
+        captchaCode = ""
+        captchaImageData = nil
         step = .signIn
 
         Task {
             await authService.cancelPendingAuthentication()
+        }
+    }
+
+    private func handle(
+        _ result: SignInOutcome,
+        browserLoginIdentifier: String,
+        browserPassword: String
+    ) async {
+        switch result {
+        case let .authenticated(session):
+            password = ""
+            captchaCode = ""
+            captchaImageData = nil
+            await appModel.completeAuthentication(session)
+        case let .requiresCaptcha(imageData):
+            captchaImageData = imageData
+            captchaCode = ""
+            step = .captcha
+        case .requiresTwoFactor:
+            step = .twoFactor
+            verificationCode = ""
+        case let .requiresBrowserChallenge(message):
+            browserChallenge = BrowserChallenge(
+                message: message,
+                loginIdentifier: browserLoginIdentifier,
+                password: browserPassword
+            )
         }
     }
 

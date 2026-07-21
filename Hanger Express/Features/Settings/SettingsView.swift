@@ -13,6 +13,7 @@ struct SettingsView: View {
     @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
     @AppStorage(AppAppearance.storageKey) private var appAppearanceRawValue = AppAppearance.system.rawValue
     @AppStorage(SyncPreferences.workerCountKey) private var syncWorkerCount = Double(SyncPreferences.defaultWorkerCount)
+    @AppStorage(SyncPreferences.inventoryAutoRefreshIntervalKey) private var inventoryAutoRefreshIntervalRawValue = SyncPreferences.defaultInventoryAutoRefreshInterval.rawValue
     @AppStorage(DisplayPreferences.compositeUpgradeThumbnailModeKey) private var usesCompositeUpgradeThumbnails = DisplayPreferences.compositeUpgradeThumbnailsEnabledByDefault
     @AppStorage(DisplayPreferences.hangarUpgradedShipDisplayModeKey) private var showsUpgradedShipInHangar = DisplayPreferences.hangarUpgradedShipDisplayEnabledByDefault
     @AppStorage(DisplayPreferences.hangarGiftedHighlightKey) private var highlightsGiftedHangarRows = DisplayPreferences.hangarGiftedHighlightEnabledByDefault
@@ -73,8 +74,6 @@ struct SettingsView: View {
                     .pickerStyle(.menu)
                 } header: {
                     Text("Display")
-                } footer: {
-                    Text("Choose the app language, item language, and appearance. Item language uses StarCitizen-Info terms first, then the on-device translation model when available.")
                 }
 
                 Section {
@@ -141,6 +140,14 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Picker("Auto Inventory Refresh Interval", selection: $inventoryAutoRefreshIntervalRawValue) {
+                        ForEach(SyncPreferences.InventoryAutoRefreshInterval.allCases) { interval in
+                            Text(interval.title)
+                                .tag(interval.rawValue)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             Text("Refresh Workers")
@@ -158,11 +165,14 @@ struct SettingsView: View {
                 } header: {
                     Text("Sync")
                 } footer: {
-                    Text(
-                        appModel.isPro
-                            ? AppLocalizer.string("Early Access Labs can refresh up to 10 pages in parallel.")
-                            : AppLocalizer.string("Standard refreshes up to 2 pages in parallel. Early Access unlocks up to 10 while the feature is in Labs.")
-                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Auto inventory refresh controls when Hangar Express runs a full inventory refresh after opening the app. Manual refresh buttons are unaffected.")
+                        Text(
+                            appModel.isPro
+                                ? AppLocalizer.string("Early Access Labs can refresh up to 10 pages in parallel.")
+                                : AppLocalizer.string("Standard refreshes up to 2 pages in parallel. Early Access unlocks up to 10 while the feature is in Labs.")
+                        )
+                    }
                 }
 
                 Section {
@@ -176,6 +186,14 @@ struct SettingsView: View {
                     Text("Advanced")
                 } footer: {
                     Text("Control hangar artwork, row highlights, optional multi-select actions, and share-picture diagnostics.")
+                }
+
+                Section {
+                    Toggle("Preview Translation Loading Bar", isOn: translationLoadingBarPreviewBinding)
+                } header: {
+                    Text("Developer")
+                } footer: {
+                    Text("Closes Settings and shows sample progress on the Dynamic Island loading bar.")
                 }
 
                 Section {
@@ -298,6 +316,20 @@ struct SettingsView: View {
         }
     }
 
+    private var translationLoadingBarPreviewBinding: Binding<Bool> {
+        Binding(
+            get: {
+                appModel.previewsTranslationLoadingBar
+            },
+            set: { newValue in
+                appModel.previewsTranslationLoadingBar = newValue
+                if newValue {
+                    dismiss()
+                }
+            }
+        )
+    }
+
     private var resolvedWorkerCount: Int {
         SyncPreferences.constrainedWorkerCount(
             Int(syncWorkerCount.rounded()),
@@ -415,6 +447,9 @@ private struct ProSubscriptionSection: View {
             Text("Early Access Status")
         } footer: {
             Text("Developing Hangar Express takes time and money. Show your *optional* support here.")
+        }
+        .task {
+            await subscriptionStore.start()
         }
     }
 
@@ -1001,6 +1036,10 @@ private struct SavedAccountRow: View {
 
         if session.hasStoredCredentials {
             return AppLocalizer.format("%@ saved, credentials in Keychain", cookieSummary)
+        }
+
+        if session.isReadOnly {
+            return AppLocalizer.format("%@ saved, read-only account", cookieSummary)
         }
 
         return cookieSummary

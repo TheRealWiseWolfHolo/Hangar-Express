@@ -47,11 +47,14 @@ struct FleetView: View {
 
     let appModel: AppModel
     let snapshot: HangarSnapshot
+    @Environment(\.displayScale) private var displayScale
     @State private var searchText = ""
     @State private var sortMode: SortMode = .manufacturer
     @State private var selectedShipGroup: GroupedFleetShip?
     @State private var transitionSourceResetToken = 0
     @State private var presentedPledgeSheet: FleetShipPledgeSheetContext?
+    @State private var viewportWidth: CGFloat = 0
+    @State private var fleetImagePrefetchTask: Task<Void, Never>?
     @Namespace private var shipCardTransitionNamespace
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
@@ -68,40 +71,63 @@ struct FleetView: View {
         GridItem(.flexible(), spacing: 12, alignment: .top)
     ]
 
+    private static let fleetImagePrefetchLookaheadCount = 8
+    private static let fleetHorizontalPadding: CGFloat = 32
+    private static let fleetGridSpacing: CGFloat = 12
+    private static let heroCardHeight: CGFloat = 212
+    private static let compactCardHeight: CGFloat = 232
+
     var body: some View {
         let currentItemTranslator = itemTranslator
+        let sections = displaySections
+        let displayedShipGroups = sections.flatMap(\.shipGroups)
 
         NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 24) {
-                    IMEAwareSearchRow(
-                        text: $searchText,
-                        prompt: AppLocalizer.string("Search ships, manufacturers, functions")
-                    )
+            GeometryReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 24) {
+                        IMEAwareSearchRow(
+                            text: $searchText,
+                            prompt: AppLocalizer.string("Search ships, manufacturers, functions")
+                        )
 
-                    ForEach(displaySections) { section in
-                        VStack(alignment: .leading, spacing: 14) {
-                            if let title = section.title {
-                                HangarTranslatedText(
-                                    source: title,
-                                    itemTranslator: currentItemTranslator
-                                )
-                                    .font(.headline.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 4)
+                        ForEach(sections) { section in
+                            VStack(alignment: .leading, spacing: 14) {
+                                if let title = section.title {
+                                    HangarTranslatedText(
+                                        source: title,
+                                        itemTranslator: currentItemTranslator
+                                    )
+                                        .font(.headline.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 4)
+                                }
+
+                                fleetCards(for: section, displayedShipGroups: displayedShipGroups)
                             }
-
-                            fleetCards(for: section)
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+                    .padding(.bottom, 22)
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 4)
-                .padding(.bottom, 22)
+                .onAppear {
+                    updateFleetViewportWidth(proxy.size.width)
+                }
+                .onChange(of: proxy.size.width) { _, newWidth in
+                    updateFleetViewportWidth(newWidth)
+                }
             }
             .id(appLanguageRawValue)
             .task(id: hangarItemLanguageRawValue) {
                 await loadItemTranslationDictionary()
+            }
+            .task(id: fleetImagePrefetchID(for: displayedShipGroups)) {
+                await prefetchFleetImages(startingAt: 0, in: displayedShipGroups)
+            }
+            .onDisappear {
+                fleetImagePrefetchTask?.cancel()
+                fleetImagePrefetchTask = nil
             }
             .navigationTitle("Fleet")
             .toolbar {
@@ -158,25 +184,31 @@ struct FleetView: View {
     }
 
     @ViewBuilder
-    private func fleetCards(for section: FleetDisplaySection) -> some View {
+    private func fleetCards(
+        for section: FleetDisplaySection,
+        displayedShipGroups: [GroupedFleetShip]
+    ) -> some View {
         switch displayMode {
         case .singleColumn:
             LazyVStack(spacing: 16) {
                 ForEach(section.shipGroups) { shipGroup in
-                    fleetCard(for: shipGroup)
+                    fleetCard(for: shipGroup, displayedShipGroups: displayedShipGroups)
                 }
             }
         case .twoColumn:
             LazyVGrid(columns: compactGridColumns, alignment: .leading, spacing: 12) {
                 ForEach(section.shipGroups) { shipGroup in
-                    fleetCard(for: shipGroup)
+                    fleetCard(for: shipGroup, displayedShipGroups: displayedShipGroups)
                 }
             }
         }
     }
 
     @ViewBuilder
-    private func fleetCard(for shipGroup: GroupedFleetShip) -> some View {
+    private func fleetCard(
+        for shipGroup: GroupedFleetShip,
+        displayedShipGroups: [GroupedFleetShip]
+    ) -> some View {
         let subtitle = cardSubtitle(for: shipGroup)
         let msrpSummary = msrpSummary(for: shipGroup)
 
@@ -201,6 +233,9 @@ struct FleetView: View {
             }
         }
         .id("\(shipGroup.id)-\(transitionSourceResetToken)")
+        .onAppear {
+            scheduleFleetImagePrefetch(startingAt: shipGroup, in: displayedShipGroups)
+        }
         .contentShape(Rectangle())
         .matchedTransitionSource(
             id: shipGroup.id,
@@ -218,6 +253,96 @@ struct FleetView: View {
         }
         .onLongPressGesture(minimumDuration: 0.4) {
             presentedPledgeSheet = pledgeSheetContext(for: shipGroup)
+        }
+    }
+
+    private func updateFleetViewportWidth(_ width: CGFloat) {
+        guard abs(viewportWidth - width) > 0.5 else {
+            return
+        }
+
+        viewportWidth = width
+    }
+
+    private func fleetImagePrefetchID(for shipGroups: [GroupedFleetShip]) -> String {
+        [
+            displayModeRawValue,
+            "\(Int(viewportWidth.rounded(.up)))",
+            appModel.hangarFleetImageReloadToken.uuidString,
+            shipGroups.prefix(Self.fleetImagePrefetchLookaheadCount).map(\.id).joined(separator: ","),
+            "\(shipGroups.count)"
+        ].joined(separator: "|")
+    }
+
+    private func scheduleFleetImagePrefetch(
+        startingAt shipGroup: GroupedFleetShip,
+        in shipGroups: [GroupedFleetShip]
+    ) {
+        guard let index = shipGroups.firstIndex(where: { $0.id == shipGroup.id }) else {
+            return
+        }
+
+        fleetImagePrefetchTask?.cancel()
+        let recipes = fleetImagePrefetchRecipes(startingAt: index, in: shipGroups)
+        let displayScale = displayScale
+        fleetImagePrefetchTask = Task(priority: .utility) {
+            await URLCachedImageStore.shared.prefetchFleetCardBaseImages(
+                for: recipes,
+                displayScale: displayScale
+            )
+        }
+    }
+
+    private func prefetchFleetImages(
+        startingAt startIndex: Int,
+        in shipGroups: [GroupedFleetShip]
+    ) async {
+        let recipes = fleetImagePrefetchRecipes(startingAt: startIndex, in: shipGroups)
+        await URLCachedImageStore.shared.prefetchFleetCardBaseImages(
+            for: recipes,
+            displayScale: displayScale
+        )
+    }
+
+    private func fleetImagePrefetchRecipes(
+        startingAt startIndex: Int,
+        in shipGroups: [GroupedFleetShip]
+    ) -> [FleetCardBaseSnapshotRecipe] {
+        guard let cardSize = fleetCardPrefetchSize,
+              startIndex < shipGroups.count else {
+            return []
+        }
+
+        let style: FleetCardBaseSnapshotStyle = displayMode == .singleColumn ? .hero : .compact
+        return shipGroups
+            .dropFirst(max(0, startIndex))
+            .prefix(Self.fleetImagePrefetchLookaheadCount)
+            .map { shipGroup in
+                let ship = shipGroup.representative
+                return FleetCardBaseSnapshotRecipe(
+                    style: style,
+                    pointSize: cardSize,
+                    manufacturerName: ship.manufacturer,
+                    backdropURL: ship.imageURL,
+                    logoURL: ship.manufacturerLogoURL
+                )
+            }
+    }
+
+    private var fleetCardPrefetchSize: CGSize? {
+        let contentWidth = viewportWidth - Self.fleetHorizontalPadding
+        guard contentWidth > 1 else {
+            return nil
+        }
+
+        switch displayMode {
+        case .singleColumn:
+            return CGSize(width: contentWidth, height: Self.heroCardHeight)
+        case .twoColumn:
+            return CGSize(
+                width: max(1, (contentWidth - Self.fleetGridSpacing) / 2),
+                height: Self.compactCardHeight
+            )
         }
     }
 
@@ -435,7 +560,7 @@ struct FleetView: View {
     }
 }
 
-enum FleetTool: String, CaseIterable, Identifiable {
+enum FleetTool: String, CaseIterable, Identifiable, Hashable {
     case allShips
     case authorizedDevices
     case ccuChainCalculator
@@ -465,7 +590,7 @@ enum FleetTool: String, CaseIterable, Identifiable {
         case .ccuChainCalculator:
             return AppLocalizer.string("Find the lowest-cost upgrade chain")
         case .resetCharacter:
-            return AppLocalizer.string("To be implemented")
+            return AppLocalizer.string("Request an RSI character repair")
         }
     }
 
@@ -486,15 +611,22 @@ enum FleetTool: String, CaseIterable, Identifiable {
         self == .allShips
             || self == .authorizedDevices
             || self == .ccuChainCalculator
+            || self == .resetCharacter
     }
 }
 
 struct FleetToolsSection: View {
     let onSelect: (FleetTool) -> Void
     var showsHeader = true
+    var disabledTools: Set<FleetTool> = []
 
-    init(showsHeader: Bool = true, onSelect: @escaping (FleetTool) -> Void) {
+    init(
+        showsHeader: Bool = true,
+        disabledTools: Set<FleetTool> = [],
+        onSelect: @escaping (FleetTool) -> Void
+    ) {
         self.showsHeader = showsHeader
+        self.disabledTools = disabledTools
         self.onSelect = onSelect
     }
 
@@ -509,7 +641,7 @@ struct FleetToolsSection: View {
 
             VStack(spacing: 10) {
                 ForEach(FleetTool.allCases) { tool in
-                    FleetToolRow(tool: tool) {
+                    FleetToolRow(tool: tool, isEnabled: !disabledTools.contains(tool)) {
                         onSelect(tool)
                     }
                 }
@@ -520,6 +652,7 @@ struct FleetToolsSection: View {
 
 private struct FleetToolRow: View {
     let tool: FleetTool
+    let isEnabled: Bool
     let action: () -> Void
 
     var body: some View {
@@ -527,11 +660,11 @@ private struct FleetToolRow: View {
             HStack(spacing: 12) {
                 Image(systemName: tool.systemImage)
                     .font(.title3.weight(.semibold))
-                    .foregroundStyle(tool.isAvailable ? Color.accentColor : .secondary)
+                    .foregroundStyle(tool.isAvailable && isEnabled ? Color.accentColor : .secondary)
                     .frame(width: 34, height: 34)
                     .background(
                         Circle()
-                            .fill((tool.isAvailable ? Color.accentColor : Color.secondary).opacity(0.12))
+                            .fill((tool.isAvailable && isEnabled ? Color.accentColor : Color.secondary).opacity(0.12))
                     )
 
                 VStack(alignment: .leading, spacing: 3) {
@@ -560,8 +693,8 @@ private struct FleetToolRow: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(!tool.isAvailable)
-        .opacity(tool.isAvailable ? 1 : 0.62)
+        .disabled(!tool.isAvailable || !isEnabled)
+        .opacity(tool.isAvailable && isEnabled ? 1 : 0.62)
     }
 }
 
