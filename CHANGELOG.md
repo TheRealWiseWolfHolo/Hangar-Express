@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.9 (In Progress)
+
+### Changed
+- Started the `1.0.9` release branch and release-note tracking for ongoing work.
+
 ## v1.0.8 (In Progress)
 
 ### Added
