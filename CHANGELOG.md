@@ -7,6 +7,7 @@
 
 ### Changed
 - Started the `1.0.9` release branch and release-note tracking for ongoing work.
+- Simplified WBCCU Deals to open directly on the deal cards and kept RSI store browsing inside Hangar Express instead of switching to an external browser.
 
 ## v1.0.8 (In Progress)
 
