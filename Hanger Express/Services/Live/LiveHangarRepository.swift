@@ -8266,168 +8266,51 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     if (rsiToken) requestHeaders['x-rsi-token'] = rsiToken;
     if (rsiDevice) requestHeaders['x-rsi-device'] = rsiDevice;
 
-    const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-    const visible = (node) => {
-      if (!node || !node.isConnected) return false;
-      const style = window.getComputedStyle(node);
-      const rect = node.getBoundingClientRect();
-      return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
-    };
-    const cartLineItems = () => Array.from(document.querySelectorAll([
-      '[data-cy-id="cart-line-item"]',
-      '.c-cartLineItem'
-    ].join(','))).filter(visible);
-    const findDeleteButton = (item) => Array.from(item?.querySelectorAll?.([
-      '[data-cy-id="__delete-button"]',
-      'button[aria-label*="delete" i]',
-      'button[aria-label*="remove" i]',
-      'button[class*="delete" i]',
-      'button[class*="remove" i]'
-    ].join(',')) || []).find((button) => {
-      const isDisabled = button.disabled || button.getAttribute('aria-disabled') === 'true';
-      return visible(button) && !isDisabled;
-    }) || null;
-    const pageReportsEmptyCart = () => {
-      const text = normalizeText(document.body?.innerText || '').toLowerCase();
-      return [
-        'your cart is empty',
-        'shopping cart is empty',
-        'your shopping cart is empty',
-        'no items in your cart',
-        'there are no items in your cart'
-      ].some((message) => text.includes(message));
-    };
-    const findRemovalConfirmationButton = () => {
-      const dialogs = Array.from(document.querySelectorAll([
-        '[role="dialog"]',
-        '[role="alertdialog"]',
-        '[aria-modal="true"]',
-        '.c-modal',
-        '.m-modal',
-        '[class*="Modal"]',
-        '[class*="modal"]'
-      ].join(','))).filter(visible);
-
-      const removalDialog = dialogs.find((dialog) => {
-        const text = normalizeText(dialog.innerText || dialog.textContent || '').toLowerCase();
-        return text.includes('are you sure you want to delete this item from your shopping cart')
-          || (text.includes('are you sure you want to remove') && text.includes('from your cart'))
-          || text.includes('removing item')
-          || text.includes('removing bundled item');
-      });
-      if (!removalDialog) return null;
-
-      const candidates = Array.from(removalDialog.querySelectorAll([
-        'button',
-        '[role="button"]',
-        'input[type="button"]',
-        'input[type="submit"]'
-      ].join(','))).filter((button) => {
-        const isDisabled = button.disabled || button.getAttribute('aria-disabled') === 'true';
-        return visible(button) && !isDisabled;
-      });
-      const labelFor = (button) => normalizeText(
-        button.innerText
-          || button.textContent
-          || button.value
-          || button.getAttribute('aria-label')
-          || button.getAttribute('data-cy-id')
-          || ''
-      ).toLowerCase();
-      const isNegativeAction = (label) => ['cancel', 'close', 'back', 'no'].some((term) => label.includes(term));
-      const exactPositiveLabels = ['delete', 'remove', 'confirm', 'yes', 'ok'];
-
-      return candidates.find((button) => exactPositiveLabels.includes(labelFor(button)))
-        || candidates.find((button) => {
-          const label = labelFor(button);
-          return !isNegativeAction(label) && ['delete', 'remove', 'confirm'].some((term) => label.includes(term));
-        })
-        || null;
-    };
-    let removalConfirmationCount = 0;
-    const waitForCartLineChange = async (previousItem, previousCount, timeoutMilliseconds = 6000) => {
-      const deadline = Date.now() + timeoutMilliseconds;
-      let didConfirmRemoval = false;
-      while (Date.now() < deadline) {
-        await wait(200);
-        if (!didConfirmRemoval) {
-          const confirmationButton = findRemovalConfirmationButton();
-          if (confirmationButton) {
-            confirmationButton.click();
-            didConfirmRemoval = true;
-            removalConfirmationCount += 1;
-          }
-        }
-        const currentItems = cartLineItems();
-        if (!previousItem.isConnected || currentItems.length < previousCount || pageReportsEmptyCart()) {
-          return true;
-        }
-      }
-      return false;
-    };
     const clearExistingCart = async () => {
-      const startedAt = Date.now();
-      const deadline = startedAt + 30000;
-      let removedCount = 0;
-      let emptySince = 0;
-      let missingDeleteButtonSince = 0;
-
-      while (Date.now() < deadline) {
-        const items = cartLineItems();
-        if (items.length === 0) {
-          const hasConfirmedEmptyState = pageReportsEmptyCart() || removedCount > 0;
-          if (hasConfirmedEmptyState) {
-            if (!emptySince) emptySince = Date.now();
-            const stableEmptyDuration = removedCount > 0 ? 1000 : 3000;
-            if (Date.now() - emptySince >= stableEmptyDuration) {
-              return {
-                ok: true,
-                removedCount,
-                debugSummary: 'cartClear: removed=' + removedCount + ', confirmations=' + removalConfirmationCount + ', emptyState=' + (pageReportsEmptyCart() ? 'visible' : 'stable')
-              };
-            }
+      const clearCartQuery = `mutation ClearCartMutation($storeFront: String) {
+        store(name: $storeFront) {
+          cart {
+            mutations { clear }
+            lineItemsQties
           }
-          await wait(200);
-          continue;
         }
+      }`;
+      const response = await fetch('/graphql', {
+        method: 'POST',
+        credentials: 'include',
+        headers: requestHeaders,
+        body: JSON.stringify({
+          operationName: 'ClearCartMutation',
+          query: clearCartQuery,
+          variables: { storeFront: 'pledge' }
+        })
+      });
+      const responseText = await response.text();
+      let payload = null;
+      try { payload = responseText ? JSON.parse(responseText) : null; } catch { payload = null; }
 
-        emptySince = 0;
-        const item = items[0];
-        const deleteButton = findDeleteButton(item);
-        if (!deleteButton) {
-          if (!missingDeleteButtonSince) missingDeleteButtonSince = Date.now();
-          if (Date.now() - missingDeleteButtonSince >= 5000) {
-            return {
-              ok: false,
-              removedCount,
-              failureMessage: 'Hangar Express found an existing RSI cart item but could not find its Remove control.',
-              debugSummary: 'cartClear: visibleItems=' + items.length + ', removed=' + removedCount + ', confirmations=' + removalConfirmationCount
-            };
-          }
-          await wait(200);
-          continue;
-        }
-
-        missingDeleteButtonSince = 0;
-        const previousCount = items.length;
-        deleteButton.click();
-        const didChange = await waitForCartLineChange(item, previousCount);
-        if (!didChange) {
-          return {
-            ok: false,
-            removedCount,
-            failureMessage: 'RSI did not remove an existing cart item before the checkout preparation timeout.',
-            debugSummary: 'cartClear: visibleItems=' + cartLineItems().length + ', removed=' + removedCount + ', confirmations=' + removalConfirmationCount
-          };
-        }
-        removedCount += 1;
+      const errors = Array.isArray(payload?.errors)
+        ? payload.errors.map((entry) => normalizeText(entry?.message || JSON.stringify(entry))).filter(Boolean)
+        : [];
+      const remainingItemCount = Number(payload?.data?.store?.cart?.lineItemsQties);
+      const accessDenied = response.status === 401 || response.status === 403;
+      if (!response.ok || errors.length > 0 || !Number.isFinite(remainingItemCount) || remainingItemCount !== 0) {
+        return {
+          ok: false,
+          accessDenied,
+          failureMessage: normalizeText(
+            errors.join(' ')
+              || responseText
+              || 'RSI did not confirm that its cart was empty.'
+          ),
+          debugSummary: `cartClearMutation: httpStatus=${response.status}, remaining=${Number.isFinite(remainingItemCount) ? remainingItemCount : 'unknown'}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}`
+        };
       }
 
       return {
-        ok: false,
-        removedCount,
-        failureMessage: 'Hangar Express could not confirm that the RSI cart was empty before adding the selected upgrades.',
-        debugSummary: 'cartClear: visibleItems=' + cartLineItems().length + ', removed=' + removedCount + ', confirmations=' + removalConfirmationCount + ', emptyText=' + (pageReportsEmptyCart() ? 'yes' : 'no')
+        ok: true,
+        accessDenied: false,
+        debugSummary: `cartClearMutation: httpStatus=${response.status}, remaining=${remainingItemCount}`
       };
     };
 
@@ -8465,8 +8348,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     const cartClearResult = await clearExistingCart();
     if (!cartClearResult.ok) {
       return {
-        accessDenied: false,
-        status: 'cart-clear-failed',
+        accessDenied: cartClearResult.accessDenied === true,
+        status: cartClearResult.accessDenied ? 'access-denied' : 'cart-clear-failed',
         checkoutURL: null,
         addedOfferIDs: [],
         failureMessage: cartClearResult.failureMessage,
