@@ -8297,10 +8297,67 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         'there are no items in your cart'
       ].some((message) => text.includes(message));
     };
+    const findRemovalConfirmationButton = () => {
+      const dialogs = Array.from(document.querySelectorAll([
+        '[role="dialog"]',
+        '[role="alertdialog"]',
+        '[aria-modal="true"]',
+        '.c-modal',
+        '.m-modal',
+        '[class*="Modal"]',
+        '[class*="modal"]'
+      ].join(','))).filter(visible);
+
+      const removalDialog = dialogs.find((dialog) => {
+        const text = normalizeText(dialog.innerText || dialog.textContent || '').toLowerCase();
+        return text.includes('are you sure you want to delete this item from your shopping cart')
+          || (text.includes('are you sure you want to remove') && text.includes('from your cart'))
+          || text.includes('removing item')
+          || text.includes('removing bundled item');
+      });
+      if (!removalDialog) return null;
+
+      const candidates = Array.from(removalDialog.querySelectorAll([
+        'button',
+        '[role="button"]',
+        'input[type="button"]',
+        'input[type="submit"]'
+      ].join(','))).filter((button) => {
+        const isDisabled = button.disabled || button.getAttribute('aria-disabled') === 'true';
+        return visible(button) && !isDisabled;
+      });
+      const labelFor = (button) => normalizeText(
+        button.innerText
+          || button.textContent
+          || button.value
+          || button.getAttribute('aria-label')
+          || button.getAttribute('data-cy-id')
+          || ''
+      ).toLowerCase();
+      const isNegativeAction = (label) => ['cancel', 'close', 'back', 'no'].some((term) => label.includes(term));
+      const exactPositiveLabels = ['delete', 'remove', 'confirm', 'yes', 'ok'];
+
+      return candidates.find((button) => exactPositiveLabels.includes(labelFor(button)))
+        || candidates.find((button) => {
+          const label = labelFor(button);
+          return !isNegativeAction(label) && ['delete', 'remove', 'confirm'].some((term) => label.includes(term));
+        })
+        || null;
+    };
+    let removalConfirmationCount = 0;
     const waitForCartLineChange = async (previousItem, previousCount, timeoutMilliseconds = 6000) => {
       const deadline = Date.now() + timeoutMilliseconds;
+      let didConfirmRemoval = false;
       while (Date.now() < deadline) {
         await wait(200);
+        if (!didConfirmRemoval) {
+          const confirmationButton = findRemovalConfirmationButton();
+          if (confirmationButton) {
+            confirmationButton.click();
+            didConfirmRemoval = true;
+            removalConfirmationCount += 1;
+          }
+        }
         const currentItems = cartLineItems();
         if (!previousItem.isConnected || currentItems.length < previousCount || pageReportsEmptyCart()) {
           return true;
@@ -8326,7 +8383,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
               return {
                 ok: true,
                 removedCount,
-                debugSummary: 'cartClear: removed=' + removedCount + ', emptyState=' + (pageReportsEmptyCart() ? 'visible' : 'stable')
+                debugSummary: 'cartClear: removed=' + removedCount + ', confirmations=' + removalConfirmationCount + ', emptyState=' + (pageReportsEmptyCart() ? 'visible' : 'stable')
               };
             }
           }
@@ -8344,7 +8401,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
               ok: false,
               removedCount,
               failureMessage: 'Hangar Express found an existing RSI cart item but could not find its Remove control.',
-              debugSummary: 'cartClear: visibleItems=' + items.length + ', removed=' + removedCount
+              debugSummary: 'cartClear: visibleItems=' + items.length + ', removed=' + removedCount + ', confirmations=' + removalConfirmationCount
             };
           }
           await wait(200);
@@ -8360,7 +8417,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             ok: false,
             removedCount,
             failureMessage: 'RSI did not remove an existing cart item before the checkout preparation timeout.',
-            debugSummary: 'cartClear: visibleItems=' + cartLineItems().length + ', removed=' + removedCount
+            debugSummary: 'cartClear: visibleItems=' + cartLineItems().length + ', removed=' + removedCount + ', confirmations=' + removalConfirmationCount
           };
         }
         removedCount += 1;
@@ -8370,7 +8427,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         ok: false,
         removedCount,
         failureMessage: 'Hangar Express could not confirm that the RSI cart was empty before adding the selected upgrades.',
-        debugSummary: 'cartClear: visibleItems=' + cartLineItems().length + ', removed=' + removedCount + ', emptyText=' + (pageReportsEmptyCart() ? 'yes' : 'no')
+        debugSummary: 'cartClear: visibleItems=' + cartLineItems().length + ', removed=' + removedCount + ', confirmations=' + removalConfirmationCount + ', emptyText=' + (pageReportsEmptyCart() ? 'yes' : 'no')
       };
     };
 
