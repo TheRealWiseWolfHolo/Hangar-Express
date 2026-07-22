@@ -630,6 +630,11 @@ private struct WBCCUDealsSourceFooter: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
+            Text("Checking out replaces the current RSI cart with the upgrades in this virtual cart.")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.orange)
+                .multilineTextAlignment(.center)
+
             if !cartItems.isEmpty {
                 HStack {
                     Label(
