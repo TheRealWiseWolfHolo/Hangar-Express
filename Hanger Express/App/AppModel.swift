@@ -694,6 +694,7 @@ final class AppModel {
     private static let upgradeTargetLookupTimeoutSeconds = 20
     private static let characterRepairRequestTimeoutSeconds = 25
     private static let buybackCheckoutPreparationTimeoutSeconds = 30
+    private static let wbccuCheckoutPreparationBaseTimeoutSeconds = 30
     private static let limitedShipCartInsertionTimeoutSeconds = 30
     private static let authorizedDevicesRequestTimeoutSeconds = 20
     private static let actionCompletionBannerDurationNanoseconds: UInt64 = 2_000_000_000
@@ -2468,6 +2469,46 @@ final class AppModel {
             throw error
         } catch {
             throw HangarAccountActionError.buybackCheckoutRejected(message: error.localizedDescription)
+        }
+    }
+
+    func prepareWBCCUCheckout(items: [WBCCUCheckoutItem]) async throws -> WBCCUCheckoutPreparation {
+        guard !isRefreshing else {
+            throw HangarAccountActionError.actionInProgress
+        }
+
+        guard !items.isEmpty, items.allSatisfy(\.isValid) else {
+            throw HangarAccountActionError.invalidWBCCUCart
+        }
+
+        guard Set(items.map(\.offerID)).count == items.count else {
+            throw HangarAccountActionError.invalidWBCCUCart
+        }
+
+        guard let session else {
+            throw HangarAccountActionError.missingSession
+        }
+
+        let timeoutSeconds = Self.wbccuCheckoutPreparationBaseTimeoutSeconds + max(items.count - 1, 0) * 15
+        do {
+            let result = try await withTimeout(seconds: timeoutSeconds) { [self] in
+                try await self.hangarRepository.prepareWBCCUCheckout(
+                    for: session,
+                    items: items
+                )
+            } onTimeout: {
+                HangarAccountActionError.wbccuCheckoutTimedOut(timeoutSeconds: timeoutSeconds)
+            }
+
+            if !result.updatedCookies.isEmpty {
+                await persistUpdatedSessionCookies(result.updatedCookies, baseSession: session)
+            }
+
+            return result
+        } catch let error as HangarAccountActionError {
+            throw error
+        } catch {
+            throw HangarAccountActionError.wbccuCheckoutRejected(message: error.localizedDescription)
         }
     }
 

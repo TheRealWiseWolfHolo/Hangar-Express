@@ -266,6 +266,17 @@ struct PreviewHangarRepository: HangarRepository {
         )
     }
 
+    func prepareWBCCUCheckout(
+        for session: UserSession,
+        items: [WBCCUCheckoutItem]
+    ) async throws -> WBCCUCheckoutPreparation {
+        WBCCUCheckoutPreparation(
+            checkoutURL: URL(string: "https://robertsspaceindustries.com/en/pledge/cart")!,
+            addedOfferIDs: items.map(\.offerID),
+            updatedCookies: session.cookies
+        )
+    }
+
     func fetchLimitedShipSales() async throws -> [LimitedShipSale] {
         try await HostedLimitedShipSaleClient().fetchSales()
     }

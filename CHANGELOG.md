@@ -3,11 +3,11 @@
 ## v1.0.9 (In Progress)
 
 ### Added
-- Added a WBCCU Deals tool that displays current StarCitizen-Info Warbond upgrade offers with ship artwork, standard and Warbond values, savings, feed freshness, and a link to the RSI upgrade store.
+- Added a WBCCU Deals tool that displays current StarCitizen-Info Warbond upgrade offers with ship artwork, standard and Warbond values, savings, and feed freshness.
 
 ### Changed
 - Started the `1.0.9` release branch and release-note tracking for ongoing work.
-- Simplified WBCCU Deals to open directly on the deal cards and kept RSI store browsing inside Hangar Express instead of switching to an external browser.
+- Replaced the broken WBCCU store link with an in-app virtual cart that prepares selected source-to-Warbond upgrades in the RSI cart before opening checkout inside Hangar Express.
 
 ## v1.0.8 (In Progress)
 

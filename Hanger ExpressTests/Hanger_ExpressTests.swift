@@ -2759,6 +2759,13 @@ struct Hanger_ExpressTests {
               "generatedAt": "2026-05-16T20:00:00.000Z",
               "ships": [
                 {
+                  "id": "1",
+                  "name": "Aurora MR",
+                  "manufacturer": "Roberts Space Industries",
+                  "msrpUsd": 30,
+                  "storeAvailable": true
+                },
+                {
                   "id": "3",
                   "name": "Cutlass Black",
                   "manufacturer": "Drake Interplanetary",
@@ -2803,6 +2810,22 @@ struct Hanger_ExpressTests {
         #expect(deals.count == 1)
         #expect(deals.first?.targetShip?.id == 3)
         #expect(deals.first?.standardValueUSD == 110)
+        #expect(deals.first?.targetShipID == 3)
+        #expect(deals.first?.eligibleSourceShips.map(\.name) == ["Aurora MR"])
+        #expect(deals.first?.canAddToCart == true)
+
+        let checkoutItem = WBCCUCheckoutItem(
+            offerID: offer.id,
+            sourceShipID: 1,
+            sourceShipName: "Aurora MR",
+            sourceShipMSRPUSD: 30,
+            targetShipID: 3,
+            targetShipName: "Cutlass Black",
+            targetSkuID: 9001,
+            targetWarbondValueUSD: 95
+        )
+        #expect(checkoutItem.isValid)
+        #expect(checkoutItem.purchaseCostUSD == 65)
     }
 
     @Test func hostedShipCatalogStoreForceRefreshBypassesCachedCatalog() async throws {

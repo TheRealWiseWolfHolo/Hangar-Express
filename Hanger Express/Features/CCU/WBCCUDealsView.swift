@@ -1,17 +1,19 @@
 import Foundation
-import SafariServices
 import SwiftUI
 
 struct WBCCUDealsView: View {
+    let appModel: AppModel
     let reloadToken: UUID?
 
     @Environment(\.dismiss) private var dismiss
     @State private var loadState: WBCCUDealsLoadState = .loading
     @State private var isRefreshing = false
     @State private var refreshErrorMessage: String?
-    @State private var browserDestination: WBCCUBrowserDestination?
-
-    private let upgradeStoreURL = URL(string: "https://robertsspaceindustries.com/pledge-store/ship-upgrades")!
+    @State private var cartItems: [String: WBCCUCheckoutItem] = [:]
+    @State private var sourcePickerDeal: WBCCUDeal?
+    @State private var checkoutContext: RSICheckoutContext?
+    @State private var checkoutErrorMessage: String?
+    @State private var isPreparingCheckout = false
 
     var body: some View {
         NavigationStack {
@@ -49,7 +51,7 @@ struct WBCCUDealsView: View {
                             Image(systemName: "arrow.clockwise")
                         }
                     }
-                    .disabled(isRefreshing)
+                    .disabled(isRefreshing || isPreparingCheckout)
                     .accessibilityLabel(AppLocalizer.string("Refresh WBCCU deals"))
                 }
 
@@ -67,9 +69,36 @@ struct WBCCUDealsView: View {
             } message: {
                 Text(refreshErrorMessage ?? "")
             }
-            .sheet(item: $browserDestination) { destination in
-                WBCCUInAppBrowser(url: destination.url)
-                    .ignoresSafeArea()
+            .alert("WBCCU Checkout Failed", isPresented: checkoutErrorBinding) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(checkoutErrorMessage ?? "")
+            }
+            .sheet(item: $sourcePickerDeal) { deal in
+                WBCCUSourceShipPicker(
+                    deal: deal,
+                    selectedSourceShipID: cartItems[deal.id]?.sourceShipID
+                ) { sourceShip in
+                    addToCart(deal: deal, sourceShip: sourceShip)
+                    sourcePickerDeal = nil
+                }
+            }
+            .sheet(item: $checkoutContext) { context in
+                RSICheckoutBrowserView(
+                    context: context,
+                    onCancel: { cookies in
+                        checkoutContext = nil
+                        persistCheckoutCookies(cookies, clearCart: false)
+                    },
+                    onFinished: { cookies in
+                        checkoutContext = nil
+                        persistCheckoutCookies(cookies, clearCart: true)
+                    },
+                    onSucceeded: { cookies, _ in
+                        checkoutContext = nil
+                        persistCheckoutCookies(cookies, clearCart: true)
+                    }
+                )
             }
         }
     }
@@ -80,6 +109,16 @@ struct WBCCUDealsView: View {
         } set: { isPresented in
             if !isPresented {
                 refreshErrorMessage = nil
+            }
+        }
+    }
+
+    private var checkoutErrorBinding: Binding<Bool> {
+        Binding {
+            checkoutErrorMessage != nil
+        } set: { isPresented in
+            if !isPresented {
+                checkoutErrorMessage = nil
             }
         }
     }
@@ -100,14 +139,20 @@ struct WBCCUDealsView: View {
                         WBCCUDealCard(
                             deal: deal,
                             reloadToken: reloadToken,
-                            onOpenStore: openUpgradeStore
+                            cartItem: cartItems[deal.id],
+                            onChooseSource: { sourcePickerDeal = deal },
+                            onRemoveFromCart: { cartItems[deal.id] = nil }
                         )
                     }
                 }
 
                 WBCCUDealsSourceFooter(
                     generatedAt: generatedAt,
-                    onOpenStore: openUpgradeStore
+                    cartItems: Array(cartItems.values),
+                    isPreparingCheckout: isPreparingCheckout,
+                    onCheckout: {
+                        Task { await prepareCheckout() }
+                    }
                 )
             }
             .padding(16)
@@ -117,8 +162,73 @@ struct WBCCUDealsView: View {
         }
     }
 
-    private func openUpgradeStore() {
-        browserDestination = WBCCUBrowserDestination(url: upgradeStoreURL)
+    private func addToCart(deal: WBCCUDeal, sourceShip: RSIShipCatalog.Ship) {
+        guard
+            let sourceMSRP = sourceShip.msrpUSD,
+            let targetShipID = deal.targetShipID,
+            let targetSkuID = deal.offer.skuID
+        else {
+            return
+        }
+
+        let item = WBCCUCheckoutItem(
+            offerID: deal.id,
+            sourceShipID: sourceShip.id,
+            sourceShipName: sourceShip.name,
+            sourceShipMSRPUSD: sourceMSRP,
+            targetShipID: targetShipID,
+            targetShipName: deal.targetName,
+            targetSkuID: targetSkuID,
+            targetWarbondValueUSD: deal.offer.priceUSD
+        )
+        guard item.isValid else {
+            return
+        }
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            cartItems[deal.id] = item
+        }
+    }
+
+    @MainActor
+    private func prepareCheckout() async {
+        guard !isPreparingCheckout else {
+            return
+        }
+
+        let items = cartItems.values.sorted {
+            $0.targetShipName.localizedCaseInsensitiveCompare($1.targetShipName) == .orderedAscending
+        }
+        guard !items.isEmpty else {
+            return
+        }
+
+        isPreparingCheckout = true
+        defer { isPreparingCheckout = false }
+
+        do {
+            let preparation = try await appModel.prepareWBCCUCheckout(items: items)
+            let cookies = appModel.session?.cookies ?? preparation.updatedCookies
+            cartItems.removeAll()
+            checkoutContext = RSICheckoutContext(
+                itemTitle: AppLocalizer.format("%lld Warbond upgrade(s)", items.count),
+                checkoutURL: preparation.checkoutURL,
+                cookies: cookies,
+                navigationTitle: "WBCCU Checkout",
+                completionButtonTitle: "Finished Shopping"
+            )
+        } catch {
+            checkoutErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func persistCheckoutCookies(_ cookies: [SessionCookie], clearCart: Bool) {
+        if clearCart {
+            cartItems.removeAll()
+        }
+        Task {
+            await appModel.persistBrowserCookies(cookies)
+        }
     }
 
     @MainActor
@@ -135,10 +245,10 @@ struct WBCCUDealsView: View {
                 using: HostedShipCatalogClient(),
                 forceRefresh: forceRefresh
             )
-            loadState = .loaded(
-                deals: WBCCUDeal.makeDeals(from: catalog),
-                generatedAt: catalog.generatedAt
-            )
+            let deals = WBCCUDeal.makeDeals(from: catalog)
+            let availableDealIDs = Set(deals.map(\.id))
+            cartItems = cartItems.filter { availableDealIDs.contains($0.key) }
+            loadState = .loaded(deals: deals, generatedAt: catalog.generatedAt)
         } catch {
             if case .loaded = loadState {
                 refreshErrorMessage = error.localizedDescription
@@ -158,11 +268,16 @@ private enum WBCCUDealsLoadState {
 nonisolated struct WBCCUDeal: Identifiable, Hashable, Sendable {
     let offer: RSIShipCatalog.StoreUpgradeOffer
     let targetShip: RSIShipCatalog.Ship?
+    let eligibleSourceShips: [RSIShipCatalog.Ship]
 
     var id: String { offer.id }
 
     var targetName: String {
         targetShip?.name ?? offer.targetShipName
+    }
+
+    var targetShipID: Int? {
+        offer.targetShipID ?? targetShip?.id
     }
 
     var manufacturer: String {
@@ -173,6 +288,10 @@ nonisolated struct WBCCUDeal: Identifiable, Hashable, Sendable {
         offer.targetShipMSRPUSD ?? targetShip?.msrpUSD
     }
 
+    var canAddToCart: Bool {
+        targetShipID != nil && offer.skuID != nil && !eligibleSourceShips.isEmpty
+    }
+
     static func makeDeals(from catalog: RSIShipCatalog) -> [WBCCUDeal] {
         catalog.storeUpgradeOffers
             .filter { $0.available && $0.savingsUSD > 0 }
@@ -180,9 +299,34 @@ nonisolated struct WBCCUDeal: Identifiable, Hashable, Sendable {
                 let idMatch = offer.targetShipID.flatMap { targetID in
                     catalog.ships.first { $0.id == targetID }
                 }
+                let targetShip = idMatch ?? catalog.matchShip(named: offer.targetShipName)
+                var seenSourceIDs = Set<Int>()
+                let eligibleSources = catalog.ships
+                    .filter { ship in
+                        guard
+                            ship.id > 0,
+                            !ship.hiddenInCatalog,
+                            !ship.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                            let msrp = ship.msrpUSD,
+                            msrp >= 0,
+                            msrp < offer.priceUSD
+                        else {
+                            return false
+                        }
+                        return seenSourceIDs.insert(ship.id).inserted
+                    }
+                    .sorted { lhs, rhs in
+                        let lhsMSRP = lhs.msrpUSD ?? 0
+                        let rhsMSRP = rhs.msrpUSD ?? 0
+                        if lhsMSRP != rhsMSRP {
+                            return lhsMSRP > rhsMSRP
+                        }
+                        return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+                    }
                 return WBCCUDeal(
                     offer: offer,
-                    targetShip: idMatch ?? catalog.matchShip(named: offer.targetShipName)
+                    targetShip: targetShip,
+                    eligibleSourceShips: eligibleSources
                 )
             }
             .sorted { lhs, rhs in
@@ -200,7 +344,9 @@ nonisolated struct WBCCUDeal: Identifiable, Hashable, Sendable {
 private struct WBCCUDealCard: View {
     let deal: WBCCUDeal
     let reloadToken: UUID?
-    let onOpenStore: () -> Void
+    let cartItem: WBCCUCheckoutItem?
+    let onChooseSource: () -> Void
+    let onRemoveFromCart: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -235,16 +381,50 @@ private struct WBCCUDealCard: View {
 
                 Divider()
 
-                HStack(spacing: 10) {
-                    Label("New money only", systemImage: "creditcard.fill")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
+                if let cartItem {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Label("In Virtual Cart", systemImage: "cart.fill.badge.plus")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.green)
+                            Spacer()
+                            Text(AppLocalizer.format("Upgrade cost %@", cartItem.purchaseCostUSD.usdString))
+                                .font(.caption.weight(.semibold))
+                        }
 
-                    Spacer()
+                        Text(AppLocalizer.format("%@ → %@", cartItem.sourceShipName, cartItem.targetShipName))
+                            .font(.subheadline.weight(.medium))
+                            .lineLimit(2)
 
-                    Button(action: onOpenStore) {
-                        Label("RSI Store", systemImage: "arrow.up.right")
-                            .font(.subheadline.weight(.semibold))
+                        HStack {
+                            Button("Change Source", action: onChooseSource)
+                                .buttonStyle(.bordered)
+                            Spacer()
+                            Button("Remove", role: .destructive, action: onRemoveFromCart)
+                                .buttonStyle(.bordered)
+                        }
+                        .controlSize(.small)
+                    }
+                } else {
+                    HStack(spacing: 10) {
+                        Label("New money only", systemImage: "creditcard.fill")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+
+                        Spacer()
+
+                        Button(action: onChooseSource) {
+                            Label("Add to Cart", systemImage: "cart.badge.plus")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!deal.canAddToCart)
+                    }
+
+                    if !deal.canAddToCart {
+                        Text("This offer is missing the RSI upgrade identifiers needed for checkout.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -254,7 +434,7 @@ private struct WBCCUDealCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                .stroke(cartItem == nil ? Color.primary.opacity(0.06) : Color.green.opacity(0.45), lineWidth: cartItem == nil ? 1 : 2)
         )
     }
 
@@ -335,9 +515,104 @@ private struct WBCCUDealCard: View {
     }
 }
 
+private struct WBCCUSourceShipPicker: View {
+    let deal: WBCCUDeal
+    let selectedSourceShipID: Int?
+    let onSelect: (RSIShipCatalog.Ship) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var searchText = ""
+
+    var body: some View {
+        NavigationStack {
+            List(filteredShips, id: \.id) { ship in
+                Button {
+                    onSelect(ship)
+                } label: {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(ship.name)
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Text(ship.manufacturer ?? AppLocalizer.string("Unknown Manufacturer"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        VStack(alignment: .trailing, spacing: 3) {
+                            Text(ship.msrpUSD?.usdString ?? AppLocalizer.string("Unavailable"))
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.primary)
+                            if let msrp = ship.msrpUSD {
+                                Text(AppLocalizer.format("%@ upgrade", max(deal.offer.priceUSD - msrp, 0).usdString))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        if ship.id == selectedSourceShipID {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .overlay {
+                if filteredShips.isEmpty {
+                    ContentUnavailableView.search(text: searchText)
+                }
+            }
+            .searchable(text: $searchText, prompt: "Search source ships")
+            .navigationTitle("Choose Source Ship")
+            .navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .top) {
+                VStack(spacing: 3) {
+                    Text(AppLocalizer.format("Upgrade to %@", deal.targetName))
+                        .font(.subheadline.weight(.semibold))
+                    Text("Closest-valued ships are listed first.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(.bar)
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private var filteredShips: [RSIShipCatalog.Ship] {
+        let trimmedSearch = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSearch.isEmpty else {
+            return deal.eligibleSourceShips
+        }
+
+        return deal.eligibleSourceShips.filter { ship in
+            ship.name.localizedCaseInsensitiveContains(trimmedSearch)
+                || (ship.manufacturer?.localizedCaseInsensitiveContains(trimmedSearch) ?? false)
+        }
+    }
+}
+
 private struct WBCCUDealsSourceFooter: View {
     let generatedAt: Date?
-    let onOpenStore: () -> Void
+    let cartItems: [WBCCUCheckoutItem]
+    let isPreparingCheckout: Bool
+    let onCheckout: () -> Void
+
+    private var cartTotal: Decimal {
+        cartItems.reduce(0) { $0 + $1.purchaseCostUSD }
+    }
 
     var body: some View {
         VStack(spacing: 10) {
@@ -355,37 +630,39 @@ private struct WBCCUDealsSourceFooter: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            Button(action: onOpenStore) {
-                Label("Open RSI Upgrade Store", systemImage: "safari")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
+            if !cartItems.isEmpty {
+                HStack {
+                    Label(
+                        AppLocalizer.format("%lld upgrade(s)", cartItems.count),
+                        systemImage: "cart.fill"
+                    )
+                    Spacer()
+                    Text(AppLocalizer.format("Cart total %@", cartTotal.usdString))
+                }
+                .font(.subheadline.weight(.semibold))
+                .padding(12)
+                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+            }
+
+            Button(action: onCheckout) {
+                HStack {
+                    if isPreparingCheckout {
+                        ProgressView()
+                            .tint(.white)
+                    } else {
+                        Image(systemName: "cart.fill")
+                    }
+                    Text(isPreparingCheckout ? "Preparing Cart..." : "Check Out")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+            .disabled(cartItems.isEmpty || isPreparingCheckout)
         }
         .padding(.horizontal, 8)
         .padding(.top, 4)
         .padding(.bottom, 16)
     }
-}
-
-private struct WBCCUBrowserDestination: Identifiable {
-    let url: URL
-
-    var id: String { url.absoluteString }
-}
-
-private struct WBCCUInAppBrowser: UIViewControllerRepresentable {
-    let url: URL
-
-    func makeUIViewController(context: Context) -> SFSafariViewController {
-        let configuration = SFSafariViewController.Configuration()
-        configuration.barCollapsingEnabled = true
-
-        let browser = SFSafariViewController(url: url, configuration: configuration)
-        browser.dismissButtonStyle = .done
-        return browser
-    }
-
-    func updateUIViewController(_ browser: SFSafariViewController, context: Context) {}
 }
