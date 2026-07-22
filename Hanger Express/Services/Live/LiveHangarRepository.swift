@@ -618,6 +618,25 @@ final class LiveHangarRepository: HangarRepository {
         )
     }
 
+    func prepareWBCCUCheckout(
+        for session: UserSession,
+        items: [WBCCUCheckoutItem]
+    ) async throws -> WBCCUCheckoutPreparation {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.prepareWBCCUCheckout(
+                for: session,
+                items: items
+            )
+        }
+
+        try validate(session: session)
+        let checkoutBrowser = RSIAccountPageBrowser()
+        return try await checkoutBrowser.prepareWBCCUCheckout(
+            using: session.cookies,
+            items: items
+        )
+    }
+
     func fetchLimitedShipSales() async throws -> [LimitedShipSale] {
         let sales = try await limitedShipSaleClient.fetchSales()
         guard let shipCatalog = try? await HostedShipCatalogStore.shared.catalog(using: shipCatalogClient) else {
@@ -4923,6 +4942,53 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         )
     }
 
+    fileprivate func prepareWBCCUCheckout(
+        using cookies: [SessionCookie],
+        items: [WBCCUCheckoutItem]
+    ) async throws -> WBCCUCheckoutPreparation {
+        guard !items.isEmpty, items.allSatisfy(\.isValid) else {
+            throw LiveHangarRepositoryError.unexpectedMarkup("The virtual WBCCU cart is empty or invalid.")
+        }
+
+        let url = try storefrontURL(path: "/en/pledge/cart")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let checkoutItems: [[String: Any]] = items.map { item in
+            [
+                "offerID": item.offerID,
+                "sourceShipID": item.sourceShipID,
+                "targetShipID": item.targetShipID,
+                "targetSkuID": item.targetSkuID
+            ]
+        }
+        let result = try await evaluate(
+            script: Self.prepareWBCCUCheckoutScript,
+            arguments: ["checkoutItems": checkoutItems],
+            as: RemoteWBCCUCheckoutPreparation.self
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        guard result.status == "ok" else {
+            let failureMessage = [result.failureMessage, result.debugSummary]
+                .compactMap { value in
+                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                }
+                .joined(separator: "\n\n")
+                .nilIfEmpty ?? "RSI did not prepare the selected Warbond upgrades for checkout."
+            throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
+        }
+
+        return WBCCUCheckoutPreparation(
+            checkoutURL: result.checkoutURL.flatMap(URL.init(string:)) ?? url,
+            addedOfferIDs: result.addedOfferIDs,
+            updatedCookies: await currentRSICookies()
+        )
+    }
+
     fileprivate func addLimitedShipToCart(
         using cookies: [SessionCookie],
         ship: LimitedShipSale,
@@ -8142,6 +8208,205 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     };
     """
 
+    private static let prepareWBCCUCheckoutScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const requestedItems = Array.isArray(checkoutItems) ? checkoutItems : [];
+    const normalizedItems = requestedItems.map((item) => ({
+      offerID: normalizeText(item?.offerID),
+      sourceShipID: Number(item?.sourceShipID),
+      targetShipID: Number(item?.targetShipID),
+      targetSkuID: Number(item?.targetSkuID)
+    }));
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        checkoutURL: null,
+        addedOfferIDs: [],
+        failureMessage: 'The RSI cart reported access denied before checkout preparation started.',
+        debugSummary: null
+      };
+    }
+
+    const itemsAreValid = normalizedItems.length > 0 && normalizedItems.every((item) =>
+      item.offerID &&
+      Number.isFinite(item.sourceShipID) && item.sourceShipID > 0 &&
+      Number.isFinite(item.targetShipID) && item.targetShipID > 0 &&
+      Number.isFinite(item.targetSkuID) && item.targetSkuID > 0
+    );
+    if (!itemsAreValid) {
+      return {
+        accessDenied: false,
+        status: 'invalid-items',
+        checkoutURL: null,
+        addedOfferIDs: [],
+        failureMessage: 'Hangar Express could not determine the ship-upgrade metadata for every virtual-cart item.',
+        debugSummary: `requestedItems=${requestedItems.length}, normalizedItems=${normalizedItems.length}`
+      };
+    }
+
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
+    const rsiDevice = cookieValue('_rsi_device');
+    const requestHeaders = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Accept': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+    if (csrfToken) requestHeaders['x-csrf-token'] = csrfToken;
+    if (rsiToken) requestHeaders['x-rsi-token'] = rsiToken;
+    if (rsiDevice) requestHeaders['x-rsi-device'] = rsiDevice;
+
+    const readJSONResponse = async (response) => {
+      const responseText = await response.text();
+      let payload = null;
+      try { payload = responseText ? JSON.parse(responseText) : null; } catch { payload = null; }
+      return { responseText, payload };
+    };
+    const postJSON = async (endpoint, body, label, requiresSuccessFlag = false) => {
+      const response = await fetch(endpoint, {
+        method: 'POST', credentials: 'include', headers: requestHeaders, body: JSON.stringify(body)
+      });
+      const responseBody = await readJSONResponse(response);
+      const payload = responseBody.payload;
+      if (response.status === 401 || response.status === 403) {
+        return {
+          ok: false, accessDenied: true,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseBody.responseText || `RSI rejected ${label}.`),
+          debugSummary: `${label}: httpStatus=${response.status}`
+        };
+      }
+      const hasSuccessFlag = payload && Object.prototype.hasOwnProperty.call(payload, 'success');
+      const successValue = Number(payload?.success ?? 1);
+      if (!response.ok || (requiresSuccessFlag && (!hasSuccessFlag || successValue !== 1)) || (hasSuccessFlag && successValue === 0)) {
+        return {
+          ok: false, accessDenied: false,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseBody.responseText || `RSI returned HTTP ${response.status} for ${label}.`),
+          debugSummary: `${label}: httpStatus=${response.status}, responsePreview=${normalizeText(responseBody.responseText).slice(0, 280) || 'n/a'}`
+        };
+      }
+      return { ok: true, accessDenied: false };
+    };
+
+    const authTokenResponse = await postJSON('/api/account/v2/setAuthToken', {}, 'upgrade auth token setup');
+    if (!authTokenResponse.ok) {
+      return {
+        accessDenied: authTokenResponse.accessDenied,
+        status: authTokenResponse.accessDenied ? 'access-denied' : 'failed',
+        checkoutURL: null,
+        addedOfferIDs: [],
+        failureMessage: authTokenResponse.failureMessage,
+        debugSummary: authTokenResponse.debugSummary
+      };
+    }
+
+    const addToCartQuery = `mutation addToCart($from: Int!, $to: Int!) {
+      addToCart(from: $from, to: $to) { jwt }
+    }`;
+    const graphQLEndpoint = '/pledge-store/api/upgrade/v2/graphql';
+    const addedOfferIDs = [];
+
+    for (const item of normalizedItems) {
+      const contextResponse = await postJSON(
+        '/api/ship-upgrades/setContextToken',
+        {
+          fromShipId: item.sourceShipID,
+          pledgeId: null,
+          toShipId: item.targetShipID,
+          toSkuId: item.targetSkuID
+        },
+        `upgrade context setup (${item.offerID})`,
+        true
+      );
+      if (!contextResponse.ok) {
+        return {
+          accessDenied: contextResponse.accessDenied,
+          status: contextResponse.accessDenied ? 'access-denied' : 'failed',
+          checkoutURL: null,
+          addedOfferIDs,
+          failureMessage: contextResponse.failureMessage,
+          debugSummary: contextResponse.debugSummary
+        };
+      }
+
+      const targetCandidates = [item.targetSkuID, item.targetShipID]
+        .filter((id, index, values) => Number.isFinite(id) && id > 0 && values.indexOf(id) === index);
+      let upgradeToken = '';
+      let graphQLFailure = '';
+      let graphQLAccessDenied = false;
+      const attemptSummaries = [];
+
+      for (const targetID of targetCandidates) {
+        const response = await fetch(graphQLEndpoint, {
+          method: 'POST',
+          credentials: 'include',
+          headers: requestHeaders,
+          body: JSON.stringify({
+            query: addToCartQuery,
+            variables: { from: item.sourceShipID, to: targetID }
+          })
+        });
+        const responseBody = await readJSONResponse(response);
+        const errors = Array.isArray(responseBody.payload?.errors)
+          ? responseBody.payload.errors.map((entry) => normalizeText(entry?.message || JSON.stringify(entry))).filter(Boolean)
+          : [];
+        upgradeToken = responseBody.payload?.data?.addToCart?.jwt || '';
+        graphQLAccessDenied = response.status === 401 || response.status === 403;
+        graphQLFailure = normalizeText(errors.join(' ') || responseBody.responseText || 'RSI did not return an upgrade cart token.');
+        attemptSummaries.push(`${targetID}:${response.status}/${upgradeToken ? 'token' : 'no-token'}`);
+        if (graphQLAccessDenied || (response.ok && errors.length === 0 && upgradeToken)) break;
+      }
+
+      if (!upgradeToken) {
+        return {
+          accessDenied: graphQLAccessDenied,
+          status: graphQLAccessDenied ? 'access-denied' : 'failed',
+          checkoutURL: null,
+          addedOfferIDs,
+          failureMessage: graphQLFailure,
+          debugSummary: `upgradeGraphQL: offer=${item.offerID}, from=${item.sourceShipID}, targets=${attemptSummaries.join(', ')}`
+        };
+      }
+
+      const tokenResponse = await postJSON(
+        '/api/store/v2/cart/token',
+        { jwt: upgradeToken },
+        `upgrade cart token (${item.offerID})`,
+        true
+      );
+      if (!tokenResponse.ok) {
+        return {
+          accessDenied: tokenResponse.accessDenied,
+          status: tokenResponse.accessDenied ? 'access-denied' : 'failed',
+          checkoutURL: null,
+          addedOfferIDs,
+          failureMessage: tokenResponse.failureMessage,
+          debugSummary: tokenResponse.debugSummary
+        };
+      }
+
+      addedOfferIDs.push(item.offerID);
+    }
+
+    return {
+      accessDenied: false,
+      status: 'ok',
+      checkoutURL: new URL('/en/pledge/cart', window.location.origin).toString(),
+      addedOfferIDs,
+      failureMessage: null,
+      debugSummary: `added=${addedOfferIDs.length}, requested=${normalizedItems.length}`
+    };
+    """
+
     private static let prepareBuybackCheckoutScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
     const cookieValue = (name) => {
@@ -10854,6 +11119,15 @@ private nonisolated struct RemoteBuybackCheckoutPreparation: Decodable {
     let accessDenied: Bool
     let status: String
     let checkoutURL: String?
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
+private nonisolated struct RemoteWBCCUCheckoutPreparation: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let checkoutURL: String?
+    let addedOfferIDs: [String]
     let failureMessage: String?
     let debugSummary: String?
 }

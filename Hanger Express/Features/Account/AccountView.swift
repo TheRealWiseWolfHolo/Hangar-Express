@@ -182,7 +182,10 @@ struct AccountView: View {
                 case .allShips:
                     AllShipsBrowserView(reloadToken: appModel.hangarFleetImageReloadToken)
                 case .wbccuDeals:
-                    WBCCUDealsView(reloadToken: appModel.hangarFleetImageReloadToken)
+                    WBCCUDealsView(
+                        appModel: appModel,
+                        reloadToken: appModel.hangarFleetImageReloadToken
+                    )
                 case .ccuChainCalculator:
                     CCUUpgradeCalculatorView(
                         snapshot: snapshot,

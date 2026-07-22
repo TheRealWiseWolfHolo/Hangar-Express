@@ -267,6 +267,40 @@ nonisolated struct BuybackCheckoutPreparation: Hashable, Sendable {
     let updatedCookies: [SessionCookie]
 }
 
+nonisolated struct WBCCUCheckoutItem: Identifiable, Hashable, Sendable {
+    let offerID: String
+    let sourceShipID: Int
+    let sourceShipName: String
+    let sourceShipMSRPUSD: Decimal
+    let targetShipID: Int
+    let targetShipName: String
+    let targetSkuID: Int
+    let targetWarbondValueUSD: Decimal
+
+    var id: String { offerID }
+
+    var purchaseCostUSD: Decimal {
+        max(targetWarbondValueUSD - sourceShipMSRPUSD, 0)
+    }
+
+    var isValid: Bool {
+        !offerID.isEmpty
+            && sourceShipID > 0
+            && !sourceShipName.isEmpty
+            && sourceShipMSRPUSD >= 0
+            && targetShipID > 0
+            && !targetShipName.isEmpty
+            && targetSkuID > 0
+            && targetWarbondValueUSD > sourceShipMSRPUSD
+    }
+}
+
+nonisolated struct WBCCUCheckoutPreparation: Hashable, Sendable {
+    let checkoutURL: URL
+    let addedOfferIDs: [String]
+    let updatedCookies: [SessionCookie]
+}
+
 nonisolated struct LimitedShipAvailabilitySlot: Identifiable, Hashable, Sendable, Codable {
     let startsAt: Date
     let endsAt: Date
@@ -555,6 +589,11 @@ protocol HangarRepository: Sendable {
         pledge: BuybackPledge
     ) async throws -> BuybackCheckoutPreparation
 
+    func prepareWBCCUCheckout(
+        for session: UserSession,
+        items: [WBCCUCheckoutItem]
+    ) async throws -> WBCCUCheckoutPreparation
+
     func fetchLimitedShipSales() async throws -> [LimitedShipSale]
 
     func addLimitedShipToCart(
@@ -582,6 +621,15 @@ protocol HangarRepository: Sendable {
 }
 
 extension HangarRepository {
+    func prepareWBCCUCheckout(
+        for _: UserSession,
+        items _: [WBCCUCheckoutItem]
+    ) async throws -> WBCCUCheckoutPreparation {
+        throw HangarAccountActionError.wbccuCheckoutRejected(
+            message: AppLocalizer.string("WBCCU checkout is not available in this repository.")
+        )
+    }
+
     func refreshHangarLogData(
         for session: UserSession,
         from snapshot: HangarSnapshot,
