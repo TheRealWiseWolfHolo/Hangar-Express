@@ -585,6 +585,7 @@
 "Cart total %@" = "购物车合计 %@";
 "Preparing Cart..." = "正在准备购物车…";
 "Check Out" = "结账";
+"Checking out replaces the current RSI cart with the upgrades in this virtual cart." = "结账时会清空当前 RSI 购物车，并替换为此虚拟购物车中的升级。";
 "To be implemented" = "待实现";
 "Search all ships" = "搜索全部舰船";
 "Loading all ships" = "正在加载全部舰船";

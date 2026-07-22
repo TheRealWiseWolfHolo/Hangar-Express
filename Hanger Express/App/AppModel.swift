@@ -694,7 +694,7 @@ final class AppModel {
     private static let upgradeTargetLookupTimeoutSeconds = 20
     private static let characterRepairRequestTimeoutSeconds = 25
     private static let buybackCheckoutPreparationTimeoutSeconds = 30
-    private static let wbccuCheckoutPreparationBaseTimeoutSeconds = 30
+    private static let wbccuCheckoutPreparationBaseTimeoutSeconds = 60
     private static let limitedShipCartInsertionTimeoutSeconds = 30
     private static let authorizedDevicesRequestTimeoutSeconds = 20
     private static let actionCompletionBannerDurationNanoseconds: UInt64 = 2_000_000_000

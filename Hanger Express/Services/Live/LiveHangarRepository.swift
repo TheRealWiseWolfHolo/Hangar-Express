@@ -8266,6 +8266,114 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     if (rsiToken) requestHeaders['x-rsi-token'] = rsiToken;
     if (rsiDevice) requestHeaders['x-rsi-device'] = rsiDevice;
 
+    const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+    const visible = (node) => {
+      if (!node || !node.isConnected) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+    };
+    const cartLineItems = () => Array.from(document.querySelectorAll([
+      '[data-cy-id="cart-line-item"]',
+      '.c-cartLineItem'
+    ].join(','))).filter(visible);
+    const findDeleteButton = (item) => Array.from(item?.querySelectorAll?.([
+      '[data-cy-id="__delete-button"]',
+      'button[aria-label*="delete" i]',
+      'button[aria-label*="remove" i]',
+      'button[class*="delete" i]',
+      'button[class*="remove" i]'
+    ].join(',')) || []).find((button) => {
+      const isDisabled = button.disabled || button.getAttribute('aria-disabled') === 'true';
+      return visible(button) && !isDisabled;
+    }) || null;
+    const pageReportsEmptyCart = () => {
+      const text = normalizeText(document.body?.innerText || '').toLowerCase();
+      return [
+        'your cart is empty',
+        'shopping cart is empty',
+        'your shopping cart is empty',
+        'no items in your cart',
+        'there are no items in your cart'
+      ].some((message) => text.includes(message));
+    };
+    const waitForCartLineChange = async (previousItem, previousCount, timeoutMilliseconds = 6000) => {
+      const deadline = Date.now() + timeoutMilliseconds;
+      while (Date.now() < deadline) {
+        await wait(200);
+        const currentItems = cartLineItems();
+        if (!previousItem.isConnected || currentItems.length < previousCount || pageReportsEmptyCart()) {
+          return true;
+        }
+      }
+      return false;
+    };
+    const clearExistingCart = async () => {
+      const startedAt = Date.now();
+      const deadline = startedAt + 30000;
+      let removedCount = 0;
+      let emptySince = 0;
+      let missingDeleteButtonSince = 0;
+
+      while (Date.now() < deadline) {
+        const items = cartLineItems();
+        if (items.length === 0) {
+          const hasConfirmedEmptyState = pageReportsEmptyCart() || removedCount > 0;
+          if (hasConfirmedEmptyState) {
+            if (!emptySince) emptySince = Date.now();
+            const stableEmptyDuration = removedCount > 0 ? 1000 : 3000;
+            if (Date.now() - emptySince >= stableEmptyDuration) {
+              return {
+                ok: true,
+                removedCount,
+                debugSummary: 'cartClear: removed=' + removedCount + ', emptyState=' + (pageReportsEmptyCart() ? 'visible' : 'stable')
+              };
+            }
+          }
+          await wait(200);
+          continue;
+        }
+
+        emptySince = 0;
+        const item = items[0];
+        const deleteButton = findDeleteButton(item);
+        if (!deleteButton) {
+          if (!missingDeleteButtonSince) missingDeleteButtonSince = Date.now();
+          if (Date.now() - missingDeleteButtonSince >= 5000) {
+            return {
+              ok: false,
+              removedCount,
+              failureMessage: 'Hangar Express found an existing RSI cart item but could not find its Remove control.',
+              debugSummary: 'cartClear: visibleItems=' + items.length + ', removed=' + removedCount
+            };
+          }
+          await wait(200);
+          continue;
+        }
+
+        missingDeleteButtonSince = 0;
+        const previousCount = items.length;
+        deleteButton.click();
+        const didChange = await waitForCartLineChange(item, previousCount);
+        if (!didChange) {
+          return {
+            ok: false,
+            removedCount,
+            failureMessage: 'RSI did not remove an existing cart item before the checkout preparation timeout.',
+            debugSummary: 'cartClear: visibleItems=' + cartLineItems().length + ', removed=' + removedCount
+          };
+        }
+        removedCount += 1;
+      }
+
+      return {
+        ok: false,
+        removedCount,
+        failureMessage: 'Hangar Express could not confirm that the RSI cart was empty before adding the selected upgrades.',
+        debugSummary: 'cartClear: visibleItems=' + cartLineItems().length + ', removed=' + removedCount + ', emptyText=' + (pageReportsEmptyCart() ? 'yes' : 'no')
+      };
+    };
+
     const readJSONResponse = async (response) => {
       const responseText = await response.text();
       let payload = null;
@@ -8296,6 +8404,18 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       }
       return { ok: true, accessDenied: false };
     };
+
+    const cartClearResult = await clearExistingCart();
+    if (!cartClearResult.ok) {
+      return {
+        accessDenied: false,
+        status: 'cart-clear-failed',
+        checkoutURL: null,
+        addedOfferIDs: [],
+        failureMessage: cartClearResult.failureMessage,
+        debugSummary: cartClearResult.debugSummary
+      };
+    }
 
     const authTokenResponse = await postJSON('/api/account/v2/setAuthToken', {}, 'upgrade auth token setup');
     if (!authTokenResponse.ok) {
@@ -8403,7 +8523,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       checkoutURL: new URL('/en/pledge/cart', window.location.origin).toString(),
       addedOfferIDs,
       failureMessage: null,
-      debugSummary: `added=${addedOfferIDs.length}, requested=${normalizedItems.length}`
+      debugSummary: cartClearResult.debugSummary + ', added=' + addedOfferIDs.length + ', requested=' + normalizedItems.length
     };
     """
 
