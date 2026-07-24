@@ -480,7 +480,6 @@
 "Tools" = "工具";
 "All Ships" = "全部舰船";
 "WBCCU Deals" = "WBCCU 优惠";
-"See live Warbond upgrade savings" = "查看实时战争债券升级优惠";
 "CCU Chain Calculator" = "CCU 链计算器";
 "CCU Calculator" = "CCU 计算器";
 "Source Ship" = "来源舰船";
@@ -545,8 +544,6 @@
 "Purchasable now" = "当前可购买";
 "Cannot be purchased right now" = "当前无法购买";
 "Reset Character" = "重置角色";
-"Browse the Star Citizen ship catalog" = "浏览 Star Citizen 舰船目录";
-"Find the lowest-cost upgrade chain" = "查找成本最低的升级链";
 "Loading WBCCU deals..." = "正在加载 WBCCU 优惠…";
 "Unable to Load Deals" = "无法加载优惠";
 "Refresh WBCCU deals" = "刷新 WBCCU 优惠";
@@ -762,9 +759,8 @@
 "RSI did not add the selected buy-back pledge to the cart.\n\n%@" = "RSI 未能将所选回购项目加入购物车。\n\n%@";
 "RSI did not prepare the buy-back cart within %lld seconds." = "RSI 未在 %lld 秒内准备好回购购物车。";
 "See All Authorized Devices" = "查看所有授权设备";
-"View Logged In Devices" = "查看并移除已登陆设备";
+"Logged-In Devices" = "已登录设备";
 "Review and remove trusted RSI devices" = "查看并移除已信任的 RSI 设备";
-"Review and remove logged-in RSI devices" = "查看并移除已登录的 RSI 设备";
 "Authorized Devices" = "授权设备";
 "Logged In Devices" = "已登录设备";
 "Logged In Devices Updated" = "已登录设备已更新";
@@ -828,7 +824,6 @@
 "Current RSI Account" = "当前 RSI 账户";
 "Character Repair" = "角色修复";
 "Request Character Repair" = "请求角色修复";
-"Request an RSI character repair" = "请求 RSI 角色修复";
 "Requesting Repair..." = "正在请求修复...";
 "Unable to Request Repair" = "无法请求角色修复";
 "Sign in to RSI before requesting a character repair." = "请先登录 RSI，然后再请求角色修复。";
