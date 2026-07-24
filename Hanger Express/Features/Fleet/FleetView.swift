@@ -576,26 +576,11 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
         case .wbccuDeals:
             return AppLocalizer.string("WBCCU Deals")
         case .authorizedDevices:
-            return AppLocalizer.string("View Logged In Devices")
+            return AppLocalizer.string("Logged-In Devices")
         case .ccuChainCalculator:
             return AppLocalizer.string("CCU Chain Calculator")
         case .resetCharacter:
             return AppLocalizer.string("Reset Character")
-        }
-    }
-
-    var subtitle: String {
-        switch self {
-        case .allShips:
-            return AppLocalizer.string("Browse the Star Citizen ship catalog")
-        case .wbccuDeals:
-            return AppLocalizer.string("See live Warbond upgrade savings")
-        case .authorizedDevices:
-            return AppLocalizer.string("Review and remove logged-in RSI devices")
-        case .ccuChainCalculator:
-            return AppLocalizer.string("Find the lowest-cost upgrade chain")
-        case .resetCharacter:
-            return AppLocalizer.string("Request an RSI character repair")
         }
     }
 
@@ -647,9 +632,15 @@ struct FleetToolsSection: View {
                     .padding(.horizontal, 4)
             }
 
-            VStack(spacing: 10) {
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 12),
+                    GridItem(.flexible(), spacing: 12)
+                ],
+                spacing: 12
+            ) {
                 ForEach(FleetTool.allCases) { tool in
-                    FleetToolRow(tool: tool, isEnabled: !disabledTools.contains(tool)) {
+                    FleetToolTile(tool: tool, isEnabled: !disabledTools.contains(tool)) {
                         onSelect(tool)
                     }
                 }
@@ -658,43 +649,33 @@ struct FleetToolsSection: View {
     }
 }
 
-private struct FleetToolRow: View {
+private struct FleetToolTile: View {
     let tool: FleetTool
     let isEnabled: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 12) {
+            VStack(spacing: 12) {
                 Image(systemName: tool.systemImage)
-                    .font(.title3.weight(.semibold))
+                    .font(.title2.weight(.semibold))
                     .foregroundStyle(tool.isAvailable && isEnabled ? Color.accentColor : .secondary)
-                    .frame(width: 34, height: 34)
+                    .frame(width: 44, height: 44)
                     .background(
                         Circle()
                             .fill((tool.isAvailable && isEnabled ? Color.accentColor : Color.secondary).opacity(0.12))
                     )
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(tool.title)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-
-                    Text(tool.subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 8)
-
-                if tool.isAvailable {
-                    Image(systemName: "chevron.right")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                }
+                Text(tool.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 16)
+            .frame(maxWidth: .infinity, minHeight: 124)
             .background(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
                     .fill(Color(.secondarySystemGroupedBackground))
@@ -703,6 +684,7 @@ private struct FleetToolRow: View {
         .buttonStyle(.plain)
         .disabled(!tool.isAvailable || !isEnabled)
         .opacity(tool.isAvailable && isEnabled ? 1 : 0.62)
+        .accessibilityLabel(tool.title)
     }
 }
 
