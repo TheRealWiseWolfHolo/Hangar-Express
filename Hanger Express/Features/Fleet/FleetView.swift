@@ -613,6 +613,9 @@ struct FleetToolsSection: View {
     var showsHeader = true
     var disabledTools: Set<FleetTool> = []
 
+    @AppStorage("fleetToolsOrder") private var storedToolOrder = ""
+    @State private var dropTarget: FleetTool?
+
     init(
         showsHeader: Bool = true,
         disabledTools: Set<FleetTool> = [],
@@ -639,19 +642,79 @@ struct FleetToolsSection: View {
                 ],
                 spacing: 12
             ) {
-                ForEach(FleetTool.allCases) { tool in
-                    FleetToolTile(tool: tool, isEnabled: !disabledTools.contains(tool)) {
+                ForEach(orderedTools) { tool in
+                    FleetToolTile(
+                        tool: tool,
+                        isEnabled: !disabledTools.contains(tool),
+                        isDropTarget: dropTarget == tool
+                    ) {
                         onSelect(tool)
+                    }
+                    .draggable(tool.rawValue)
+                    .dropDestination(for: String.self) { draggedToolNames, _ in
+                        dropTarget = nil
+
+                        guard
+                            let draggedToolName = draggedToolNames.first,
+                            let draggedTool = FleetTool(rawValue: draggedToolName)
+                        else {
+                            return false
+                        }
+
+                        return moveTool(draggedTool, relativeTo: tool)
+                    } isTargeted: { isTargeted in
+                        if isTargeted {
+                            dropTarget = tool
+                        } else if dropTarget == tool {
+                            dropTarget = nil
+                        }
                     }
                 }
             }
+            .animation(.snappy, value: orderedTools)
         }
+    }
+
+    private var orderedTools: [FleetTool] {
+        var seenTools = Set<FleetTool>()
+        let savedTools = storedToolOrder
+            .split(separator: ",")
+            .compactMap { FleetTool(rawValue: String($0)) }
+            .filter { seenTools.insert($0).inserted }
+        let newTools = FleetTool.allCases.filter { seenTools.insert($0).inserted }
+        return savedTools + newTools
+    }
+
+    @discardableResult
+    private func moveTool(_ draggedTool: FleetTool, relativeTo targetTool: FleetTool) -> Bool {
+        var tools = orderedTools
+
+        guard
+            draggedTool != targetTool,
+            let sourceIndex = tools.firstIndex(of: draggedTool),
+            let targetIndex = tools.firstIndex(of: targetTool)
+        else {
+            return false
+        }
+
+        tools.remove(at: sourceIndex)
+        guard let adjustedTargetIndex = tools.firstIndex(of: targetTool) else {
+            return false
+        }
+
+        let destinationIndex = sourceIndex < targetIndex
+            ? adjustedTargetIndex + 1
+            : adjustedTargetIndex
+        tools.insert(draggedTool, at: destinationIndex)
+        storedToolOrder = tools.map(\.rawValue).joined(separator: ",")
+        return true
     }
 }
 
 private struct FleetToolTile: View {
     let tool: FleetTool
     let isEnabled: Bool
+    let isDropTarget: Bool
     let action: () -> Void
 
     var body: some View {
@@ -680,10 +743,16 @@ private struct FleetToolTile: View {
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
                     .fill(Color(.secondarySystemGroupedBackground))
             )
+            .overlay {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(Color.accentColor, lineWidth: isDropTarget ? 2 : 0)
+            }
         }
         .buttonStyle(.plain)
         .disabled(!tool.isAvailable || !isEnabled)
         .opacity(tool.isAvailable && isEnabled ? 1 : 0.62)
+        .scaleEffect(isDropTarget ? 1.03 : 1)
+        .animation(.easeOut(duration: 0.15), value: isDropTarget)
         .accessibilityLabel(tool.title)
     }
 }
