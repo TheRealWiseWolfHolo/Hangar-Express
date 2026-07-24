@@ -12,6 +12,9 @@
 - Reorganized Tools into a compact two-column grid with icon tiles and concise titles.
 - Added persistent long-press drag reordering to the Tools grid.
 
+### Fixed
+- Fixed tool reordering so a long press lifts only the selected tile instead of the entire Tools section.
+
 ## v1.0.8 (In Progress)
 
 ### Added
