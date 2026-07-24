@@ -7,7 +7,8 @@
 
 ### Changed
 - Started the `1.0.9` release branch and release-note tracking for ongoing work.
-- Replaced the broken WBCCU store link with an in-app virtual cart that clears the RSI cart through its authenticated cart mutation, verifies it is empty, prepares only the selected source-to-Warbond upgrades, and opens checkout inside Hangar Express.
+- Replaced the broken WBCCU store link with an in-app cart that clears the RSI cart through its authenticated cart mutation, verifies it is empty, prepares only the selected source-to-Warbond upgrades, and opens checkout inside Hangar Express.
+- Simplified WBCCU deal cards by removing redundant availability and new-money labels and shortening the cart status text.
 
 ## v1.0.8 (In Progress)
 

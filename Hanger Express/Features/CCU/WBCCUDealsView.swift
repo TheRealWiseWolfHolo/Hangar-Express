@@ -384,7 +384,7 @@ private struct WBCCUDealCard: View {
                 if let cartItem {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 8) {
-                            Label("In Virtual Cart", systemImage: "cart.fill.badge.plus")
+                            Label("In Cart", systemImage: "cart.fill.badge.plus")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.green)
                             Spacer()
@@ -407,10 +407,6 @@ private struct WBCCUDealCard: View {
                     }
                 } else {
                     HStack(spacing: 10) {
-                        Label("New money only", systemImage: "creditcard.fill")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
-
                         Spacer()
 
                         Button(action: onChooseSource) {
@@ -486,16 +482,6 @@ private struct WBCCUDealCard: View {
             .padding(16)
         }
         .frame(height: 170)
-        .overlay(alignment: .topLeading) {
-            Text("AVAILABLE NOW")
-                .font(.caption2.weight(.heavy))
-                .tracking(0.7)
-                .foregroundStyle(.white)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 6)
-                .background(.green.opacity(0.9), in: Capsule())
-                .padding(12)
-        }
     }
 
     private func priceBlock(
@@ -625,12 +611,12 @@ private struct WBCCUDealsSourceFooter: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("Warbond upgrades require new money. Availability and prices can change without notice; confirm the final offer in the RSI store.")
+            Text("Availability and prices can change without notice; confirm the final offer in the RSI store.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            Text("Checking out replaces the current RSI cart with the upgrades in this virtual cart.")
+            Text("Checking out replaces the current RSI cart with the upgrades in this cart.")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.orange)
                 .multilineTextAlignment(.center)
