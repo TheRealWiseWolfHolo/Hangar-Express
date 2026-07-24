@@ -650,7 +650,9 @@ struct FleetToolsSection: View {
                     ) {
                         onSelect(tool)
                     }
-                    .draggable(tool.rawValue)
+                    .draggable(tool.rawValue) {
+                        FleetToolDragPreview(tool: tool)
+                    }
                     .dropDestination(for: String.self) { draggedToolNames, _ in
                         dropTarget = nil
 
@@ -708,6 +710,38 @@ struct FleetToolsSection: View {
         tools.insert(draggedTool, at: destinationIndex)
         storedToolOrder = tools.map(\.rawValue).joined(separator: ",")
         return true
+    }
+}
+
+private struct FleetToolDragPreview: View {
+    let tool: FleetTool
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: tool.systemImage)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 44, height: 44)
+                .background(
+                    Circle()
+                        .fill(Color.accentColor.opacity(0.12))
+                )
+
+            Text(tool.title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.85)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 16)
+        .frame(width: 164, height: 124)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        )
+        .contentShape(.dragPreview, RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 }
 
