@@ -614,7 +614,12 @@ struct FleetToolsSection: View {
     var disabledTools: Set<FleetTool> = []
 
     @AppStorage("fleetToolsOrder") private var storedToolOrder = ""
-    @State private var dropTarget: FleetTool?
+    @State private var draggedTool: FleetTool?
+    @State private var draggedToolLocation = CGPoint.zero
+    @State private var draggedToolSize = CGSize.zero
+    @State private var toolFrames: [FleetTool: CGRect] = [:]
+    @State private var lastReorderTarget: FleetTool?
+    @State private var reorderFeedbackTrigger = 0
 
     init(
         showsHeader: Bool = true,
@@ -645,35 +650,42 @@ struct FleetToolsSection: View {
                 ForEach(orderedTools) { tool in
                     FleetToolTile(
                         tool: tool,
-                        isEnabled: !disabledTools.contains(tool),
-                        isDropTarget: dropTarget == tool
+                        isEnabled: !disabledTools.contains(tool)
                     ) {
                         onSelect(tool)
                     }
-                    .draggable(tool.rawValue) {
-                        FleetToolDragPreview(tool: tool)
-                    }
-                    .dropDestination(for: String.self) { draggedToolNames, _ in
-                        dropTarget = nil
-
-                        guard
-                            let draggedToolName = draggedToolNames.first,
-                            let draggedTool = FleetTool(rawValue: draggedToolName)
-                        else {
-                            return false
-                        }
-
-                        return moveTool(draggedTool, relativeTo: tool)
-                    } isTargeted: { isTargeted in
-                        if isTargeted {
-                            dropTarget = tool
-                        } else if dropTarget == tool {
-                            dropTarget = nil
+                    .opacity(draggedTool == tool ? 0 : 1)
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: FleetToolFramePreferenceKey.self,
+                                value: [tool: proxy.frame(in: .named("toolsGrid"))]
+                            )
                         }
                     }
+                    .gesture(reorderGesture(for: tool))
                 }
             }
             .animation(.snappy, value: orderedTools)
+            .coordinateSpace(name: "toolsGrid")
+            .onPreferenceChange(FleetToolFramePreferenceKey.self) { frames in
+                toolFrames = frames
+            }
+            .overlay(alignment: .topLeading) {
+                if let draggedTool {
+                    FleetToolTile(
+                        tool: draggedTool,
+                        isEnabled: !disabledTools.contains(draggedTool),
+                        action: {}
+                    )
+                    .frame(width: draggedToolSize.width, height: draggedToolSize.height)
+                    .scaleEffect(1.06)
+                    .shadow(color: .black.opacity(0.28), radius: 14, y: 8)
+                    .position(draggedToolLocation)
+                    .allowsHitTesting(false)
+                }
+            }
+            .sensoryFeedback(.selection, trigger: reorderFeedbackTrigger)
         }
     }
 
@@ -685,6 +697,69 @@ struct FleetToolsSection: View {
             .filter { seenTools.insert($0).inserted }
         let newTools = FleetTool.allCases.filter { seenTools.insert($0).inserted }
         return savedTools + newTools
+    }
+
+    private func reorderGesture(for tool: FleetTool) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.35)
+            .sequenced(
+                before: DragGesture(
+                    minimumDistance: 0,
+                    coordinateSpace: .named("toolsGrid")
+                )
+            )
+            .onChanged { value in
+                switch value {
+                case .first(true):
+                    beginDragging(tool)
+                case let .second(true, dragValue?):
+                    beginDragging(tool)
+                    draggedToolLocation = dragValue.location
+                    reorderDraggedTool(at: dragValue.location)
+                default:
+                    break
+                }
+            }
+            .onEnded { _ in
+                draggedTool = nil
+                draggedToolSize = .zero
+                lastReorderTarget = nil
+            }
+    }
+
+    private func beginDragging(_ tool: FleetTool) {
+        guard draggedTool == nil else {
+            return
+        }
+
+        let frame = toolFrames[tool] ?? CGRect(origin: .zero, size: CGSize(width: 164, height: 124))
+        draggedTool = tool
+        draggedToolLocation = CGPoint(x: frame.midX, y: frame.midY)
+        draggedToolSize = frame.size
+        reorderFeedbackTrigger += 1
+    }
+
+    private func reorderDraggedTool(at location: CGPoint) {
+        guard let draggedTool else {
+            return
+        }
+
+        let targetTool = toolFrames.first { tool, frame in
+            tool != draggedTool && frame.contains(location)
+        }?.key
+
+        guard let targetTool else {
+            lastReorderTarget = nil
+            return
+        }
+
+        guard targetTool != lastReorderTarget else {
+            return
+        }
+
+        lastReorderTarget = targetTool
+        if moveTool(draggedTool, relativeTo: targetTool) {
+            reorderFeedbackTrigger += 1
+        }
     }
 
     @discardableResult
@@ -713,18 +788,31 @@ struct FleetToolsSection: View {
     }
 }
 
-private struct FleetToolDragPreview: View {
+private struct FleetToolFramePreferenceKey: PreferenceKey {
+    static let defaultValue: [FleetTool: CGRect] = [:]
+
+    static func reduce(
+        value: inout [FleetTool: CGRect],
+        nextValue: () -> [FleetTool: CGRect]
+    ) {
+        value.merge(nextValue(), uniquingKeysWith: { _, newValue in newValue })
+    }
+}
+
+private struct FleetToolTile: View {
     let tool: FleetTool
+    let isEnabled: Bool
+    let action: () -> Void
 
     var body: some View {
         VStack(spacing: 12) {
             Image(systemName: tool.systemImage)
                 .font(.title2.weight(.semibold))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(tool.isAvailable && isEnabled ? Color.accentColor : .secondary)
                 .frame(width: 44, height: 44)
                 .background(
                     Circle()
-                        .fill(Color.accentColor.opacity(0.12))
+                        .fill((tool.isAvailable && isEnabled ? Color.accentColor : Color.secondary).opacity(0.12))
                 )
 
             Text(tool.title)
@@ -736,58 +824,27 @@ private struct FleetToolDragPreview: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 16)
-        .frame(width: 164, height: 124)
+        .frame(maxWidth: .infinity, minHeight: 124)
         .background(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(Color(.secondarySystemGroupedBackground))
         )
-        .contentShape(.dragPreview, RoundedRectangle(cornerRadius: 20, style: .continuous))
-    }
-}
-
-private struct FleetToolTile: View {
-    let tool: FleetTool
-    let isEnabled: Bool
-    let isDropTarget: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 12) {
-                Image(systemName: tool.systemImage)
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(tool.isAvailable && isEnabled ? Color.accentColor : .secondary)
-                    .frame(width: 44, height: 44)
-                    .background(
-                        Circle()
-                            .fill((tool.isAvailable && isEnabled ? Color.accentColor : Color.secondary).opacity(0.12))
-                    )
-
-                Text(tool.title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.85)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 16)
-            .frame(maxWidth: .infinity, minHeight: 124)
-            .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(Color(.secondarySystemGroupedBackground))
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .stroke(Color.accentColor, lineWidth: isDropTarget ? 2 : 0)
-            }
-        }
-        .buttonStyle(.plain)
-        .disabled(!tool.isAvailable || !isEnabled)
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .opacity(tool.isAvailable && isEnabled ? 1 : 0.62)
-        .scaleEffect(isDropTarget ? 1.03 : 1)
-        .animation(.easeOut(duration: 0.15), value: isDropTarget)
+        .onTapGesture {
+            guard tool.isAvailable && isEnabled else {
+                return
+            }
+            action()
+        }
+        .accessibilityAddTraits(.isButton)
         .accessibilityLabel(tool.title)
+        .accessibilityAction {
+            guard tool.isAvailable && isEnabled else {
+                return
+            }
+            action()
+        }
     }
 }
 
