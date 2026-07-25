@@ -478,10 +478,9 @@
 "Sort Fleet" = "舰队排序";
 "Search ships, manufacturers, functions" = "搜索舰船、制造商、职能";
 "Tools" = "工具";
-"All Ships" = "全部舰船";
-"WBCCU Deals" = "WBCCU 优惠";
-"CCU Chain Calculator" = "CCU 链计算器";
-"CCU Calculator" = "CCU 计算器";
+"Ship Catalogue" = "舰船目录";
+"WBCCU Deals" = "WBCCU优惠";
+"CCU Calculator" = "CCU计算器";
 "Source Ship" = "来源舰船";
 "Destination Ship" = "目标舰船";
 "Choose source" = "选择来源";
@@ -543,7 +542,6 @@
 "Purchasable now, new money only" = "当前可购买，仅限新资金";
 "Purchasable now" = "当前可购买";
 "Cannot be purchased right now" = "当前无法购买";
-"Reset Character" = "重置角色";
 "Loading WBCCU deals..." = "正在加载 WBCCU 优惠…";
 "Unable to Load Deals" = "无法加载优惠";
 "Refresh WBCCU deals" = "刷新 WBCCU 优惠";
@@ -759,7 +757,7 @@
 "RSI did not add the selected buy-back pledge to the cart.\n\n%@" = "RSI 未能将所选回购项目加入购物车。\n\n%@";
 "RSI did not prepare the buy-back cart within %lld seconds." = "RSI 未在 %lld 秒内准备好回购购物车。";
 "See All Authorized Devices" = "查看所有授权设备";
-"Logged-In Devices" = "已登录设备";
+"Logged in Device Management" = "登陆设备管理";
 "Review and remove trusted RSI devices" = "查看并移除已信任的 RSI 设备";
 "Authorized Devices" = "授权设备";
 "Logged In Devices" = "已登录设备";
