@@ -602,24 +602,11 @@ private struct WBCCUDealsSourceFooter: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            Label("Live data from StarCitizen-Info", systemImage: "antenna.radiowaves.left.and.right")
-                .font(.caption.weight(.semibold))
-
             if let generatedAt {
                 Text(AppLocalizer.format("Feed updated %@", AppLocalizer.displayDateTime(generatedAt)))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-
-            Text("Availability and prices can change without notice; confirm the final offer in the RSI store.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
-            Text("Checking out replaces the current RSI cart with the upgrades in this cart.")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.orange)
-                .multilineTextAlignment(.center)
 
             if !cartItems.isEmpty {
                 HStack {
