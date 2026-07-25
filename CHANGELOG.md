@@ -11,6 +11,7 @@
 - Simplified WBCCU deal cards by removing redundant availability and new-money labels and shortening the cart status text.
 - Simplified the WBCCU footer to show only the feed's last-updated time above the cart controls.
 - Hid WBCCU checkout controls for an empty cart and made them float at the bottom of the screen while the cart contains upgrades.
+- Added a compact red Clear Cart action to the floating WBCCU checkout controls.
 - Reorganized Tools into a compact two-column grid with icon tiles and concise titles.
 - Added persistent drag reordering to the Tools grid after a deliberate one-second hold.
 - Renamed the Tools grid entries with shorter, clearer English and Simplified Chinese labels.

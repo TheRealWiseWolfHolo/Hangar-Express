@@ -576,6 +576,7 @@
 "Closest-valued ships are listed first." = "价值最接近的舰船优先显示。";
 "%lld upgrade(s)" = "%lld 个升级";
 "Cart total %@" = "购物车合计 %@";
+"Clear Cart" = "清空购物车";
 "Preparing Cart..." = "正在准备购物车…";
 "Check Out" = "结账";
 "Checking out replaces the current RSI cart with the upgrades in this cart." = "结账时会清空当前 RSI 购物车，并替换为此购物车中的升级。";
