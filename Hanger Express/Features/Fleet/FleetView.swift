@@ -666,7 +666,6 @@ struct FleetToolsSection: View {
                     .gesture(reorderGesture(for: tool))
                 }
             }
-            .animation(.snappy, value: orderedTools)
             .coordinateSpace(name: "toolsGrid")
             .onPreferenceChange(FleetToolFramePreferenceKey.self) { frames in
                 toolFrames = frames
@@ -683,6 +682,7 @@ struct FleetToolsSection: View {
                     .shadow(color: .black.opacity(0.28), radius: 14, y: 8)
                     .position(draggedToolLocation)
                     .allowsHitTesting(false)
+                    .transition(.scale(scale: 0.92).combined(with: .opacity))
                 }
             }
             .sensoryFeedback(.selection, trigger: reorderFeedbackTrigger)
@@ -700,7 +700,7 @@ struct FleetToolsSection: View {
     }
 
     private func reorderGesture(for tool: FleetTool) -> some Gesture {
-        LongPressGesture(minimumDuration: 0.35)
+        LongPressGesture(minimumDuration: 2)
             .sequenced(
                 before: DragGesture(
                     minimumDistance: 0,
@@ -720,8 +720,9 @@ struct FleetToolsSection: View {
                 }
             }
             .onEnded { _ in
-                draggedTool = nil
-                draggedToolSize = .zero
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.82)) {
+                    draggedTool = nil
+                }
                 lastReorderTarget = nil
             }
     }
@@ -732,9 +733,11 @@ struct FleetToolsSection: View {
         }
 
         let frame = toolFrames[tool] ?? CGRect(origin: .zero, size: CGSize(width: 164, height: 124))
-        draggedTool = tool
         draggedToolLocation = CGPoint(x: frame.midX, y: frame.midY)
         draggedToolSize = frame.size
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.78)) {
+            draggedTool = tool
+        }
         reorderFeedbackTrigger += 1
     }
 
@@ -783,7 +786,9 @@ struct FleetToolsSection: View {
             ? adjustedTargetIndex + 1
             : adjustedTargetIndex
         tools.insert(draggedTool, at: destinationIndex)
-        storedToolOrder = tools.map(\.rawValue).joined(separator: ",")
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            storedToolOrder = tools.map(\.rawValue).joined(separator: ",")
+        }
         return true
     }
 }
