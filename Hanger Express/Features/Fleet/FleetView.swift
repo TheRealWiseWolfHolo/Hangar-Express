@@ -611,6 +611,7 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
 
 struct FleetToolsSection: View {
     let onSelect: (FleetTool) -> Void
+    let onReorderingChanged: (Bool) -> Void
     var showsHeader = true
     var disabledTools: Set<FleetTool> = []
 
@@ -627,10 +628,12 @@ struct FleetToolsSection: View {
     init(
         showsHeader: Bool = true,
         disabledTools: Set<FleetTool> = [],
+        onReorderingChanged: @escaping (Bool) -> Void = { _ in },
         onSelect: @escaping (FleetTool) -> Void
     ) {
         self.showsHeader = showsHeader
         self.disabledTools = disabledTools
+        self.onReorderingChanged = onReorderingChanged
         self.onSelect = onSelect
     }
 
@@ -659,7 +662,7 @@ struct FleetToolsSection: View {
                     }
                     .overlay {
                         ScrollFriendlyToolReorderSurface(
-                            minimumPressDuration: 2,
+                            minimumPressDuration: 1,
                             allowableMovement: 12,
                             onTap: {
                                 guard
@@ -734,7 +737,7 @@ struct FleetToolsSection: View {
 
     private func updateHoldProgress(isPressing: Bool, for tool: FleetTool) {
         if isPressing {
-            withAnimation(.linear(duration: 2)) {
+            withAnimation(.linear(duration: 1)) {
                 heldTool = tool
             }
         } else if heldTool == tool {
@@ -753,6 +756,7 @@ struct FleetToolsSection: View {
         draggedToolLocation = CGPoint(x: frame.midX, y: frame.midY)
         draggedToolSize = frame.size
         draggedTool = tool
+        onReorderingChanged(true)
         dragActivationFeedbackTrigger += 1
     }
 
@@ -778,6 +782,7 @@ struct FleetToolsSection: View {
 
     private func finishDragging() {
         guard draggedTool != nil else {
+            onReorderingChanged(false)
             return
         }
 
@@ -789,6 +794,7 @@ struct FleetToolsSection: View {
             draggedToolSize = .zero
         }
         lastReorderTarget = nil
+        onReorderingChanged(false)
     }
 
     private func reorderDraggedTool(at location: CGPoint) {
