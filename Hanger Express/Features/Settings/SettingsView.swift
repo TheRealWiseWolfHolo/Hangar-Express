@@ -398,10 +398,12 @@ private struct ProSubscriptionSection: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(subscriptionStore.isPro ? 1 : 2)
 
-                        Text(accessSummary)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
+                        if let accessSummary {
+                            Text(accessSummary)
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
                     }
 
                     Spacer(minLength: 8)
@@ -434,11 +436,15 @@ private struct ProSubscriptionSection: View {
             return AppLocalizer.string("Support development and get early access to experimental Labs features.")
         }
 
+        if subscriptionStore.proSubscriptionDetails?.isLifetime == true {
+            return AppLocalizer.string("Lifetime Access")
+        }
+
         return subscriptionStore.proSubscriptionDetails?.displayName
             ?? AppLocalizer.string("Hangar Express Early Access")
     }
 
-    private var accessSummary: String {
+    private var accessSummary: String? {
         guard subscriptionStore.isPro else {
             return AppLocalizer.string("See Plans")
         }
@@ -448,7 +454,7 @@ private struct ProSubscriptionSection: View {
         }
 
         if details.isLifetime {
-            return AppLocalizer.string("Lifetime access")
+            return nil
         }
 
         if details.willAutoRenew == false, let expirationDate = details.expirationDate {

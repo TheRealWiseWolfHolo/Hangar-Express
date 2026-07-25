@@ -8,6 +8,7 @@
 ### Changed
 - Started the `1.0.9` release branch and release-note tracking for ongoing work.
 - Began the Early Access overhaul with a compact Settings status row and moved the profile badge preference into Manage Plans, while preserving existing StoreKit product IDs and saved entitlement keys so current access carries forward after updating.
+- Removed duplicate lifetime-plan details from the Early Access status card so lifetime owners see one concise Lifetime Access line.
 - Replaced the broken WBCCU store link with an in-app cart that clears the RSI cart through its authenticated cart mutation, verifies it is empty, prepares only the selected source-to-Warbond upgrades, and opens checkout inside Hangar Express.
 - Simplified WBCCU deal cards by removing redundant availability and new-money labels and shortening the cart status text.
 - Simplified the WBCCU footer to show only the feed's last-updated time above the cart controls.
