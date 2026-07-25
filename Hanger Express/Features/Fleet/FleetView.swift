@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct FleetView: View {
     enum SortMode: String, CaseIterable, Identifiable {
@@ -614,7 +615,6 @@ struct FleetToolsSection: View {
     var disabledTools: Set<FleetTool> = []
 
     @AppStorage("fleetToolsOrder") private var storedToolOrder = ""
-    @GestureState private var isReorderGestureActive = false
     @State private var heldTool: FleetTool?
     @State private var draggedTool: FleetTool?
     @State private var draggedToolLocation = CGPoint.zero
@@ -657,6 +657,33 @@ struct FleetToolsSection: View {
                     ) {
                         onSelect(tool)
                     }
+                    .overlay {
+                        ScrollFriendlyToolReorderSurface(
+                            minimumPressDuration: 2,
+                            allowableMovement: 12,
+                            onTap: {
+                                guard
+                                    tool.isAvailable,
+                                    !disabledTools.contains(tool)
+                                else {
+                                    return
+                                }
+                                onSelect(tool)
+                            },
+                            onPressingChanged: { isPressing in
+                                updateHoldProgress(isPressing: isPressing, for: tool)
+                            },
+                            onActivated: {
+                                beginDragging(tool)
+                            },
+                            onMoved: { location in
+                                updateDragging(tool, localLocation: location)
+                            },
+                            onEnded: {
+                                finishDragging()
+                            }
+                        )
+                    }
                     .scaleEffect(heldTool == tool && draggedTool == nil ? 1.06 : 1)
                     .opacity(draggedTool == tool ? 0 : 1)
                     .background {
@@ -667,15 +694,6 @@ struct FleetToolsSection: View {
                             )
                         }
                     }
-                    .onLongPressGesture(
-                        minimumDuration: 2,
-                        maximumDistance: 12,
-                        pressing: { isPressing in
-                            updateHoldProgress(isPressing: isPressing, for: tool)
-                        },
-                        perform: {}
-                    )
-                    .simultaneousGesture(reorderGesture(for: tool))
                 }
             }
             .coordinateSpace(name: "toolsGrid")
@@ -701,11 +719,6 @@ struct FleetToolsSection: View {
             }
             .sensoryFeedback(.impact(weight: .medium), trigger: dragActivationFeedbackTrigger)
             .sensoryFeedback(.selection, trigger: reorderFeedbackTrigger)
-            .onChange(of: isReorderGestureActive) { _, isActive in
-                if !isActive {
-                    finishDragging()
-                }
-            }
         }
     }
 
@@ -717,43 +730,6 @@ struct FleetToolsSection: View {
             .filter { seenTools.insert($0).inserted }
         let newTools = FleetTool.allCases.filter { seenTools.insert($0).inserted }
         return savedTools + newTools
-    }
-
-    private func reorderGesture(for tool: FleetTool) -> some Gesture {
-        LongPressGesture(minimumDuration: 2, maximumDistance: 12)
-            .sequenced(
-                before: DragGesture(
-                    minimumDistance: 0,
-                    coordinateSpace: .named("toolsGrid")
-                )
-            )
-            .updating($isReorderGestureActive) { value, isActive, _ in
-                switch value {
-                case .first(true), .second(true, _):
-                    isActive = true
-                default:
-                    break
-                }
-            }
-            .onChanged { value in
-                switch value {
-                case .first(true):
-                    beginDragging(tool)
-                case let .second(true, dragValue?):
-                    beginDragging(tool)
-                    var transaction = Transaction()
-                    transaction.disablesAnimations = true
-                    withTransaction(transaction) {
-                        draggedToolLocation = dragValue.location
-                    }
-                    reorderDraggedTool(at: dragValue.location)
-                default:
-                    break
-                }
-            }
-            .onEnded { _ in
-                finishDragging()
-            }
     }
 
     private func updateHoldProgress(isPressing: Bool, for tool: FleetTool) {
@@ -778,6 +754,26 @@ struct FleetToolsSection: View {
         draggedToolSize = frame.size
         draggedTool = tool
         dragActivationFeedbackTrigger += 1
+    }
+
+    private func updateDragging(_ tool: FleetTool, localLocation: CGPoint) {
+        guard
+            draggedTool == tool,
+            let frame = toolFrames[tool]
+        else {
+            return
+        }
+
+        let gridLocation = CGPoint(
+            x: frame.minX + localLocation.x,
+            y: frame.minY + localLocation.y
+        )
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            draggedToolLocation = gridLocation
+        }
+        reorderDraggedTool(at: gridLocation)
     }
 
     private func finishDragging() {
@@ -847,6 +843,146 @@ struct FleetToolsSection: View {
     }
 }
 
+private struct ScrollFriendlyToolReorderSurface: UIViewRepresentable {
+    let minimumPressDuration: TimeInterval
+    let allowableMovement: CGFloat
+    let onTap: () -> Void
+    let onPressingChanged: (Bool) -> Void
+    let onActivated: () -> Void
+    let onMoved: (CGPoint) -> Void
+    let onEnded: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        view.isAccessibilityElement = false
+
+        let recognizer = ScrollFriendlyLongPressGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleGesture(_:))
+        )
+        recognizer.minimumPressDuration = minimumPressDuration
+        recognizer.allowableMovement = allowableMovement
+        recognizer.cancelsTouchesInView = false
+        recognizer.delaysTouchesBegan = false
+        recognizer.delaysTouchesEnded = false
+        recognizer.delegate = context.coordinator
+        recognizer.onTouchingChanged = { [weak coordinator = context.coordinator] isTouching in
+            coordinator?.handleTouchingChanged(isTouching)
+        }
+        view.addGestureRecognizer(recognizer)
+        context.coordinator.recognizer = recognizer
+
+        let tapRecognizer = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleTap)
+        )
+        tapRecognizer.cancelsTouchesInView = false
+        tapRecognizer.delegate = context.coordinator
+        tapRecognizer.require(toFail: recognizer)
+        view.addGestureRecognizer(tapRecognizer)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.parent = self
+        context.coordinator.recognizer?.minimumPressDuration = minimumPressDuration
+        context.coordinator.recognizer?.allowableMovement = allowableMovement
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var parent: ScrollFriendlyToolReorderSurface
+        weak var recognizer: ScrollFriendlyLongPressGestureRecognizer?
+        private var isReordering = false
+
+        init(parent: ScrollFriendlyToolReorderSurface) {
+            self.parent = parent
+        }
+
+        func handleTouchingChanged(_ isTouching: Bool) {
+            parent.onPressingChanged(isTouching)
+            if !isTouching {
+                finishReorderingIfNeeded()
+            }
+        }
+
+        @objc
+        func handleTap() {
+            parent.onTap()
+        }
+
+        @objc
+        func handleGesture(_ recognizer: UILongPressGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                isReordering = true
+                parent.onActivated()
+            case .changed:
+                guard isReordering else {
+                    return
+                }
+                parent.onMoved(recognizer.location(in: recognizer.view))
+            case .ended, .cancelled, .failed:
+                finishReorderingIfNeeded()
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            !isReordering
+        }
+
+        private func finishReorderingIfNeeded() {
+            guard isReordering else {
+                return
+            }
+            isReordering = false
+            parent.onEnded()
+        }
+    }
+}
+
+private final class ScrollFriendlyLongPressGestureRecognizer: UILongPressGestureRecognizer {
+    var onTouchingChanged: ((Bool) -> Void)?
+    private var isTouching = false
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        updateTouching(true)
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesEnded(touches, with: event)
+        updateTouching(false)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesCancelled(touches, with: event)
+        updateTouching(false)
+    }
+
+    override func reset() {
+        updateTouching(false)
+        super.reset()
+    }
+
+    private func updateTouching(_ newValue: Bool) {
+        guard isTouching != newValue else {
+            return
+        }
+        isTouching = newValue
+        onTouchingChanged?(newValue)
+    }
+}
+
 private struct FleetToolFramePreferenceKey: PreferenceKey {
     static let defaultValue: [FleetTool: CGRect] = [:]
 
@@ -890,12 +1026,6 @@ private struct FleetToolTile: View {
         )
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .opacity(tool.isAvailable && isEnabled ? 1 : 0.62)
-        .onTapGesture {
-            guard tool.isAvailable && isEnabled else {
-                return
-            }
-            action()
-        }
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel(tool.title)
         .accessibilityAction {
