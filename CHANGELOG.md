@@ -11,6 +11,7 @@
 - Simplified WBCCU deal cards by removing redundant availability and new-money labels and shortening the cart status text.
 - Reorganized Tools into a compact two-column grid with icon tiles and concise titles.
 - Added persistent drag reordering to the Tools grid after a deliberate two-second hold.
+- Renamed the Tools grid entries with shorter, clearer English and Simplified Chinese labels.
 
 ### Fixed
 - Fixed tool reordering so the selected icon follows the drag while surrounding icons animate into place, instead of lifting the entire Tools section.

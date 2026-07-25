@@ -572,15 +572,15 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
     var title: String {
         switch self {
         case .allShips:
-            return AppLocalizer.string("All Ships")
+            return AppLocalizer.string("Ship Catalogue")
         case .wbccuDeals:
             return AppLocalizer.string("WBCCU Deals")
         case .authorizedDevices:
-            return AppLocalizer.string("Logged-In Devices")
+            return AppLocalizer.string("Logged in Device Management")
         case .ccuChainCalculator:
-            return AppLocalizer.string("CCU Chain Calculator")
+            return AppLocalizer.string("CCU Calculator")
         case .resetCharacter:
-            return AppLocalizer.string("Reset Character")
+            return AppLocalizer.string("Character Repair")
         }
     }
 
@@ -966,7 +966,7 @@ struct AllShipsBrowserView: View {
                 }
             }
             .id(appLanguageRawValue)
-            .navigationTitle(AppLocalizer.string("All Ships"))
+            .navigationTitle(AppLocalizer.string("Ship Catalogue"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
