@@ -15,6 +15,7 @@ struct AccountView: View {
     @State private var isOverviewEmailVisible = false
     @State private var isOverviewSavedLoginVisible = false
     @State private var presentedTool: FleetTool?
+    @State private var isToolReordering = false
     @State private var isLoadingReferralInviteCode = false
     @State private var copiedReferralInviteCode = false
     @State private var referralInviteCopyErrorMessage: String?
@@ -92,7 +93,10 @@ struct AccountView: View {
                         showsHeader: false,
                         disabledTools: appModel.session?.isReadOnly == true
                             ? [.authorizedDevices, .resetCharacter]
-                            : []
+                            : [],
+                        onReorderingChanged: { isReordering in
+                            isToolReordering = isReordering
+                        }
                     ) { tool in
                         handleToolSelection(tool)
                     }
@@ -148,6 +152,7 @@ struct AccountView: View {
                     Text("Refresh Account updates balances, referral data, and profile metadata. Full Refresh also reloads hangar, fleet, and buy-back data.")
                 }
             }
+            .scrollDisabled(isToolReordering)
             .id(appLanguageRawValue)
             .navigationTitle("Account")
             .toolbar {
