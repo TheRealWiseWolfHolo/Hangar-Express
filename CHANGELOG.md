@@ -10,6 +10,7 @@
 - Replaced the broken WBCCU store link with an in-app cart that clears the RSI cart through its authenticated cart mutation, verifies it is empty, prepares only the selected source-to-Warbond upgrades, and opens checkout inside Hangar Express.
 - Simplified WBCCU deal cards by removing redundant availability and new-money labels and shortening the cart status text.
 - Simplified the WBCCU footer to show only the feed's last-updated time above the cart controls.
+- Hid WBCCU checkout controls for an empty cart and made them float at the bottom of the screen while the cart contains upgrades.
 - Reorganized Tools into a compact two-column grid with icon tiles and concise titles.
 - Added persistent drag reordering to the Tools grid after a deliberate one-second hold.
 - Renamed the Tools grid entries with shorter, clearer English and Simplified Chinese labels.

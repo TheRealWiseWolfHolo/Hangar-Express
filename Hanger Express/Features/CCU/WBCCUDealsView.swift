@@ -146,19 +146,24 @@ struct WBCCUDealsView: View {
                     }
                 }
 
-                WBCCUDealsSourceFooter(
-                    generatedAt: generatedAt,
+                WBCCUDealsTimestampFooter(generatedAt: generatedAt)
+            }
+            .padding(16)
+        }
+        .refreshable {
+            await loadDeals(forceRefresh: true)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !cartItems.isEmpty {
+                WBCCUCheckoutBar(
                     cartItems: Array(cartItems.values),
                     isPreparingCheckout: isPreparingCheckout,
                     onCheckout: {
                         Task { await prepareCheckout() }
                     }
                 )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            .padding(16)
-        }
-        .refreshable {
-            await loadDeals(forceRefresh: true)
         }
     }
 
@@ -590,8 +595,22 @@ private struct WBCCUSourceShipPicker: View {
     }
 }
 
-private struct WBCCUDealsSourceFooter: View {
+private struct WBCCUDealsTimestampFooter: View {
     let generatedAt: Date?
+
+    var body: some View {
+        if let generatedAt {
+            Text(AppLocalizer.format("Feed updated %@", AppLocalizer.displayDateTime(generatedAt)))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.top, 4)
+                .padding(.bottom, 16)
+        }
+    }
+}
+
+private struct WBCCUCheckoutBar: View {
     let cartItems: [WBCCUCheckoutItem]
     let isPreparingCheckout: Bool
     let onCheckout: () -> Void
@@ -602,25 +621,15 @@ private struct WBCCUDealsSourceFooter: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            if let generatedAt {
-                Text(AppLocalizer.format("Feed updated %@", AppLocalizer.displayDateTime(generatedAt)))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+            HStack {
+                Label(
+                    AppLocalizer.format("%lld upgrade(s)", cartItems.count),
+                    systemImage: "cart.fill"
+                )
+                Spacer()
+                Text(AppLocalizer.format("Cart total %@", cartTotal.usdString))
             }
-
-            if !cartItems.isEmpty {
-                HStack {
-                    Label(
-                        AppLocalizer.format("%lld upgrade(s)", cartItems.count),
-                        systemImage: "cart.fill"
-                    )
-                    Spacer()
-                    Text(AppLocalizer.format("Cart total %@", cartTotal.usdString))
-                }
-                .font(.subheadline.weight(.semibold))
-                .padding(12)
-                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
-            }
+            .font(.subheadline.weight(.semibold))
 
             Button(action: onCheckout) {
                 HStack {
@@ -637,10 +646,16 @@ private struct WBCCUDealsSourceFooter: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(cartItems.isEmpty || isPreparingCheckout)
+            .disabled(isPreparingCheckout)
         }
-        .padding(.horizontal, 8)
-        .padding(.top, 4)
-        .padding(.bottom, 16)
+        .padding(12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(.white.opacity(0.08), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.2), radius: 12, y: 4)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
     }
 }
