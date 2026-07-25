@@ -15,6 +15,7 @@
 
 ### Fixed
 - Fixed tool reordering so the selected icon follows the drag while surrounding icons animate into place, instead of lifting the entire Tools section.
+- Fixed the dragged tool remaining enlarged after release and removed animation lag from finger tracking, with a haptic cue when the two-second hold activates reordering.
 
 ## v1.0.8 (In Progress)
 
