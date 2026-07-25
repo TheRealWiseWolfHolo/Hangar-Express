@@ -158,6 +158,11 @@ struct WBCCUDealsView: View {
                 WBCCUCheckoutBar(
                     cartItems: Array(cartItems.values),
                     isPreparingCheckout: isPreparingCheckout,
+                    onClearCart: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            cartItems.removeAll()
+                        }
+                    },
                     onCheckout: {
                         Task { await prepareCheckout() }
                     }
@@ -613,6 +618,7 @@ private struct WBCCUDealsTimestampFooter: View {
 private struct WBCCUCheckoutBar: View {
     let cartItems: [WBCCUCheckoutItem]
     let isPreparingCheckout: Bool
+    let onClearCart: () -> Void
     let onCheckout: () -> Void
 
     private var cartTotal: Decimal {
@@ -631,21 +637,29 @@ private struct WBCCUCheckoutBar: View {
             }
             .font(.subheadline.weight(.semibold))
 
-            Button(action: onCheckout) {
-                HStack {
-                    if isPreparingCheckout {
-                        ProgressView()
-                            .tint(.white)
-                    } else {
-                        Image(systemName: "cart.fill")
+            HStack(spacing: 10) {
+                Button("Clear Cart", role: .destructive, action: onClearCart)
+                    .font(.subheadline.weight(.semibold))
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                    .controlSize(.large)
+
+                Button(action: onCheckout) {
+                    HStack {
+                        if isPreparingCheckout {
+                            ProgressView()
+                                .tint(.white)
+                        } else {
+                            Image(systemName: "cart.fill")
+                        }
+                        Text(isPreparingCheckout ? "Preparing Cart..." : "Check Out")
+                            .font(.subheadline.weight(.semibold))
                     }
-                    Text(isPreparingCheckout ? "Preparing Cart..." : "Check Out")
-                        .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
                 }
-                .frame(maxWidth: .infinity)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
             .disabled(isPreparingCheckout)
         }
         .padding(12)
