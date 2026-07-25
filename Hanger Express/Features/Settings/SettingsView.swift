@@ -39,7 +39,6 @@ struct SettingsView: View {
             List {
                 ProSubscriptionSection(
                     subscriptionStore: appModel.subscriptionStore,
-                    showsEarlyAccessBadge: $showsEarlyAccessBadge,
                     onShowPlans: {
                         isShowingProPlans = true
                     }
@@ -310,7 +309,10 @@ struct SettingsView: View {
                 Text("Clearing translation cache removes the hosted item translation dictionary and saved on-device translations. Your hangar snapshots, images, accounts, cookies, and credentials are not affected.")
             }
             .sheet(isPresented: $isShowingProPlans) {
-                ProPlansSheet(subscriptionStore: appModel.subscriptionStore)
+                ProPlansSheet(
+                    subscriptionStore: appModel.subscriptionStore,
+                    showsEarlyAccessBadge: $showsEarlyAccessBadge
+                )
                     .presentationDetents([.medium, .large])
             }
         }
@@ -360,93 +362,59 @@ struct SettingsView: View {
 
 private struct ProSubscriptionSection: View {
     let subscriptionStore: SubscriptionStore
-    @Binding var showsEarlyAccessBadge: Bool
     let onShowPlans: () -> Void
 
     var body: some View {
         Section {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: subscriptionStore.isPro ? "checkmark.seal.fill" : "sparkles")
-                        .font(.title2)
-                        .foregroundStyle(subscriptionStore.isPro ? .green : Color.accentColor)
+            Button(action: onShowPlans) {
+                HStack(spacing: 14) {
+                    ZStack {
+                        Circle()
+                            .fill(statusColor.opacity(0.14))
+                            .frame(width: 46, height: 46)
+
+                        Image(systemName: subscriptionStore.isPro ? "checkmark.seal.fill" : "sparkles")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(statusColor)
+                    }
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(subscriptionStore.isPro ? AppLocalizer.string("Early Access Active") : AppLocalizer.string("Hangar Express Early Access"))
-                            .font(.headline)
+                        HStack(spacing: 8) {
+                            Text("Early Access")
+                                .font(.headline)
 
-                        Text(statusSummary)
+                            if subscriptionStore.isPro {
+                                Text("Active")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(.green)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3)
+                                    .background(.green.opacity(0.14), in: Capsule())
+                            }
+                        }
+
+                        Text(planSummary)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
+                            .lineLimit(subscriptionStore.isPro ? 1 : 2)
+
+                        Text(accessSummary)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
                     }
+
+                    Spacer(minLength: 8)
+
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
                 }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    LabeledContent("Status") {
-                        Text(subscriptionStore.isPro ? AppLocalizer.string("Active") : AppLocalizer.string("Inactive"))
-                            .foregroundStyle(subscriptionStore.isPro ? .green : .secondary)
-                    }
-
-                    if subscriptionStore.isPro {
-                        LabeledContent("Plan") {
-                            Text(subscriptionStore.proSubscriptionDetails?.displayName ?? AppLocalizer.string("Hangar Express Early Access"))
-                                .foregroundStyle(.secondary)
-                        }
-
-                        if subscriptionStore.proSubscriptionDetails?.isLifetime == true {
-                            LabeledContent("Access") {
-                                Text("Lifetime")
-                                    .foregroundStyle(.secondary)
-                            }
-                        } else {
-                            LabeledContent("Next Renewal") {
-                                Text(nextRenewalLabel)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            LabeledContent("Auto Renewal") {
-                                Text(autoRenewalLabel)
-                                    .foregroundStyle(autoRenewalStyle)
-                            }
-
-                            if let accessUntilLabel {
-                                LabeledContent("Access Until") {
-                                    Text(accessUntilLabel)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                    }
-                }
-                .font(.subheadline)
-
-                if let message = statusMessage {
-                    Text(message)
-                        .font(.footnote)
-                        .foregroundStyle(statusIsError ? .red : .secondary)
-                } else if let productLoadErrorMessage = subscriptionStore.productLoadErrorMessage {
-                    Text(productLoadErrorMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                }
-
-                Button(action: onShowPlans) {
-                    Text(primaryButtonTitle)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-
-                if subscriptionStore.isPro {
-                    Toggle("Show Early Access Badge", isOn: $showsEarlyAccessBadge)
-                        .font(.subheadline)
-                }
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
             }
-            .padding(.vertical, 6)
-        } header: {
-            Text("Early Access Status")
-        } footer: {
-            Text("Developing Hangar Express takes time and money. Show your *optional* support here.")
+            .buttonStyle(.plain)
+            .accessibilityHint(Text(primaryButtonTitle))
         }
         .task {
             await subscriptionStore.start()
@@ -457,77 +425,59 @@ private struct ProSubscriptionSection: View {
         subscriptionStore.isPro ? AppLocalizer.string("Manage Plans") : AppLocalizer.string("See Plans")
     }
 
-    private var statusSummary: String {
-        subscriptionStore.isPro
-            ? AppLocalizer.string("Early access to experimental features are enabled.")
-            : AppLocalizer.string("Support development and get early access to experimental Labs features.")
+    private var statusColor: Color {
+        subscriptionStore.isPro ? .green : Color.accentColor
     }
 
-    private var nextRenewalLabel: String {
+    private var planSummary: String {
+        guard subscriptionStore.isPro else {
+            return AppLocalizer.string("Support development and get early access to experimental Labs features.")
+        }
+
+        return subscriptionStore.proSubscriptionDetails?.displayName
+            ?? AppLocalizer.string("Hangar Express Early Access")
+    }
+
+    private var accessSummary: String {
+        guard subscriptionStore.isPro else {
+            return AppLocalizer.string("See Plans")
+        }
+
         guard let details = subscriptionStore.proSubscriptionDetails else {
-            return AppLocalizer.string("Checking...")
+            return AppLocalizer.string("Access verified")
         }
 
-        if details.willAutoRenew == false {
-            return AppLocalizer.string("Not scheduled")
+        if details.isLifetime {
+            return AppLocalizer.string("Lifetime access")
         }
 
-        guard let nextRenewalDate = details.nextRenewalDate else {
-            return AppLocalizer.string("Unavailable")
+        if details.willAutoRenew == false, let expirationDate = details.expirationDate {
+            return AppLocalizer.format("Access ends %@", formattedSubscriptionDate(expirationDate))
         }
 
-        return formattedSubscriptionDate(nextRenewalDate)
-    }
-
-    private var autoRenewalLabel: String {
-        switch subscriptionStore.proSubscriptionDetails?.willAutoRenew {
-        case true:
-            return AppLocalizer.string("On")
-        case false:
-            return AppLocalizer.string("Off")
-        case nil:
-            return AppLocalizer.string("Checking...")
-        }
-    }
-
-    private var autoRenewalStyle: Color {
-        switch subscriptionStore.proSubscriptionDetails?.willAutoRenew {
-        case true:
-            return .green
-        case false:
-            return .orange
-        case nil:
-            return .secondary
-        }
-    }
-
-    private var accessUntilLabel: String? {
-        guard subscriptionStore.proSubscriptionDetails?.willAutoRenew == false,
-              let expirationDate = subscriptionStore.proSubscriptionDetails?.expirationDate else {
-            return nil
+        if let nextRenewalDate = details.nextRenewalDate {
+            return AppLocalizer.format("Renews %@", formattedSubscriptionDate(nextRenewalDate))
         }
 
-        return formattedSubscriptionDate(expirationDate)
-    }
-
-    private var statusMessage: String? {
-        subscriptionStatusMessage(for: subscriptionStore.purchaseStatus)
-    }
-
-    private var statusIsError: Bool {
-        subscriptionStatusIsError(subscriptionStore.purchaseStatus)
+        return AppLocalizer.string("Access verified")
     }
 }
 
 private struct ProPlansSheet: View {
     @Environment(\.dismiss) private var dismiss
     let subscriptionStore: SubscriptionStore
+    @Binding var showsEarlyAccessBadge: Bool
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
                     ProBenefitsCard(isPro: subscriptionStore.isPro)
+                    if subscriptionStore.isPro {
+                        EarlyAccessPreferencesCard(
+                            showsEarlyAccessBadge: $showsEarlyAccessBadge
+                        )
+                    }
                     EarlyAccessDisclaimerCard()
                     ProFeatureComparisonCard()
                     ProPlanActionsCard(subscriptionStore: subscriptionStore)
@@ -549,6 +499,26 @@ private struct ProPlansSheet: View {
                 await subscriptionStore.refreshPurchasedProducts()
             }
         }
+    }
+}
+
+private struct EarlyAccessPreferencesCard: View {
+    @Binding var showsEarlyAccessBadge: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Preferences")
+                .font(.headline)
+
+            Toggle("Show Early Access Badge", isOn: $showsEarlyAccessBadge)
+
+            Text("Show or hide the Early Access badge beside your profile name.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 

@@ -395,6 +395,11 @@
 "Early Access Labs can refresh up to 10 pages in parallel." = "抢先体验实验室最多可并行刷新 10 个页面。";
 "Standard refreshes up to 2 pages in parallel. Early Access unlocks up to 10 while the feature is in Labs." = "标准版最多可并行刷新 2 个页面。该功能仍在实验室阶段时，抢先体验可提升到 10 个。";
 "Manage Early Access" = "管理抢先体验";
+"Preferences" = "偏好设置";
+"Access verified" = "访问权限已验证";
+"Lifetime access" = "终身访问权限";
+"Access ends %@" = "访问权限结束于 %@";
+"Renews %@" = "续订于 %@";
 "Your Early Access is active" = "你的抢先体验已启用";
 "Get Hangar Express Early Access" = "获取机库通抢先体验";
 "Early Access supports ongoing development and unlocks experimental Labs features before their public release." = "抢先体验用于支持持续开发，并在公开发布前解锁实验室中的实验性功能。";
@@ -663,6 +668,7 @@
 "Early Access account" = "抢先体验账户";
 "Lifetime Early Access account" = "终身抢先体验账户";
 "Show Early Access Badge" = "显示 Early Access 徽章";
+"Show or hide the Early Access badge beside your profile name." = "显示或隐藏资料名称旁的抢先体验徽章。";
 "Control hangar artwork, row highlights, and whether the Early Access badge appears next to your profile name." = "控制机库图像、行高亮，以及是否在资料名称旁显示 Early Access 徽章。";
 "Control hangar artwork and row highlights." = "控制机库图像和行高亮。";
 "Snapshot" = "快照";

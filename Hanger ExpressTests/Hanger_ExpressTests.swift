@@ -201,6 +201,8 @@ struct Hanger_ExpressTests {
     @Test func subscriptionEntitlementsClampRefreshWorkersByPlan() async throws {
         #expect(ProSubscriptionConfiguration.productIDs == Set(["0001", "0002", "HangarExpLTI"]))
         #expect(ProSubscriptionConfiguration.productIDOrder == ["0001", "0002", "HangarExpLTI"])
+        #expect(ProSubscriptionConfiguration.isProDefaultsKey == "subscription.pro.isActive")
+        #expect(ProSubscriptionConfiguration.activeProductIDsDefaultsKey == "subscription.pro.activeProductIDs")
         #expect(ProSubscriptionConfiguration.isLifetimeProductID("HangarExpLTI"))
         #expect(ProSubscriptionConfiguration.isSubscriptionProductID("0001"))
         #expect(ProSubscriptionConfiguration.isSubscriptionProductID("0002"))
@@ -237,6 +239,13 @@ struct Hanger_ExpressTests {
         let subscriptionStore = SubscriptionStore(userDefaults: userDefaults, storeKitEnabled: false)
         #expect(subscriptionStore.hasLifetimePro)
         #expect(!subscriptionStore.hasActiveProSubscription)
+
+        userDefaults.removeObject(forKey: ProSubscriptionConfiguration.activeProductIDsDefaultsKey)
+        userDefaults.set(true, forKey: ProSubscriptionConfiguration.isProDefaultsKey)
+
+        let migratedLegacyStore = SubscriptionStore(userDefaults: userDefaults, storeKitEnabled: false)
+        #expect(migratedLegacyStore.isPro)
+        #expect(migratedLegacyStore.purchasedProductIDs == Set([ProSubscriptionConfiguration.monthlyProductID]))
     }
 
     @Test func inventoryAutoRefreshIntervalsResolveAndEvaluate() {
