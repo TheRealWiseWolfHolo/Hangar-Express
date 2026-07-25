@@ -614,11 +614,13 @@ struct FleetToolsSection: View {
     var disabledTools: Set<FleetTool> = []
 
     @AppStorage("fleetToolsOrder") private var storedToolOrder = ""
+    @GestureState private var isReorderGestureActive = false
     @State private var draggedTool: FleetTool?
     @State private var draggedToolLocation = CGPoint.zero
     @State private var draggedToolSize = CGSize.zero
     @State private var toolFrames: [FleetTool: CGRect] = [:]
     @State private var lastReorderTarget: FleetTool?
+    @State private var dragActivationFeedbackTrigger = 0
     @State private var reorderFeedbackTrigger = 0
 
     init(
@@ -682,10 +684,18 @@ struct FleetToolsSection: View {
                     .shadow(color: .black.opacity(0.28), radius: 14, y: 8)
                     .position(draggedToolLocation)
                     .allowsHitTesting(false)
-                    .transition(.scale(scale: 0.92).combined(with: .opacity))
+                    .transaction { transaction in
+                        transaction.animation = nil
+                    }
                 }
             }
+            .sensoryFeedback(.impact(weight: .medium), trigger: dragActivationFeedbackTrigger)
             .sensoryFeedback(.selection, trigger: reorderFeedbackTrigger)
+            .onChange(of: isReorderGestureActive) { _, isActive in
+                if !isActive {
+                    finishDragging()
+                }
+            }
         }
     }
 
@@ -707,23 +717,32 @@ struct FleetToolsSection: View {
                     coordinateSpace: .named("toolsGrid")
                 )
             )
+            .updating($isReorderGestureActive) { value, isActive, _ in
+                switch value {
+                case .first(true), .second(true, _):
+                    isActive = true
+                default:
+                    break
+                }
+            }
             .onChanged { value in
                 switch value {
                 case .first(true):
                     beginDragging(tool)
                 case let .second(true, dragValue?):
                     beginDragging(tool)
-                    draggedToolLocation = dragValue.location
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        draggedToolLocation = dragValue.location
+                    }
                     reorderDraggedTool(at: dragValue.location)
                 default:
                     break
                 }
             }
             .onEnded { _ in
-                withAnimation(.spring(response: 0.24, dampingFraction: 0.82)) {
-                    draggedTool = nil
-                }
-                lastReorderTarget = nil
+                finishDragging()
             }
     }
 
@@ -735,10 +754,22 @@ struct FleetToolsSection: View {
         let frame = toolFrames[tool] ?? CGRect(origin: .zero, size: CGSize(width: 164, height: 124))
         draggedToolLocation = CGPoint(x: frame.midX, y: frame.midY)
         draggedToolSize = frame.size
-        withAnimation(.spring(response: 0.24, dampingFraction: 0.78)) {
-            draggedTool = tool
+        draggedTool = tool
+        dragActivationFeedbackTrigger += 1
+    }
+
+    private func finishDragging() {
+        guard draggedTool != nil else {
+            return
         }
-        reorderFeedbackTrigger += 1
+
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            draggedTool = nil
+            draggedToolSize = .zero
+        }
+        lastReorderTarget = nil
     }
 
     private func reorderDraggedTool(at location: CGPoint) {
