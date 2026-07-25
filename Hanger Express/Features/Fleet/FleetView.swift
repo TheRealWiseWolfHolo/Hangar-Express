@@ -615,6 +615,7 @@ struct FleetToolsSection: View {
 
     @AppStorage("fleetToolsOrder") private var storedToolOrder = ""
     @GestureState private var isReorderGestureActive = false
+    @State private var heldTool: FleetTool?
     @State private var draggedTool: FleetTool?
     @State private var draggedToolLocation = CGPoint.zero
     @State private var draggedToolSize = CGSize.zero
@@ -656,6 +657,7 @@ struct FleetToolsSection: View {
                     ) {
                         onSelect(tool)
                     }
+                    .scaleEffect(heldTool == tool && draggedTool == nil ? 1.06 : 1)
                     .opacity(draggedTool == tool ? 0 : 1)
                     .background {
                         GeometryReader { proxy in
@@ -665,7 +667,15 @@ struct FleetToolsSection: View {
                             )
                         }
                     }
-                    .gesture(reorderGesture(for: tool))
+                    .onLongPressGesture(
+                        minimumDuration: 2,
+                        maximumDistance: 12,
+                        pressing: { isPressing in
+                            updateHoldProgress(isPressing: isPressing, for: tool)
+                        },
+                        perform: {}
+                    )
+                    .simultaneousGesture(reorderGesture(for: tool))
                 }
             }
             .coordinateSpace(name: "toolsGrid")
@@ -710,7 +720,7 @@ struct FleetToolsSection: View {
     }
 
     private func reorderGesture(for tool: FleetTool) -> some Gesture {
-        LongPressGesture(minimumDuration: 2)
+        LongPressGesture(minimumDuration: 2, maximumDistance: 12)
             .sequenced(
                 before: DragGesture(
                     minimumDistance: 0,
@@ -746,6 +756,18 @@ struct FleetToolsSection: View {
             }
     }
 
+    private func updateHoldProgress(isPressing: Bool, for tool: FleetTool) {
+        if isPressing {
+            withAnimation(.linear(duration: 2)) {
+                heldTool = tool
+            }
+        } else if heldTool == tool {
+            withAnimation(.easeOut(duration: 0.15)) {
+                heldTool = nil
+            }
+        }
+    }
+
     private func beginDragging(_ tool: FleetTool) {
         guard draggedTool == nil else {
             return
@@ -766,6 +788,7 @@ struct FleetToolsSection: View {
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
+            heldTool = nil
             draggedTool = nil
             draggedToolSize = .zero
         }
