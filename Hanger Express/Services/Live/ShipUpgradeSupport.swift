@@ -1171,8 +1171,8 @@ public nonisolated enum HostedShipFeedEndpoints {
     ]
 
     public static let eventCalendarURLs: [URL] = [
-        primaryBaseURL.appendingPathComponent("events.json"),
-        fallbackBaseURL.appendingPathComponent("events.json")
+        fallbackBaseURL.appendingPathComponent("events.json"),
+        primaryBaseURL.appendingPathComponent("events.json")
     ]
 
     static func itemTranslationURLs(for language: HangarItemLanguage) -> [URL] {
