@@ -542,7 +542,7 @@ private struct ProBenefitsCard: View {
                     Text(isPro ? AppLocalizer.string("Your Early Access is active") : AppLocalizer.string("Get Hangar Express Early Access"))
                         .font(.headline)
 
-                    Text("Early Access supports ongoing development and unlocks experimental Labs features before their public release.")
+                    Text("Hangar Express is free, but development takes time, money, and resources. Show your *optional* support here.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
