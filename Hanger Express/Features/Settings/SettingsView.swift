@@ -585,9 +585,9 @@ private struct EarlyAccessDisclaimerCard: View {
 
 private struct ProFeatureComparisonCard: View {
     private let rows = [
-        FeatureComparisonRow(feature: "Experimental faster sync", standard: "Up to 2 pages", pro: "Up to 10 pages in Labs"),
-        FeatureComparisonRow(feature: "Extended Hangar Log beta", standard: "Latest 5", pro: "Up to 500 in Labs"),
-        FeatureComparisonRow(feature: "Multiple account switching beta", standard: "1 account", pro: "Up to 10 accounts in Labs")
+        FeatureComparisonRow(feature: "Sync Speed", standard: "2x", pro: "Up to 10x"),
+        FeatureComparisonRow(feature: "Hangar Log", standard: "Up to 5 Entries", pro: "Up to 500 Entries"),
+        FeatureComparisonRow(feature: "Account Switching", standard: "1 Account", pro: "Up to 10 Accounts")
     ]
 
     var body: some View {
