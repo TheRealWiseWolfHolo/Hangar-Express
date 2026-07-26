@@ -561,11 +561,11 @@ private struct EarlyAccessDisclaimerCard: View {
                 .font(.headline)
                 .foregroundStyle(.orange)
 
-            Text("Early Access is optional support for Hangar Express development. You are not directly purchasing Star Citizen content, RSI items, gameplay access, or any Cloud Imperium Games or Roberts Space Industries entitlement through Hangar Express.")
+            Text("Supporting Hangar Express supports this app's independent development only. It does not buy any Star Citizen content, RSI items, gameplay access, products, or entitlements from Cloud Imperium Games or Roberts Space Industries.")
                 .font(.subheadline)
                 .foregroundStyle(.primary)
 
-            Text("As a supporter benefit, Hangar Express enables experimental Labs features for you to test. These app features may change, break, or become available to all users later.")
+            Text("Early Access may include experimental Labs features, but support does not guarantee any specific app feature, continued availability, or future functionality. Features may change, break, be removed, or become available to everyone.")
                 .font(.subheadline)
                 .foregroundStyle(.primary)
 
