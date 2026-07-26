@@ -7,6 +7,7 @@
 
 ### Changed
 - Started the `1.0.9` release branch and release-note tracking for ongoing work.
+- Set the app release metadata to version 1.0.9, build 44.
 - Began the Early Access overhaul with a compact Settings status row and moved the profile badge preference into Manage Plans, while preserving existing StoreKit product IDs and saved entitlement keys so current access carries forward after updating.
 - Removed duplicate lifetime-plan details from the Early Access status card so lifetime owners see one concise Lifetime Access line.
 - Kept Manage Plans card fills and borders visible when expanding the sheet to full height.
