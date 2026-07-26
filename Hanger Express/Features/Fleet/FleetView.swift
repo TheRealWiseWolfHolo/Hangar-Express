@@ -567,6 +567,7 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
     case authorizedDevices
     case ccuChainCalculator
     case resetCharacter
+    case eventCalendar
 
     var id: Self { self }
 
@@ -582,6 +583,8 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
             return AppLocalizer.string("CCU Calculator")
         case .resetCharacter:
             return AppLocalizer.string("Character Repair")
+        case .eventCalendar:
+            return AppLocalizer.string("Event Calendar")
         }
     }
 
@@ -597,6 +600,8 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
             return "link.circle"
         case .resetCharacter:
             return "person.crop.circle.badge.exclamationmark"
+        case .eventCalendar:
+            return "calendar.badge.clock"
         }
     }
 
@@ -606,6 +611,7 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
             || self == .authorizedDevices
             || self == .ccuChainCalculator
             || self == .resetCharacter
+            || self == .eventCalendar
     }
 }
 

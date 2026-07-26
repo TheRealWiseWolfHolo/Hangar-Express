@@ -89,6 +89,116 @@ struct Hanger_ExpressTests {
         #expect(didThrowInvalidFeedError)
     }
 
+    @Test func hostedEventCalendarFeedDecodesTimedAndAllDayEvents() throws {
+        let data = Data(
+            #"""
+            {
+              "schemaVersion": 1,
+              "generatedAt": "2026-07-26T12:00:00.000Z",
+              "count": 2,
+              "sources": [
+                {
+                  "id": "barCitizen",
+                  "name": "Bar Citizens International",
+                  "url": "https://www.barcitizen.org/eventlist",
+                  "status": "fresh",
+                  "usedPreviousData": false
+                }
+              ],
+              "events": [
+                {
+                  "id": "barcitizen:pax-west-2026",
+                  "title": "PAX West 2026 Bar Citizen",
+                  "category": "barCitizen",
+                  "eventType": "inPerson",
+                  "organizer": "Bar Citizens International",
+                  "verification": "communityPublished",
+                  "status": "scheduled",
+                  "schedule": {
+                    "kind": "timed",
+                    "startsAt": "2026-09-04T18:00:00-07:00",
+                    "endsAt": "2026-09-04T21:00:00-07:00",
+                    "timeZone": "-07:00",
+                    "originalTimeZone": "-07:00"
+                  },
+                  "location": {
+                    "isOnline": false,
+                    "name": "Stoup Brewery",
+                    "city": "Seattle",
+                    "region": "WA",
+                    "countryCode": "US",
+                    "formattedAddress": "1158 Broadway, Seattle, WA 98122, USA"
+                  },
+                  "summary": "Community meetup.",
+                  "links": [
+                    {
+                      "role": "source",
+                      "label": "Event details and RSVP",
+                      "url": "https://www.barcitizen.org/event-details/pax-west-2026"
+                    }
+                  ],
+                  "lastVerifiedAt": "2026-07-26T12:00:00.000Z"
+                },
+                {
+                  "id": "official:foundation-festival-2026",
+                  "title": "Foundation Festival 2026",
+                  "category": "official",
+                  "eventType": "online",
+                  "organizer": "Cloud Imperium Games",
+                  "verification": "cigPublished",
+                  "status": "scheduled",
+                  "schedule": {
+                    "kind": "allDay",
+                    "startDate": "2026-07-29",
+                    "endDateExclusive": "2026-08-13",
+                    "timeZone": "UTC"
+                  },
+                  "location": {
+                    "isOnline": true,
+                    "name": "Star Citizen"
+                  },
+                  "summary": "Official online event.",
+                  "links": [
+                    {
+                      "role": "source",
+                      "label": "Official announcement",
+                      "url": "https://robertsspaceindustries.com/en/comm-link/example"
+                    }
+                  ],
+                  "lastVerifiedAt": "2026-07-26T12:00:00.000Z"
+                }
+              ]
+            }
+            """#.utf8
+        )
+
+        let feed = try HostedEventCalendarClient.decodeFeed(from: data)
+
+        #expect(feed.count == 2)
+        #expect(feed.events.first?.location.city == "Seattle")
+        #expect(feed.events.first?.schedule.isAllDay == false)
+        #expect(feed.events.last?.schedule.isAllDay == true)
+        #expect(feed.events.last?.sourceURL?.host == "robertsspaceindustries.com")
+    }
+
+    @Test func hostedEventCalendarFeedRejectsCountMismatch() throws {
+        let data = Data(
+            #"""
+            {
+              "schemaVersion": 1,
+              "generatedAt": "2026-07-26T12:00:00Z",
+              "count": 1,
+              "sources": [],
+              "events": []
+            }
+            """#.utf8
+        )
+
+        #expect(throws: HostedEventCalendarError.self) {
+            try HostedEventCalendarClient.decodeFeed(from: data)
+        }
+    }
+
     @Test func sessionCookieRoundTripsBackToHTTPCookie() async throws {
         let expiresAt = Date(timeIntervalSince1970: 1_800_000_000)
         let sourceCookie = try #require(

@@ -429,6 +429,7 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Hangar Express uses Face ID to confirm irreversible RSI account actions like melting and gifting items.";
+				INFOPLIST_KEY_NSCalendarsWriteOnlyAccessUsageDescription = "Hangar Express adds an event to your calendar only when you choose Add to Calendar.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Hangar Express adds CCU calculation images to your photo library when you choose Save to Photos.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -472,6 +473,7 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Hangar Express uses Face ID to confirm irreversible RSI account actions like melting and gifting items.";
+				INFOPLIST_KEY_NSCalendarsWriteOnlyAccessUsageDescription = "Hangar Express adds an event to your calendar only when you choose Add to Calendar.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Hangar Express adds CCU calculation images to your photo library when you choose Save to Photos.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
