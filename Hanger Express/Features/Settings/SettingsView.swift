@@ -569,9 +569,6 @@ private struct EarlyAccessDisclaimerCard: View {
                 .font(.subheadline)
                 .foregroundStyle(.primary)
 
-            Text("Hangar Express is an unofficial fan-made companion app and is not affiliated with, endorsed by, or sponsored by Cloud Imperium Games, Roberts Space Industries, or Star Citizen.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
