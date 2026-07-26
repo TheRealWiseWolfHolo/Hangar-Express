@@ -34,12 +34,18 @@ nonisolated struct StarCitizenEvent: Codable, Hashable, Sendable, Identifiable {
         case completed
     }
 
+    enum DateConfidence: String, Codable, Sendable {
+        case confirmed
+        case anticipated
+    }
+
     let id: String
     let title: String
     let category: Category
     let eventType: EventType
     let organizer: String
     let verification: String
+    let dateConfidence: DateConfidence?
     let status: Status
     let schedule: StarCitizenEventSchedule
     let location: StarCitizenEventLocation
@@ -49,6 +55,14 @@ nonisolated struct StarCitizenEvent: Codable, Hashable, Sendable, Identifiable {
 
     var sourceURL: URL? {
         links.first(where: { $0.role == "source" })?.url
+    }
+
+    var displayTitle: String {
+        AppLocalizer.string(title)
+    }
+
+    var isAnticipated: Bool {
+        dateConfidence == .anticipated
     }
 
     var startsAt: Date {
@@ -71,6 +85,7 @@ nonisolated struct StarCitizenEvent: Codable, Hashable, Sendable, Identifiable {
 
         return [
             title,
+            displayTitle,
             organizer,
             summary,
             location.name,

@@ -311,10 +311,15 @@ private struct EventCalendarHeroCard: View {
 
                     Spacer()
 
-                    EventCategoryBadge(category: event.category, inverted: true)
+                    HStack(spacing: 6) {
+                        if event.isAnticipated {
+                            EventDateConfidenceBadge(inverted: true)
+                        }
+                        EventCategoryBadge(category: event.category, inverted: true)
+                    }
                 }
 
-                Text(event.title)
+                Text(event.displayTitle)
                     .font(.title2.bold())
                     .foregroundStyle(.white)
                     .multilineTextAlignment(.leading)
@@ -366,7 +371,7 @@ private struct EventCalendarRow: View {
 
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {
-                    Text(event.title)
+                    Text(event.displayTitle)
                         .font(.headline)
                         .lineLimit(2)
 
@@ -377,9 +382,15 @@ private struct EventCalendarRow: View {
                     }
                 }
 
-                Text(EventCalendarFormatting.compactSchedule(event))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Text(EventCalendarFormatting.compactSchedule(event))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    if event.isAnticipated {
+                        EventDateConfidenceBadge()
+                    }
+                }
 
                 Label(
                     event.location.displayName,
@@ -426,6 +437,22 @@ private struct EventCategoryBadge: View {
     }
 }
 
+private struct EventDateConfidenceBadge: View {
+    var inverted = false
+
+    var body: some View {
+        Text("Anticipated Date")
+            .font(.caption2.weight(.bold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .foregroundStyle(inverted ? .white : .orange)
+            .background(
+                (inverted ? Color.white.opacity(0.18) : Color.orange.opacity(0.14)),
+                in: Capsule()
+            )
+    }
+}
+
 private struct EventCalendarDetailView: View {
     let event: StarCitizenEvent
 
@@ -441,11 +468,20 @@ private struct EventCalendarDetailView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         EventCategoryBadge(category: event.category)
 
-                        Text(event.title)
+                        Text(event.displayTitle)
                             .font(.title.bold())
 
                         Label(EventCalendarFormatting.fullSchedule(event), systemImage: "calendar")
                         Label(event.location.displayName, systemImage: event.location.isOnline ? "network" : "mappin.and.ellipse")
+
+                        if event.isAnticipated {
+                            VStack(alignment: .leading, spacing: 6) {
+                                EventDateConfidenceBadge()
+                                Text("Based on last year’s official dates. CIG has not confirmed this date.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
 
                         if let originalTimeZone = event.schedule.originalTimeZone,
                            !originalTimeZone.isEmpty {
@@ -564,12 +600,16 @@ private struct EventCalendarDetailView: View {
             }
 
             let calendarEvent = EKEvent(eventStore: store)
-            calendarEvent.title = event.title
+            calendarEvent.title = event.isAnticipated
+                ? AppLocalizer.format("%@ — Anticipated Date", event.displayTitle)
+                : event.displayTitle
             calendarEvent.startDate = event.startsAt
             calendarEvent.endDate = event.endsAt
             calendarEvent.isAllDay = event.schedule.isAllDay
             calendarEvent.location = event.location.formattedAddress ?? event.location.name
-            calendarEvent.notes = event.summary
+            calendarEvent.notes = event.isAnticipated
+                ? "\(AppLocalizer.string("Based on last year’s official dates. CIG has not confirmed this date."))\n\n\(event.summary)"
+                : event.summary
             calendarEvent.url = event.sourceURL
             calendarEvent.calendar = store.defaultCalendarForNewEvents
             try store.save(calendarEvent, span: .thisEvent, commit: true)
