@@ -524,7 +524,7 @@ private struct EarlyAccessPreferencesCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .earlyAccessCardStyle()
     }
 }
 
@@ -550,7 +550,7 @@ private struct ProBenefitsCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .earlyAccessCardStyle()
     }
 }
 
@@ -625,7 +625,7 @@ private struct ProFeatureComparisonCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .earlyAccessCardStyle()
     }
 }
 
@@ -731,7 +731,7 @@ private struct ProPlanActionsCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .earlyAccessCardStyle()
     }
 
     private var statusMessage: String? {
@@ -767,6 +767,24 @@ private struct ProPlanActionsCard: View {
         }
         .buttonStyle(.bordered)
         .disabled(statusIsBusy)
+    }
+}
+
+private struct EarlyAccessCardStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+
+        content
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: shape)
+            .overlay {
+                shape.stroke(Color.primary.opacity(0.10), lineWidth: 1)
+            }
+    }
+}
+
+private extension View {
+    func earlyAccessCardStyle() -> some View {
+        modifier(EarlyAccessCardStyle())
     }
 }
 
