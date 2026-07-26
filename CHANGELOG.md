@@ -15,6 +15,7 @@
 - Reworded Manage Plans headings, restore controls, guidance, and StoreKit status messages to avoid purchase terminology.
 - Clarified that Early Access support funds Hangar Express only, does not buy anything from CIG or RSI, and does not guarantee specific or continued app features.
 - Reframed the Early Access status message around Hangar Express being free and supporter contributions being optional.
+- Identified Hangar Express as open-source software in its legal disclaimer and removed the Official RSI Website link.
 - Replaced the broken WBCCU store link with an in-app cart that clears the RSI cart through its authenticated cart mutation, verifies it is empty, prepares only the selected source-to-Warbond upgrades, and opens checkout inside Hangar Express.
 - Simplified WBCCU deal cards by removing redundant availability and new-money labels and shortening the cart status text.
 - Simplified the WBCCU footer to show only the feed's last-updated time above the cart controls.

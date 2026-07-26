@@ -28,7 +28,6 @@ struct SettingsView: View {
     let appModel: AppModel
     let snapshot: HangarSnapshot
 
-    private let officialRSIURL = URL(string: "https://robertsspaceindustries.com/en/")!
     private let repositoryURL = URL(string: "https://github.com/TheRealWiseWolfHolo/Hangar-Express")!
     private let spviewerURL = URL(string: "https://www.spviewer.eu/")!
     private let starCitizenWikiURL = URL(string: "https://starcitizen.tools/")!
@@ -246,12 +245,8 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Text("Hangar Express is an unofficial Star Citizen fan project and is not affiliated with the Cloud Imperium group of companies. Star Citizen, Squadron 42, Roberts Space Industries, and related game content shown by this app belong to the Cloud Imperium group of companies and their respective owners.")
+                    Text("Hangar Express is open-source software and an unofficial Star Citizen fan project. It is not affiliated with the Cloud Imperium group of companies. Star Citizen, Squadron 42, Roberts Space Industries, and related game content shown by this app belong to the Cloud Imperium group of companies and their respective owners.")
                         .font(.footnote)
-
-                    Link(destination: officialRSIURL) {
-                        Label("Official RSI Website", systemImage: "link")
-                    }
 
                     Link(destination: LegalLinkDestinations.privacyPolicyURL) {
                         Label("Privacy Policy", systemImage: "lock.shield")

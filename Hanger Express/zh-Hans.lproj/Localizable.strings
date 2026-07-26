@@ -446,7 +446,6 @@
 "Special Thanks" = "特别鸣谢";
 "Starcitizen Wiki" = "Starcitizen Wiki";
 "Legal" = "法律信息";
-"Official RSI Website" = "RSI 官方网站";
 "Privacy Policy" = "隐私政策";
 "Terms of Use" = "使用条款";
 "GitHub Repository" = "GitHub 仓库";
@@ -818,7 +817,7 @@
 "Control hangar artwork, row highlights, optional multi-select actions, and share-picture diagnostics." = "控制机库图像、行高亮、可选多选操作和分享图片诊断。";
 "Clear Translation Cache" = "清除翻译缓存";
 "Local cache clears downloaded images and saved hangar snapshots, then performs a full account reload. Translation cache clears only the hosted item dictionary and saved on-device translations. Neither action removes saved accounts, cookies, or credentials." = "本地缓存会清除已下载图片和已保存的机库快照，然后执行一次完整账户重载。翻译缓存只会清除托管物品词典和已保存的本机翻译。两项操作都不会移除已保存账户、Cookie 或凭据。";
-"Hangar Express is an unofficial Star Citizen fan project and is not affiliated with the Cloud Imperium group of companies. Star Citizen, Squadron 42, Roberts Space Industries, and related game content shown by this app belong to the Cloud Imperium group of companies and their respective owners." = "机库通是非官方 Star Citizen 粉丝项目，与 Cloud Imperium 集团没有关联。本 App 中显示的 Star Citizen、Squadron 42、Roberts Space Industries 以及相关游戏内容均属于 Cloud Imperium 集团及其各自所有者。";
+"Hangar Express is open-source software and an unofficial Star Citizen fan project. It is not affiliated with the Cloud Imperium group of companies. Star Citizen, Squadron 42, Roberts Space Industries, and related game content shown by this app belong to the Cloud Imperium group of companies and their respective owners." = "机库通是一款开源软件，也是非官方的 Star Citizen 粉丝项目，与 Cloud Imperium 集团没有关联。本 App 中显示的 Star Citizen、Squadron 42、Roberts Space Industries 以及相关游戏内容均属于 Cloud Imperium 集团及其各自所有者。";
 "Clear Translation Cache?" = "清除翻译缓存？";
 "Clearing translation cache removes the hosted item translation dictionary and saved on-device translations. Your hangar snapshots, images, accounts, cookies, and credentials are not affected." = "清除翻译缓存会移除托管物品翻译词典和已保存的本机翻译。你的机库快照、图片、账户、Cookie 和凭据不会受到影响。";
 "Clearing local cache removes downloaded images and saved local snapshots. Hangar Express will then run a full reload to rebuild account data from RSI. Translation cache is not affected." = "清除本地缓存会移除已下载图片和已保存的本地快照。之后机库通会执行一次完整重载，从 RSI 重新构建账户数据。翻译缓存不会受到影响。";
