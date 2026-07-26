@@ -667,7 +667,7 @@ private struct ProPlanActionsCard: View {
                         await subscriptionStore.restorePurchases()
                     }
                 } label: {
-                    Label("Restore Purchases", systemImage: "arrow.clockwise")
+                    Label("Restore Access", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
                 .disabled(statusIsBusy)
@@ -710,7 +710,7 @@ private struct ProPlanActionsCard: View {
                         await subscriptionStore.restorePurchases()
                     }
                 } label: {
-                    Label("Restore Purchases", systemImage: "arrow.clockwise")
+                    Label("Restore Access", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
                 .disabled(statusIsBusy)
@@ -720,7 +720,7 @@ private struct ProPlanActionsCard: View {
                 }
             }
 
-            Text("Purchases are managed by Apple. You can change, cancel, or restore subscriptions from your Apple Account at any time.")
+            Text("Your plan is managed by Apple. You can change, cancel, or restore access from your Apple Account at any time.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -746,7 +746,7 @@ private struct ProPlanActionsCard: View {
     private var sectionTitle: String {
         if subscriptionStore.isPro {
             return subscriptionStore.hasLifetimePro && !subscriptionStore.hasActiveProSubscription
-                ? AppLocalizer.string("Purchase")
+                ? AppLocalizer.string("Plan Details")
                 : AppLocalizer.string("Subscription")
         }
 
@@ -790,7 +790,7 @@ private struct SubscriptionLegalLinks: View {
         VStack(alignment: .leading, spacing: 8) {
             Divider()
 
-            Text("Review before purchase")
+            Text("Legal & Privacy")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
 
@@ -938,9 +938,9 @@ private func subscriptionStatusMessage(for purchaseStatus: SubscriptionStore.Pur
     case .idle:
         return nil
     case .purchasing:
-        return AppLocalizer.string("Opening App Store purchase sheet.")
+        return AppLocalizer.string("Opening App Store confirmation.")
     case .restoring:
-        return AppLocalizer.string("Restoring purchases.")
+        return AppLocalizer.string("Restoring access.")
     case .managing:
         return AppLocalizer.string("Opening Apple subscription management.")
     case .redeeming:
