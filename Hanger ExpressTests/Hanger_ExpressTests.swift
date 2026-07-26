@@ -146,6 +146,7 @@ struct Hanger_ExpressTests {
                   "eventType": "online",
                   "organizer": "Cloud Imperium Games",
                   "verification": "cigPublished",
+                  "dateConfidence": "anticipated",
                   "status": "scheduled",
                   "schedule": {
                     "kind": "allDay",
@@ -178,6 +179,7 @@ struct Hanger_ExpressTests {
         #expect(feed.events.first?.location.city == "Seattle")
         #expect(feed.events.first?.schedule.isAllDay == false)
         #expect(feed.events.last?.schedule.isAllDay == true)
+        #expect(feed.events.last?.isAnticipated == true)
         #expect(feed.events.last?.sourceURL?.host == "robertsspaceindustries.com")
     }
 
