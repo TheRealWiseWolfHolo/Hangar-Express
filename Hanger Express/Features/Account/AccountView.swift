@@ -200,6 +200,8 @@ struct AccountView: View {
                     AuthorizedDevicesView(appModel: appModel)
                 case .resetCharacter:
                     CharacterRepairView(appModel: appModel)
+                case .eventCalendar:
+                    EventCalendarView()
                 }
             }
             .alert("Account Total Value", isPresented: $isShowingAccountTotalValueExplanation) {

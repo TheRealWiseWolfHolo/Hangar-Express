@@ -4,6 +4,7 @@
 
 ### Added
 - Added a WBCCU Deals tool that displays current StarCitizen-Info Warbond upgrade offers with ship artwork, standard and Warbond values, savings, and feed freshness.
+- Added an Event Calendar tool with official CIG and Bar Citizen dates from StarCitizen-Info, agenda and location filters, in-app event sources, sharing, Calendar export, and an offline last-known-good feed.
 
 ### Changed
 - Started the `1.0.9` release branch and release-note tracking for ongoing work.
