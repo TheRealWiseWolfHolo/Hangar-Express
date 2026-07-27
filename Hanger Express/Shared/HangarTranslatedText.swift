@@ -1,11 +1,34 @@
 import SwiftUI
 import UIKit
 
+nonisolated enum HangarTranslationPhraseParser {
+    static func colonSeparatedPhrases(in source: String) -> [String]? {
+        let components = source.split(
+            separator: ":",
+            maxSplits: 1,
+            omittingEmptySubsequences: false
+        )
+        guard components.count == 2 else {
+            return nil
+        }
+
+        let phrases = components.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard phrases.allSatisfy({ !$0.isEmpty }) else {
+            return nil
+        }
+
+        return phrases
+    }
+}
+
 struct HangarTranslatedText: View {
     let source: String
     let itemTranslator: HangarItemTranslator
     var allowsOnDeviceTranslation = true
     var allowsOnDemandTranslation = false
+    var translatesColonSeparatedPhrasesIndividually = false
 
     @AppStorage(HangarItemTranslationMissMode.storageKey)
     private var itemTranslationMissModeRawValue = HangarItemTranslationMissMode.onDevice.rawValue
@@ -22,16 +45,31 @@ struct HangarTranslatedText: View {
 
     private var translationIdentity: String {
         [
-            source,
+            translationSources.joined(separator: "\u{1F}"),
             itemTranslator.language.rawValue,
             itemTranslator.dictionary?.locale ?? "no-locale",
             String(itemTranslator.dictionary?.version ?? 0)
         ].joined(separator: "|")
     }
 
+    private var translationSources: [String] {
+        guard translatesColonSeparatedPhrasesIndividually,
+              let phrases = HangarTranslationPhraseParser.colonSeparatedPhrases(in: source) else {
+            return [source]
+        }
+
+        return phrases
+    }
+
+    private var translationSeparator: String {
+        translationSources.count > 1 ? ": " : ""
+    }
+
     private var displayText: String {
         guard allowsEffectiveOnDeviceTranslation else {
-            return itemTranslator.translated(source)
+            return translationSources
+                .map(itemTranslator.translated(_:))
+                .joined(separator: translationSeparator)
         }
 
         if allowsOnDemandTranslation,
@@ -40,10 +78,14 @@ struct HangarTranslatedText: View {
             return onDemandTranslation
         }
 
-        return translationService.displayText(
-            for: source,
-            using: itemTranslator
-        )
+        return translationSources
+            .map {
+                translationService.displayText(
+                    for: $0,
+                    using: itemTranslator
+                )
+            }
+            .joined(separator: translationSeparator)
     }
 
     var body: some View {
@@ -71,10 +113,16 @@ struct HangarTranslatedText: View {
         onDemandTranslation = nil
         onDemandTranslationIdentity = nil
 
-        let translatedText = await translationService.onDemandDisplayText(
-            for: source,
-            using: itemTranslator
-        )
+        var translatedPhrases: [String] = []
+        for translationSource in translationSources {
+            translatedPhrases.append(
+                await translationService.onDemandDisplayText(
+                    for: translationSource,
+                    using: itemTranslator
+                )
+            )
+        }
+        let translatedText = translatedPhrases.joined(separator: translationSeparator)
 
         guard !Task.isCancelled, currentIdentity == translationIdentity else {
             return

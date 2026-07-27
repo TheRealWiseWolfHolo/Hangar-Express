@@ -2143,7 +2143,8 @@ private struct FleetShipHeroCard: View {
                         if let subtitle, !subtitle.isEmpty {
                             HangarTranslatedText(
                                 source: subtitle,
-                                itemTranslator: itemTranslator
+                                itemTranslator: itemTranslator,
+                                translatesColonSeparatedPhrasesIndividually: true
                             )
                                 .font(.subheadline.weight(.medium))
                                 .foregroundStyle(Color.white.opacity(0.8))
@@ -2293,7 +2294,8 @@ private struct FleetShipCompactCard: View {
                         if let subtitle, !subtitle.isEmpty {
                             HangarTranslatedText(
                                 source: subtitle,
-                                itemTranslator: itemTranslator
+                                itemTranslator: itemTranslator,
+                                translatesColonSeparatedPhrasesIndividually: true
                             )
                                 .font(.caption.weight(.medium))
                                 .foregroundStyle(Color.white.opacity(0.82))
@@ -2659,7 +2661,11 @@ private struct FleetShipDetailHeroCard: View {
                 HStack(alignment: .bottom, spacing: 12) {
                     VStack(alignment: .leading, spacing: 14) {
                         if let roleSummary, !roleSummary.isEmpty {
-                            Text(roleSummary)
+                            HangarTranslatedText(
+                                source: roleSummary,
+                                itemTranslator: itemTranslator,
+                                translatesColonSeparatedPhrasesIndividually: true
+                            )
                                 .font(.headline.weight(.medium))
                                 .foregroundStyle(Color.white.opacity(0.84))
                                 .lineLimit(2)
