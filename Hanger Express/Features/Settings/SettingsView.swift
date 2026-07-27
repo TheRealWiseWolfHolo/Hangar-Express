@@ -7,6 +7,44 @@ private enum LegalLinkDestinations {
     static let termsOfUseURL = URL(string: "https://github.com/TheRealWiseWolfHolo/Hangar-Express/blob/main/TERMS_OF_USE.md")!
 }
 
+private enum CloudTranslationDictionaryRefreshState: Equatable {
+    case idle
+    case refreshing
+    case succeeded(Date)
+    case failed(String)
+}
+
+private struct CloudTranslationCoverage {
+    let approvedCount: Int
+    let totalCount: Int
+
+    init(
+        snapshot: HangarSnapshot,
+        dictionary: HangarItemTranslationDictionary?
+    ) {
+        let candidates = CloudHangarItemTranslationSuggestionClassifier.candidates(
+            from: snapshot
+        )
+        totalCount = candidates.count
+        approvedCount = candidates.reduce(into: 0) { count, candidate in
+            if dictionary?.translation(for: candidate.source) != nil {
+                count += 1
+            }
+        }
+    }
+
+    var fractionComplete: Double {
+        guard totalCount > 0 else {
+            return 0
+        }
+        return Double(approvedCount) / Double(totalCount)
+    }
+
+    var missingCount: Int {
+        max(totalCount - approvedCount, 0)
+    }
+}
+
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
@@ -25,6 +63,8 @@ struct SettingsView: View {
     @State private var isShowingClearCacheAlert = false
     @State private var isShowingClearTranslationCacheAlert = false
     @State private var isShowingProPlans = false
+    @State private var itemTranslationState = HangarItemTranslationViewState()
+    @State private var cloudDictionaryRefreshState = CloudTranslationDictionaryRefreshState.idle
 
     let appModel: AppModel
     let snapshot: HangarSnapshot
@@ -95,6 +135,32 @@ struct SettingsView: View {
                                 rawValue: itemTranslationMissModeRawValue
                             ) ?? .onDevice
                             appModel.selectItemTranslationMissMode(mode)
+                        }
+
+                        if HangarItemTranslationMissMode.resolved(
+                            from: itemTranslationMissModeRawValue
+                        ) == .cloudReview {
+                            CloudTranslationDictionaryStatusView(
+                                coverage: CloudTranslationCoverage(
+                                    snapshot: snapshot,
+                                    dictionary: itemTranslationState.dictionary
+                                ),
+                                dictionary: itemTranslationState.dictionary,
+                                refreshState: cloudDictionaryRefreshState,
+                                onRefresh: {
+                                    Task {
+                                        await refreshCloudTranslationDictionary()
+                                    }
+                                }
+                            )
+                            .task(
+                                id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
+                            ) {
+                                await itemTranslationState.loadDictionary(
+                                    for: hangarItemLanguageRawValue,
+                                    refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
+                                )
+                            }
                         }
                     } header: {
                         Text("Item Translation")
@@ -392,6 +458,23 @@ struct SettingsView: View {
     private func clampStoredWorkerCount() {
         syncWorkerCount = Double(resolvedWorkerCount)
     }
+
+    private func refreshCloudTranslationDictionary() async {
+        guard cloudDictionaryRefreshState != .refreshing else {
+            return
+        }
+
+        cloudDictionaryRefreshState = .refreshing
+        do {
+            try await itemTranslationState.refreshDictionary(
+                for: hangarItemLanguageRawValue
+            )
+            appModel.didRefreshHostedItemTranslationDictionary()
+            cloudDictionaryRefreshState = .succeeded(.now)
+        } catch {
+            cloudDictionaryRefreshState = .failed(error.localizedDescription)
+        }
+    }
 }
 
 private struct ProSubscriptionSection: View {
@@ -539,6 +622,116 @@ private struct ProPlansSheet: View {
                 await subscriptionStore.refreshPurchasedProducts()
             }
         }
+    }
+
+}
+
+private struct CloudTranslationDictionaryStatusView: View {
+    let coverage: CloudTranslationCoverage
+    let dictionary: HangarItemTranslationDictionary?
+    let refreshState: CloudTranslationDictionaryRefreshState
+    let onRefresh: () -> Void
+
+    private var isRefreshing: Bool {
+        refreshState == .refreshing
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Text("Approved catalog coverage")
+                        .font(.subheadline.weight(.semibold))
+
+                    Spacer()
+
+                    Text(
+                        AppLocalizer.format(
+                            "%lld of %lld",
+                            Int64(coverage.approvedCount),
+                            Int64(coverage.totalCount)
+                        )
+                    )
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                }
+
+                ProgressView(value: coverage.fractionComplete)
+                    .tint(.blue)
+
+                Text(
+                    AppLocalizer.format(
+                        "%lld catalog terms are still missing from the approved dictionary.",
+                        Int64(coverage.missingCount)
+                    )
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    if let dictionary {
+                        Text(
+                            AppLocalizer.format(
+                                "Dictionary v%lld • %lld approved entries",
+                                Int64(dictionary.version),
+                                Int64(dictionary.entries.count)
+                            )
+                        )
+                        .font(.caption.weight(.medium))
+                    } else {
+                        Text("No verified cloud dictionary is available.")
+                            .font(.caption.weight(.medium))
+                    }
+
+                    refreshDetail
+                        .font(.caption)
+                        .foregroundStyle(refreshDetailColor)
+                }
+
+                Spacer(minLength: 8)
+
+                Button(action: onRefresh) {
+                    if isRefreshing {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(isRefreshing)
+                .accessibilityLabel("Refresh translations from cloud")
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private var refreshDetail: some View {
+        switch refreshState {
+        case .idle:
+            Text("Refresh to check for newly approved translations.")
+        case .refreshing:
+            Text("Downloading and verifying the latest cloud dictionary…")
+        case let .succeeded(date):
+            Text(
+                AppLocalizer.format(
+                    "Updated %@",
+                    date.formatted(.relative(presentation: .numeric))
+                )
+            )
+        case let .failed(message):
+            Text(AppLocalizer.format("Refresh failed: %@", message))
+        }
+    }
+
+    private var refreshDetailColor: Color {
+        if case .failed = refreshState {
+            return .red
+        }
+        return .secondary
     }
 }
 

@@ -3735,6 +3735,66 @@ struct Hanger_ExpressTests {
         await secondStore.clear()
     }
 
+    @Test func hostedHangarItemTranslationStoreRefreshReplacesMemoryCache() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+        let testID = UUID().uuidString
+        let versionOneURL = try #require(
+            URL(string: "https://translation.example.com/\(testID)/v1.json")
+        )
+        let versionTwoURL = try #require(
+            URL(string: "https://translation.example.com/\(testID)/v2.json")
+        )
+        TranslationMockURLProtocol.register(
+            .response(
+                statusCode: 200,
+                data: makeHangarItemTranslationPayload(version: 1)
+            ),
+            for: versionOneURL
+        )
+        TranslationMockURLProtocol.register(
+            .response(
+                statusCode: 200,
+                data: makeHangarItemTranslationPayload(version: 2)
+            ),
+            for: versionTwoURL
+        )
+        let session = makeTranslationMockURLSession()
+        let store = HostedHangarItemTranslationStore(directoryURL: tempDirectory)
+
+        let initialDictionary = await store.dictionary(
+            for: .simplifiedChinese,
+            using: HostedHangarItemTranslationClient(
+                language: .simplifiedChinese,
+                urls: [versionOneURL],
+                urlSession: session
+            )
+        )
+        let refreshedDictionary = try await store.refreshDictionary(
+            for: .simplifiedChinese,
+            using: HostedHangarItemTranslationClient(
+                language: .simplifiedChinese,
+                urls: [versionTwoURL],
+                urlSession: session
+            )
+        )
+        let cachedDictionary = await store.dictionary(
+            for: .simplifiedChinese,
+            using: HostedHangarItemTranslationClient(
+                language: .simplifiedChinese,
+                urls: [versionOneURL],
+                urlSession: session
+            )
+        )
+
+        #expect(initialDictionary?.version == 1)
+        #expect(refreshedDictionary.version == 2)
+        #expect(cachedDictionary?.version == 2)
+    }
+
     @Test func hostedHangarItemTranslationStoreAcceptsVerifiedVersionRollback() async throws {
         let tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

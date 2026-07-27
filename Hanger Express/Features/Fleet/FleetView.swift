@@ -120,7 +120,9 @@ struct FleetView: View {
                 }
             }
             .id(appLanguageRawValue)
-            .task(id: hangarItemLanguageRawValue) {
+            .task(
+                id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
+            ) {
                 await loadItemTranslationDictionary()
             }
             .task(id: fleetImagePrefetchID(for: displayedShipGroups)) {
@@ -528,7 +530,10 @@ struct FleetView: View {
     }
 
     private func loadItemTranslationDictionary() async {
-        await itemTranslationState.loadDictionary(for: hangarItemLanguageRawValue)
+        await itemTranslationState.loadDictionary(
+            for: hangarItemLanguageRawValue,
+            refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
+        )
     }
 
     private func cardSubtitle(for shipGroup: GroupedFleetShip) -> String? {
@@ -1051,6 +1056,7 @@ private struct FleetToolTile: View {
 
 struct AllShipsBrowserView: View {
     let reloadToken: UUID?
+    let itemTranslationDictionaryRefreshGeneration: Int
 
     @Environment(\.dismiss) private var dismiss
     @State private var searchText = ""
@@ -1191,7 +1197,9 @@ struct AllShipsBrowserView: View {
             .task {
                 await loadCatalog(force: false)
             }
-            .task(id: hangarItemLanguageRawValue) {
+            .task(
+                id: "\(hangarItemLanguageRawValue)-\(itemTranslationDictionaryRefreshGeneration)"
+            ) {
                 await loadItemTranslationDictionary()
             }
         }
@@ -1202,7 +1210,10 @@ struct AllShipsBrowserView: View {
     }
 
     private func loadItemTranslationDictionary() async {
-        await itemTranslationState.loadDictionary(for: hangarItemLanguageRawValue)
+        await itemTranslationState.loadDictionary(
+            for: hangarItemLanguageRawValue,
+            refreshGeneration: itemTranslationDictionaryRefreshGeneration
+        )
     }
 
     private func refreshCatalog() async {

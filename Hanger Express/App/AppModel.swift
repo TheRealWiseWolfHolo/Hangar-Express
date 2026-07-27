@@ -653,6 +653,7 @@ final class AppModel {
     var itemTranslationPreprocessPrompt: ItemTranslationPreprocessPrompt?
     var itemTranslationPreloadProgress: ItemTranslationPreloadProgress?
     var itemTranslationPreloadLogEntries: [ItemTranslationPreloadLogEntry] = []
+    var itemTranslationDictionaryRefreshGeneration = 0
     private var hangarLogRefreshPreviewLogs: [HangarLogEntry] = []
     var previewsTranslationLoadingBar = false
     var startupActivity: StartupActivity?
@@ -850,6 +851,10 @@ final class AppModel {
             promptsWhenCacheIsMissing: mode == .onDevice,
             presentation: .visible
         )
+    }
+
+    func didRefreshHostedItemTranslationDictionary() {
+        itemTranslationDictionaryRefreshGeneration &+= 1
     }
 
     func beginItemTranslationPreprocessing() {

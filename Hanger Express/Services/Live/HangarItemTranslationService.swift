@@ -209,6 +209,16 @@ actor HostedHangarItemTranslationStore {
         }
     }
 
+    func refreshDictionary(
+        for language: HangarItemLanguage,
+        using client: HostedHangarItemTranslationClient
+    ) async throws -> HangarItemTranslationDictionary {
+        let fetchedDictionary = try await client.fetchDictionary()
+        cachedDictionaries[language] = fetchedDictionary.dictionary
+        save(fetchedDictionary.data, for: language)
+        return fetchedDictionary.dictionary
+    }
+
     func clear() {
         cachedDictionaries.removeAll()
         try? fileManager.removeItem(at: directoryURL)

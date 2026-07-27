@@ -125,7 +125,9 @@ struct BuybackView: View {
                 }
             }
             .id(appLanguageRawValue)
-            .task(id: hangarItemLanguageRawValue) {
+            .task(
+                id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
+            ) {
                 await loadItemTranslationDictionary()
             }
             .onChange(of: isSearchPresented) { _, isPresented in
@@ -231,7 +233,10 @@ struct BuybackView: View {
     }
 
     private func loadItemTranslationDictionary() async {
-        await itemTranslationState.loadDictionary(for: hangarItemLanguageRawValue)
+        await itemTranslationState.loadDictionary(
+            for: hangarItemLanguageRawValue,
+            refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
+        )
     }
 
     private func matchesSearchFilters(for item: BuybackPledge) -> Bool {
