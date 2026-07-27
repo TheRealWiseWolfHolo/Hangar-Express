@@ -858,6 +858,12 @@
 "Auto Copy Share Picture Log" = "自动复制分享图片日志";
 "Control hangar artwork, row highlights, and share-picture diagnostics." = "控制机库图像、行高亮和分享图片诊断。";
 "Item Language" = "物品语言";
+"Choose Translation Mode" = "选择翻译模式";
+"Choose how Hangar Express handles Simplified Chinese item terms missing from the verified online dictionary. On Device uses Apple's downloaded translation model. Online sends only eligible public catalog terms for review; unknown terms remain in English until approved." = "选择机库通如何处理已验证在线词典中缺少的简体中文物品术语。“本机”使用 Apple 已下载的翻译模型；“在线”只会发送符合条件的公开商品目录术语供审核，未知术语在获批前会继续显示英文。";
+"On Device" = "本机";
+"Online" = "在线";
+"Missing Translations" = "缺失翻译";
+"Cloud Review" = "在线";
 "Original" = "原文";
 "Choose the app language, item language, and appearance. Item language uses StarCitizen-Info terms first, then the on-device translation model when available." = "选择应用语言、物品语言和外观。物品语言会先使用 StarCitizen-Info 术语，若可用再使用本机翻译模型。";
 "Select" = "选择";

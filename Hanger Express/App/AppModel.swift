@@ -357,6 +357,28 @@ final class AppModel {
         }
     }
 
+    struct ItemTranslationModePrompt: Identifiable {
+        let id = UUID()
+
+        var title: String {
+            AppLocalizer.string("Choose Translation Mode")
+        }
+
+        var message: String {
+            AppLocalizer.string(
+                "Choose how Hangar Express handles Simplified Chinese item terms missing from the verified online dictionary. On Device uses Apple's downloaded translation model. Online sends only eligible public catalog terms for review; unknown terms remain in English until approved."
+            )
+        }
+
+        var onDeviceActionTitle: String {
+            AppLocalizer.string("On Device")
+        }
+
+        var onlineActionTitle: String {
+            AppLocalizer.string("Online")
+        }
+    }
+
     struct ItemTranslationPreloadProgress: Equatable {
         enum Phase: Equatable {
             case preparing
@@ -650,6 +672,7 @@ final class AppModel {
     var authenticationFlowID = UUID()
     var reauthenticationPrompt: ReauthenticationPrompt?
     var versionRefreshPrompt: VersionRefreshPrompt?
+    var itemTranslationModePrompt: ItemTranslationModePrompt?
     var itemTranslationPreprocessPrompt: ItemTranslationPreprocessPrompt?
     var itemTranslationPreloadProgress: ItemTranslationPreloadProgress?
     var itemTranslationPreloadLogEntries: [ItemTranslationPreloadLogEntry] = []
@@ -837,6 +860,23 @@ final class AppModel {
         )
     }
 
+    func selectItemTranslationMissMode(_ mode: HangarItemTranslationMissMode) {
+        userDefaults.set(mode.rawValue, forKey: HangarItemTranslationMissMode.storageKey)
+        userDefaults.set(true, forKey: HangarItemTranslationMissMode.userSelectedStorageKey)
+        itemTranslationModePrompt = nil
+        itemTranslationPreprocessPrompt = nil
+
+        guard let snapshot else {
+            return
+        }
+
+        requestItemTranslationPreload(
+            for: snapshot,
+            promptsWhenCacheIsMissing: mode == .onDevice,
+            presentation: .visible
+        )
+    }
+
     func beginItemTranslationPreprocessing() {
         if let language = itemTranslationPreprocessPrompt?.language {
             dismissedItemTranslationPreprocessLanguages.insert(language)
@@ -854,6 +894,12 @@ final class AppModel {
         let language = itemTranslationPreloadProgress?.language ?? currentHangarItemLanguage
         guard language.translationLocaleIdentifier != nil else {
             clearPendingItemTranslationPreload(for: language)
+            return
+        }
+        guard currentHangarItemTranslationMissMode == .onDevice else {
+            if let snapshot {
+                scheduleItemTranslationPreload(for: snapshot, presentation: .silent)
+            }
             return
         }
 
@@ -1326,6 +1372,14 @@ final class AppModel {
         )
     }
 
+    private var currentHangarItemTranslationMissMode: HangarItemTranslationMissMode {
+        HangarItemTranslationMissMode.resolved(
+            from: userDefaults.string(
+                forKey: HangarItemTranslationMissMode.storageKey
+            ) ?? HangarItemTranslationMissMode.onDevice.rawValue
+        )
+    }
+
     private func pendingItemTranslationPreloadLanguage() -> HangarItemLanguage? {
         guard let rawValue = userDefaults.string(forKey: Self.itemTranslationPendingPreloadLanguageDefaultsKey) else {
             return nil
@@ -1373,10 +1427,38 @@ final class AppModel {
             itemTranslationPreloadProgressDismissalTask = nil
             itemTranslationPreloadProgress = nil
             resetItemTranslationPreloadLogs()
+            itemTranslationModePrompt = nil
             itemTranslationPreprocessPrompt = nil
             clearPendingItemTranslationPreload()
             return
         }
+
+        if HangarItemTranslationMissMode.needsUserSelection(
+            for: language,
+            hasRecordedSelection: userDefaults.bool(
+                forKey: HangarItemTranslationMissMode.userSelectedStorageKey
+            )
+        ) {
+            itemTranslationPreloadTask?.cancel()
+            itemTranslationPreloadTask = nil
+            itemTranslationPreloadGeneration &+= 1
+            itemTranslationPreloadStallTask?.cancel()
+            itemTranslationPreloadStallTask = nil
+            itemTranslationPreloadProgressDismissalTask?.cancel()
+            itemTranslationPreloadProgressDismissalTask = nil
+            itemTranslationPreloadProgress = nil
+            itemTranslationPreprocessPrompt = nil
+            resetItemTranslationPreloadLogs()
+            appendItemTranslationPreloadLog(
+                "Waiting for the user to choose an item translation mode."
+            )
+            if itemTranslationModePrompt == nil {
+                itemTranslationModePrompt = ItemTranslationModePrompt()
+            }
+            return
+        }
+
+        itemTranslationModePrompt = nil
 
         guard !suspendedItemTranslationAutoPreloadLanguages.contains(language) else {
             appendItemTranslationPreloadLog("Automatic translation preload skipped while waiting for cache-clear rebuild confirmation.")
@@ -1385,6 +1467,7 @@ final class AppModel {
 
         let resumesPendingPreload = pendingItemTranslationPreloadLanguage() == language
         if promptsWhenCacheIsMissing,
+           currentHangarItemTranslationMissMode == .onDevice,
            !resumesPendingPreload,
            !OnDeviceHangarItemTranslationService.shared.hasAvailableCache(for: language) {
             guard !dismissedItemTranslationPreprocessLanguages.contains(language) else {
@@ -1433,12 +1516,19 @@ final class AppModel {
             return
         }
 
-        let sources = itemTranslationPreloadSources(for: snapshot)
-        guard !sources.isEmpty else {
-            resetItemTranslationPreloadLogs()
-            appendItemTranslationPreloadLog("No preload source strings were found in the current snapshot.")
-            clearPendingItemTranslationPreload(for: language)
-            return
+        let missMode = currentHangarItemTranslationMissMode
+        let sources: [String]
+        switch missMode {
+        case .onDevice:
+            sources = itemTranslationPreloadSources(for: snapshot)
+            guard !sources.isEmpty else {
+                resetItemTranslationPreloadLogs()
+                appendItemTranslationPreloadLog("No preload source strings were found in the current snapshot.")
+                clearPendingItemTranslationPreload(for: language)
+                return
+            }
+        case .cloudReview:
+            sources = []
         }
 
         itemTranslationPreloadTask?.cancel()
@@ -1452,9 +1542,9 @@ final class AppModel {
         itemTranslationPreloadProgressDismissalTask = nil
         itemTranslationPreloadProgress = nil
         appendItemTranslationPreloadLog(
-            "Scheduled \(showsProgress ? "visible" : "silent") preload. generation=\(preloadGeneration), language=\(language.rawValue), sourceCandidates=\(sources.count)."
+            "Scheduled \(showsProgress ? "visible" : "silent") \(missMode.rawValue) preload. generation=\(preloadGeneration), language=\(language.rawValue), sourceCandidates=\(sources.count)."
         )
-        appendItemTranslationPreloadLog("Fetching StarCitizen-Info item translation dictionary.")
+        appendItemTranslationPreloadLog("Fetching hosted item translation dictionary.")
         itemTranslationPreloadTask = Task.detached(priority: .utility) { [weak self] in
             guard let self else {
                 return
@@ -1479,6 +1569,20 @@ final class AppModel {
                 language: language,
                 dictionary: dictionaryResult.dictionary
             )
+            if missMode == .cloudReview {
+                let outcome = await CloudHangarItemTranslationSubmissionStore.shared
+                    .submitSuggestions(
+                        for: snapshot,
+                        excluding: dictionaryResult.dictionary,
+                        mode: missMode
+                    )
+                await self.applyCloudItemTranslationSubmissionOutcome(
+                    outcome,
+                    language: language,
+                    generation: preloadGeneration
+                )
+                return
+            }
             if showsProgress {
                 await OnDeviceHangarItemTranslationService.shared.preloadTranslations(
                     for: sources,
@@ -1511,6 +1615,35 @@ final class AppModel {
                 )
             }
         }
+    }
+
+    private func applyCloudItemTranslationSubmissionOutcome(
+        _ outcome: CloudHangarItemTranslationSubmissionOutcome,
+        language: HangarItemLanguage,
+        generation: Int
+    ) {
+        guard generation == itemTranslationPreloadGeneration else {
+            return
+        }
+        clearPendingItemTranslationPreload(for: language)
+        itemTranslationPreloadProgress = nil
+
+        let message: String
+        switch outcome {
+        case .disabled:
+            message = "Cloud Review is disabled; no suggestion request was sent."
+        case .dictionaryUnavailable:
+            message = "Cloud Review skipped because no verified hosted dictionary was available."
+        case .noEligibleCandidates:
+            message = "Cloud Review found no eligible catalog terminology."
+        case .alreadySubmitted:
+            message = "Cloud Review has no terms eligible for submission at this dictionary version."
+        case let .submitted(count):
+            message = "Cloud Review queued \(count) catalog term\(count == 1 ? "" : "s") for review."
+        case let .unavailable(count):
+            message = "Cloud Review could not queue \(count) catalog term\(count == 1 ? "" : "s"); retry state was saved."
+        }
+        appendItemTranslationPreloadLog(message)
     }
 
     private nonisolated static func loadItemTranslationDictionary(
@@ -1863,6 +1996,7 @@ final class AppModel {
         OnDeviceHangarItemTranslationService.shared.clear()
 
         if rebuildPromptLanguage.translationLocaleIdentifier != nil,
+           currentHangarItemTranslationMissMode == .onDevice,
            snapshot != nil {
             itemTranslationPreprocessPrompt = ItemTranslationPreprocessPrompt(
                 language: rebuildPromptLanguage,

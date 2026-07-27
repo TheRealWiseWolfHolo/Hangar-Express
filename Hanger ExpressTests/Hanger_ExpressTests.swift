@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 import UIKit
@@ -3131,6 +3132,7 @@ struct Hanger_ExpressTests {
         )
         #expect(
             HostedShipFeedEndpoints.itemTranslationURLs(for: .simplifiedChinese) == [
+                URL(string: "https://hangar-express-translations.liuchen2004.remote.example.invalid/item-translations/zh-Hans.json")!,
                 URL(string: "https://starcitizen-info.remote.example.invalid/item-translations/zh-Hans.json")!,
                 URL(string: "https://fallback.example.invalid/item-translations/zh-Hans.json")!
             ]
@@ -3148,6 +3150,523 @@ struct Hanger_ExpressTests {
         #expect(dictionary.translation(for: "Anvil F8C Lightning") == "F8C 闪电")
         #expect(dictionary.translation(for: "  f8c   lightning  ") == "F8C 闪电")
         #expect(dictionary.translation(for: "Gladius") == nil)
+    }
+
+    @Test func hostedHangarItemTranslationFeedVerifiesRemoteResponseMetadata() throws {
+        let data = makeHangarItemTranslationPayload()
+        let dictionary = try HostedHangarItemTranslationClient.decodeDictionary(
+            from: data,
+            expectedLocale: "zh-Hans"
+        )
+        let checksum = SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let url = try #require(
+            URL(string: "https://hangar-express-translations.example.com/zh-Hans.json")
+        )
+        let validResponse = try #require(
+            HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "etag": "\"release-v1\"",
+                    "x-content-sha256": checksum,
+                    "x-dictionary-version": "1",
+                    "x-dictionary-entry-count": "3"
+                ]
+            )
+        )
+
+        try HostedHangarItemTranslationClient.verifyResponseMetadata(
+            data: data,
+            response: validResponse,
+            dictionary: dictionary,
+            requiresMetadata: true
+        )
+
+        let invalidResponse = try #require(
+            HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "etag": "\"release-v1\"",
+                    "x-content-sha256": String(repeating: "0", count: 64),
+                    "x-dictionary-version": "1",
+                    "x-dictionary-entry-count": "3"
+                ]
+            )
+        )
+        var rejectedInvalidMetadata = false
+        do {
+            try HostedHangarItemTranslationClient.verifyResponseMetadata(
+                data: data,
+                response: invalidResponse,
+                dictionary: dictionary,
+                requiresMetadata: true
+            )
+        } catch {
+            rejectedInvalidMetadata = true
+        }
+        #expect(rejectedInvalidMetadata)
+    }
+
+    @Test func cloudTranslationClassifierIncludesOnlyStructuredCatalogFields() throws {
+        #expect(!CloudHangarItemTranslationRollout.isEnabled)
+        #expect(
+            !HangarItemTranslationMissMode.needsUserSelection(
+                for: .simplifiedChinese,
+                hasRecordedSelection: false
+            )
+        )
+        #expect(
+            HangarItemTranslationMissMode.needsUserSelection(
+                for: .simplifiedChinese,
+                hasRecordedSelection: false,
+                rolloutEnabled: true
+            )
+        )
+        #expect(
+            !HangarItemTranslationMissMode.needsUserSelection(
+                for: .simplifiedChinese,
+                hasRecordedSelection: true,
+                rolloutEnabled: true
+            )
+        )
+        #expect(
+            !HangarItemTranslationMissMode.needsUserSelection(
+                for: .original,
+                hasRecordedSelection: false
+            )
+        )
+
+        let sourceSnapshot = PreviewHangarRepository.sampleSnapshot
+        let snapshot = HangarSnapshot(
+            accountHandle: "private-account-handle",
+            lastSyncedAt: sourceSnapshot.lastSyncedAt,
+            storeCreditUSD: sourceSnapshot.storeCreditUSD,
+            totalSpendUSD: sourceSnapshot.totalSpendUSD,
+            packages: sourceSnapshot.packages,
+            fleet: sourceSnapshot.fleet,
+            buyback: [
+                BuybackPledge(
+                    id: 999_001,
+                    title: "Private Buyback Title",
+                    recoveredValueUSD: 10,
+                    addedToBuybackAt: .now,
+                    notes: "Private buyback note"
+                )
+            ],
+            hangarLogs: [
+                HangarLogEntry(
+                    id: "private-log",
+                    occurredAt: .now,
+                    action: .gift,
+                    itemName: "Private Log Item",
+                    operatorName: "private@example.com",
+                    priceUSD: nil,
+                    sourcePledgeID: "private-source-id",
+                    targetPledgeID: nil,
+                    orderCode: "PRIVATE-ORDER",
+                    reason: "Private hangar log reason",
+                    rawText: "Private raw hangar log text"
+                )
+            ]
+        )
+
+        let candidates = CloudHangarItemTranslationSuggestionClassifier.candidates(
+            from: snapshot
+        )
+        let sources = Set(candidates.map(\.source))
+
+        #expect(sources.contains(try #require(snapshot.packages.first?.title)))
+        #expect(sources.contains(try #require(snapshot.fleet.first?.displayName)))
+        #expect(!sources.contains(snapshot.accountHandle))
+        #expect(!sources.contains("Private Buyback Title"))
+        #expect(!sources.contains("Private buyback note"))
+        #expect(!sources.contains("Private Log Item"))
+        #expect(!sources.contains("private@example.com"))
+        #expect(!sources.contains("private-source-id"))
+        #expect(!sources.contains("PRIVATE-ORDER"))
+        #expect(!sources.contains("Private hangar log reason"))
+        #expect(!sources.contains("Private raw hangar log text"))
+    }
+
+    @Test func cloudTranslationClassifierExcludesCurrentDictionaryHits() throws {
+        let snapshot = PreviewHangarRepository.sampleSnapshot
+        let packageTitle = try #require(snapshot.packages.first?.title)
+        let dictionary = try HangarItemTranslationDictionary(
+            locale: "zh-Hans",
+            version: 4,
+            generatedAt: nil,
+            entries: [
+                HangarItemTranslationDictionary.Entry(
+                    source: packageTitle,
+                    translation: "已翻译组合包",
+                    kind: "package",
+                    aliases: []
+                )
+            ],
+            expectedLocale: "zh-Hans"
+        )
+
+        let candidates = CloudHangarItemTranslationSuggestionClassifier.candidates(
+            from: snapshot,
+            excluding: dictionary
+        )
+
+        #expect(!candidates.map(\.source).contains(packageTitle))
+    }
+
+    @Test func cloudTranslationMissModeIsMigrationSafeWhileRolloutIsDisabled() {
+        #expect(
+            HangarItemTranslationMissMode.resolved(
+                from: HangarItemTranslationMissMode.cloudReview.rawValue
+            ) == .onDevice
+        )
+        #expect(
+            HangarItemTranslationMissMode.resolved(
+                from: HangarItemTranslationMissMode.cloudReview.rawValue,
+                rolloutEnabled: true
+            ) == .cloudReview
+        )
+        #expect(
+            HangarItemTranslationMissMode.resolved(
+                from: "future-mode",
+                rolloutEnabled: true
+            ) == .onDevice
+        )
+    }
+
+    @Test func cloudTranslationCandidatesRejectPrivateContentShapes() {
+        #expect(
+            CloudHangarItemTranslationCandidate(
+                source: "friend@example.com",
+                kind: .item
+            ) == nil
+        )
+        #expect(
+            CloudHangarItemTranslationCandidate(
+                source: "https://example.com/private",
+                kind: .item
+            ) == nil
+        )
+        #expect(
+            CloudHangarItemTranslationCandidate(
+                source: "First line\nSecond line",
+                kind: .item
+            ) == nil
+        )
+    }
+
+    @Test func cloudTranslationClientBatchesDeduplicatesAndDiscardsPendingText() async throws {
+        let observationBox = CloudTranslationRequestObservationBox()
+        let session = makeCloudTranslationMockURLSession { request in
+            let data = try #require(request.httpBody)
+            let payload = try #require(
+                JSONSerialization.jsonObject(with: data) as? [String: Any]
+            )
+            let items = try #require(payload["items"] as? [[String: Any]])
+            observationBox.append(
+                CloudTranslationRequestObservation(
+                    itemCount: items.count,
+                    dictionaryVersion: payload["dictionaryVersion"] as? Int,
+                    contentType: request.value(forHTTPHeaderField: "content-type"),
+                    allowsConstrainedNetworkAccess: request.allowsConstrainedNetworkAccess,
+                    allowsExpensiveNetworkAccess: request.allowsExpensiveNetworkAccess
+                )
+            )
+            let translations = try items.map { item -> [String: Any] in
+                [
+                    "clientID": try #require(item["clientID"] as? String),
+                    "source": try #require(item["source"] as? String),
+                    "status": "pending",
+                    "translation": "This unreviewed text must be discarded"
+                ]
+            }
+            return (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["content-type": "application/json"]
+                )!,
+                try JSONSerialization.data(withJSONObject: ["translations": translations])
+            )
+        }
+        let client = CloudHangarItemTranslationClient(
+            baseURL: URL(string: "https://cloud-translation.example.com")!,
+            urlSession: session
+        )
+        let uniqueCandidates = try (0 ..< 30).map {
+            try #require(
+                CloudHangarItemTranslationCandidate(
+                    source: "Catalog Item \($0)",
+                    kind: .item
+                )
+            )
+        }
+
+        let results = try await client.submit(
+            uniqueCandidates + [uniqueCandidates[0]],
+            dictionaryVersion: 9
+        )
+
+        #expect(results.count == 30)
+        #expect(results.allSatisfy { $0.status == .pending })
+        #expect(observationBox.values == [
+            CloudTranslationRequestObservation(
+                itemCount: 6,
+                dictionaryVersion: 9,
+                contentType: "application/json",
+                allowsConstrainedNetworkAccess: false,
+                allowsExpensiveNetworkAccess: false
+            ),
+            CloudTranslationRequestObservation(
+                itemCount: 6,
+                dictionaryVersion: 9,
+                contentType: "application/json",
+                allowsConstrainedNetworkAccess: false,
+                allowsExpensiveNetworkAccess: false
+            ),
+            CloudTranslationRequestObservation(
+                itemCount: 6,
+                dictionaryVersion: 9,
+                contentType: "application/json",
+                allowsConstrainedNetworkAccess: false,
+                allowsExpensiveNetworkAccess: false
+            ),
+            CloudTranslationRequestObservation(
+                itemCount: 6,
+                dictionaryVersion: 9,
+                contentType: "application/json",
+                allowsConstrainedNetworkAccess: false,
+                allowsExpensiveNetworkAccess: false
+            ),
+            CloudTranslationRequestObservation(
+                itemCount: 6,
+                dictionaryVersion: 9,
+                contentType: "application/json",
+                allowsConstrainedNetworkAccess: false,
+                allowsExpensiveNetworkAccess: false
+            )
+        ])
+    }
+
+    @Test func cloudTranslationSubmissionStoreRequiresOptInAndPersistsTerminalState() async throws {
+        let snapshot = PreviewHangarRepository.sampleSnapshot
+        let allCandidates = CloudHangarItemTranslationSuggestionClassifier.candidates(
+            from: snapshot
+        )
+        let candidatesBySource = Dictionary(
+            grouping: allCandidates,
+            by: { HangarItemTranslationDictionary.normalizedLookupKey($0.source) }
+        )
+        let submittedCandidate = try #require(
+            candidatesBySource.values.first(where: { $0.count == 1 })?.first
+        )
+        let submittedLookupKey = HangarItemTranslationDictionary.normalizedLookupKey(
+            submittedCandidate.source
+        )
+        let dictionary = try HangarItemTranslationDictionary(
+            locale: "zh-Hans",
+            version: 12,
+            generatedAt: nil,
+            entries: candidatesBySource.compactMap { lookupKey, candidates in
+                guard lookupKey != submittedLookupKey,
+                      let candidate = candidates.first else {
+                    return nil
+                }
+                return HangarItemTranslationDictionary.Entry(
+                    source: candidate.source,
+                    translation: "已审核",
+                    kind: candidate.kind.rawValue,
+                    aliases: []
+                )
+            },
+            expectedLocale: "zh-Hans"
+        )
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+        let observationBox = CloudTranslationRequestObservationBox()
+        let session = makeCloudTranslationMockURLSession { request in
+            let body = try #require(request.httpBody)
+            let payload = try #require(
+                JSONSerialization.jsonObject(with: body) as? [String: Any]
+            )
+            let items = try #require(payload["items"] as? [[String: Any]])
+            observationBox.append(
+                CloudTranslationRequestObservation(
+                    itemCount: items.count,
+                    dictionaryVersion: payload["dictionaryVersion"] as? Int,
+                    contentType: request.value(forHTTPHeaderField: "content-type"),
+                    allowsConstrainedNetworkAccess: request.allowsConstrainedNetworkAccess,
+                    allowsExpensiveNetworkAccess: request.allowsExpensiveNetworkAccess
+                )
+            )
+            let translations = try items.map {
+                [
+                    "clientID": try #require($0["clientID"] as? String),
+                    "source": try #require($0["source"] as? String),
+                    "status": "pending"
+                ]
+            }
+            return (
+                HTTPURLResponse(
+                    url: try #require(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["content-type": "application/json"]
+                )!,
+                try JSONSerialization.data(
+                    withJSONObject: ["translations": translations]
+                )
+            )
+        }
+        let client = CloudHangarItemTranslationClient(
+            baseURL: URL(string: "https://cloud-translation.example.com")!,
+            urlSession: session
+        )
+        let disabledStore = CloudHangarItemTranslationSubmissionStore(
+            directoryURL: tempDirectory
+        )
+
+        #expect(
+            await disabledStore.submitSuggestions(
+                for: snapshot,
+                excluding: dictionary,
+                mode: .cloudReview,
+                client: client,
+                rolloutEnabled: false
+            ) == .disabled
+        )
+        #expect(observationBox.values.isEmpty)
+        #expect(
+            await disabledStore.submitSuggestions(
+                for: snapshot,
+                excluding: dictionary,
+                mode: .onDevice,
+                client: client,
+                rolloutEnabled: true
+            ) == .disabled
+        )
+        #expect(observationBox.values.isEmpty)
+
+        let enabledStore = CloudHangarItemTranslationSubmissionStore(
+            directoryURL: tempDirectory
+        )
+        #expect(
+            await enabledStore.submitSuggestions(
+                for: snapshot,
+                excluding: dictionary,
+                mode: .cloudReview,
+                client: client,
+                rolloutEnabled: true
+            ) == .submitted(1)
+        )
+        #expect(
+            observationBox.values == [
+                CloudTranslationRequestObservation(
+                    itemCount: 1,
+                    dictionaryVersion: 12,
+                    contentType: "application/json",
+                    allowsConstrainedNetworkAccess: false,
+                    allowsExpensiveNetworkAccess: false
+                )
+            ]
+        )
+
+        let reloadedStore = CloudHangarItemTranslationSubmissionStore(
+            directoryURL: tempDirectory
+        )
+        #expect(
+            await reloadedStore.submitSuggestions(
+                for: snapshot,
+                excluding: dictionary,
+                mode: .cloudReview,
+                client: client,
+                rolloutEnabled: true
+            ) == .alreadySubmitted
+        )
+        #expect(observationBox.values.count == 1)
+        let persistedState = try String(
+            contentsOf: tempDirectory.appendingPathComponent(
+                "submission-state.json"
+            ),
+            encoding: .utf8
+        )
+        #expect(!persistedState.contains(submittedCandidate.source))
+    }
+
+    @Test func cloudTranslationSubmissionStateUsesBoundedVersionedRetries() throws {
+        let candidate = try #require(
+            CloudHangarItemTranslationCandidate(
+                source: "Retryable Catalog Item",
+                kind: .item
+            )
+        )
+        let unavailable = CloudHangarItemTranslationResult(
+            candidate: candidate,
+            status: .unavailable,
+            reason: nil
+        )
+        let pending = CloudHangarItemTranslationResult(
+            candidate: candidate,
+            status: .pending,
+            reason: nil
+        )
+        let start = try #require(
+            ISO8601DateFormatter().date(from: "2026-07-26T20:00:00Z")
+        )
+        var state = CloudHangarItemTranslationSubmissionState()
+
+        #expect(state.shouldSubmit(candidate, dictionaryVersion: 3, now: start))
+        state.record(unavailable, dictionaryVersion: 3, now: start)
+        #expect(!state.shouldSubmit(
+            candidate,
+            dictionaryVersion: 3,
+            now: start.addingTimeInterval(3_599)
+        ))
+        #expect(state.shouldSubmit(
+            candidate,
+            dictionaryVersion: 3,
+            now: start.addingTimeInterval(3_600)
+        ))
+
+        let secondFailure = start.addingTimeInterval(3_600)
+        state.record(unavailable, dictionaryVersion: 3, now: secondFailure)
+        #expect(!state.shouldSubmit(
+            candidate,
+            dictionaryVersion: 3,
+            now: secondFailure.addingTimeInterval(6 * 60 * 60 - 1)
+        ))
+        #expect(state.shouldSubmit(
+            candidate,
+            dictionaryVersion: 3,
+            now: secondFailure.addingTimeInterval(6 * 60 * 60)
+        ))
+
+        state.record(pending, dictionaryVersion: 3, now: secondFailure)
+        #expect(!state.shouldSubmit(
+            candidate,
+            dictionaryVersion: 3,
+            now: secondFailure.addingTimeInterval(7 * 24 * 60 * 60)
+        ))
+        #expect(state.shouldSubmit(
+            candidate,
+            dictionaryVersion: 4,
+            now: secondFailure
+        ))
+
+        let roundTrip = try JSONDecoder().decode(
+            CloudHangarItemTranslationSubmissionState.self,
+            from: JSONEncoder().encode(state)
+        )
+        #expect(roundTrip == state)
     }
 
     @Test func hostedHangarItemTranslationFeedRejectsDuplicateKeys() throws {
@@ -3240,6 +3759,59 @@ struct Hanger_ExpressTests {
 
         #expect(cachedDictionary?.translation(for: "Anvil F8C Lightning") == "F8C 闪电")
         await secondStore.clear()
+    }
+
+    @Test func hostedHangarItemTranslationStoreAcceptsVerifiedVersionRollback() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+        let testID = UUID().uuidString
+        let versionTwoURL = try #require(
+            URL(string: "https://translation.example.com/\(testID)/v2.json")
+        )
+        let versionOneURL = try #require(
+            URL(string: "https://translation.example.com/\(testID)/v1.json")
+        )
+        TranslationMockURLProtocol.register(
+            .response(
+                statusCode: 200,
+                data: makeHangarItemTranslationPayload(version: 2)
+            ),
+            for: versionTwoURL
+        )
+        TranslationMockURLProtocol.register(
+            .response(
+                statusCode: 200,
+                data: makeHangarItemTranslationPayload(version: 1)
+            ),
+            for: versionOneURL
+        )
+        let session = makeTranslationMockURLSession()
+        let versionTwo = await HostedHangarItemTranslationStore(
+            directoryURL: tempDirectory
+        ).dictionary(
+            for: .simplifiedChinese,
+            using: HostedHangarItemTranslationClient(
+                language: .simplifiedChinese,
+                urls: [versionTwoURL],
+                urlSession: session
+            )
+        )
+        let rolledBackVersion = await HostedHangarItemTranslationStore(
+            directoryURL: tempDirectory
+        ).dictionary(
+            for: .simplifiedChinese,
+            using: HostedHangarItemTranslationClient(
+                language: .simplifiedChinese,
+                urls: [versionOneURL],
+                urlSession: session
+            )
+        )
+
+        #expect(versionTwo?.version == 2)
+        #expect(rolledBackVersion?.version == 1)
     }
 
     @Test func hangarItemTranslatorUsesExactDictionaryAndBilingualSearchText() throws {
@@ -5386,14 +5958,14 @@ private func makeHostedShipDetailPayload(description: String, technicalValue: St
     )
 }
 
-private func makeHangarItemTranslationPayload() -> Data {
-    Data(
-        #"""
+private func makeHangarItemTranslationPayload(version: Int = 1) -> Data {
+    let payload = #"""
         {
           "locale": "zh-Hans",
           "version": 1,
           "generatedAt": "2026-06-10T00:00:00.000Z",
           "count": 3,
+          "sourceCount": 3,
           "entries": [
             {
               "source": "F8C Lightning",
@@ -5415,7 +5987,12 @@ private func makeHangarItemTranslationPayload() -> Data {
             }
           ]
         }
-        """#.utf8
+        """#
+    return Data(
+        payload.replacingOccurrences(
+            of: #""version": 1"#,
+            with: #""version": \#(version)"#
+        ).utf8
     )
 }
 
@@ -5511,6 +6088,45 @@ private func makeMockURLSession(
 private func makeTranslationMockURLSession() -> URLSession {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [TranslationMockURLProtocol.self]
+    return URLSession(configuration: configuration)
+}
+
+private struct CloudTranslationRequestObservation: Equatable, Sendable {
+    let itemCount: Int
+    let dictionaryVersion: Int?
+    let contentType: String?
+    let allowsConstrainedNetworkAccess: Bool
+    let allowsExpensiveNetworkAccess: Bool
+}
+
+private final class CloudTranslationRequestObservationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValues: [CloudTranslationRequestObservation] = []
+
+    var values: [CloudTranslationRequestObservation] {
+        lock.withLock { storedValues }
+    }
+
+    func append(_ value: CloudTranslationRequestObservation) {
+        lock.withLock {
+            storedValues.append(value)
+        }
+    }
+}
+
+private func makeCloudTranslationMockURLSession(
+    handler: @escaping @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
+) -> URLSession {
+    let handlerID = UUID().uuidString
+    CloudTranslationMockURLProtocol.register(
+        handler,
+        for: handlerID
+    )
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [CloudTranslationMockURLProtocol.self]
+    configuration.httpAdditionalHeaders = [
+        CloudTranslationMockURLProtocol.handlerHeader: handlerID
+    ]
     return URLSession(configuration: configuration)
 }
 
@@ -5662,6 +6278,54 @@ private final class TranslationMockURLProtocol: URLProtocol, @unchecked Sendable
 
         return responses[url]
     }
+}
+
+private final class CloudTranslationMockURLProtocol: URLProtocol, @unchecked Sendable {
+    typealias RequestHandler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
+
+    static let handlerHeader = "x-cloud-translation-test-handler"
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var handlers: [String: RequestHandler] = [:]
+
+    static func register(
+        _ handler: @escaping RequestHandler,
+        for handlerID: String
+    ) {
+        lock.withLock {
+            handlers[handlerID] = handler
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "cloud-translation.example.com"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let handlerID = request.value(
+            forHTTPHeaderField: Self.handlerHeader
+        ),
+              let handler = Self.lock.withLock({
+                  Self.handlers[handlerID]
+              }) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
 }
 
 private final class MutableImageDataBox: @unchecked Sendable {

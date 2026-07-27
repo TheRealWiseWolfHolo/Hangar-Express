@@ -7,9 +7,18 @@ struct HangarTranslatedText: View {
     var allowsOnDeviceTranslation = true
     var allowsOnDemandTranslation = false
 
+    @AppStorage(HangarItemTranslationMissMode.storageKey)
+    private var itemTranslationMissModeRawValue = HangarItemTranslationMissMode.onDevice.rawValue
     @State private var translationService = OnDeviceHangarItemTranslationService.shared
     @State private var onDemandTranslation: String?
     @State private var onDemandTranslationIdentity: String?
+
+    private var allowsEffectiveOnDeviceTranslation: Bool {
+        allowsOnDeviceTranslation
+            && HangarItemTranslationMissMode.resolved(
+                from: itemTranslationMissModeRawValue
+            ) == .onDevice
+    }
 
     private var translationIdentity: String {
         [
@@ -21,7 +30,7 @@ struct HangarTranslatedText: View {
     }
 
     private var displayText: String {
-        guard allowsOnDeviceTranslation else {
+        guard allowsEffectiveOnDeviceTranslation else {
             return itemTranslator.translated(source)
         }
 
@@ -46,11 +55,13 @@ struct HangarTranslatedText: View {
     }
 
     private var onDemandTaskID: String {
-        allowsOnDemandTranslation ? translationIdentity : "disabled"
+        allowsEffectiveOnDeviceTranslation && allowsOnDemandTranslation
+            ? translationIdentity
+            : "disabled"
     }
 
     private func loadOnDemandTranslationIfNeeded() async {
-        guard allowsOnDeviceTranslation, allowsOnDemandTranslation else {
+        guard allowsEffectiveOnDeviceTranslation, allowsOnDemandTranslation else {
             onDemandTranslation = nil
             onDemandTranslationIdentity = nil
             return

@@ -11,6 +11,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
+    @AppStorage(HangarItemTranslationMissMode.storageKey) private var itemTranslationMissModeRawValue = HangarItemTranslationMissMode.onDevice.rawValue
     @AppStorage(AppAppearance.storageKey) private var appAppearanceRawValue = AppAppearance.system.rawValue
     @AppStorage(SyncPreferences.workerCountKey) private var syncWorkerCount = Double(SyncPreferences.defaultWorkerCount)
     @AppStorage(SyncPreferences.inventoryAutoRefreshIntervalKey) private var inventoryAutoRefreshIntervalRawValue = SyncPreferences.defaultInventoryAutoRefreshInterval.rawValue
@@ -61,6 +62,28 @@ struct SettingsView: View {
                     .pickerStyle(.menu)
                     .onChange(of: hangarItemLanguageRawValue) { _, _ in
                         appModel.requestItemTranslationPreprocessingForCurrentSnapshot()
+                    }
+
+                    if CloudHangarItemTranslationRollout.isEnabled,
+                       HangarItemLanguage.resolved(
+                           from: hangarItemLanguageRawValue
+                       ) == .simplifiedChinese {
+                        Picker(
+                            "Missing Translations",
+                            selection: $itemTranslationMissModeRawValue
+                        ) {
+                            Text("On Device")
+                                .tag(HangarItemTranslationMissMode.onDevice.rawValue)
+                            Text("Cloud Review")
+                                .tag(HangarItemTranslationMissMode.cloudReview.rawValue)
+                        }
+                        .pickerStyle(.menu)
+                        .onChange(of: itemTranslationMissModeRawValue) { _, _ in
+                            let mode = HangarItemTranslationMissMode(
+                                rawValue: itemTranslationMissModeRawValue
+                            ) ?? .onDevice
+                            appModel.selectItemTranslationMissMode(mode)
+                        }
                     }
 
                     Picker("Appearance", selection: $appAppearanceRawValue) {
@@ -303,6 +326,22 @@ struct SettingsView: View {
             } message: {
                 Text("Clearing translation cache removes the hosted item translation dictionary and saved on-device translations. Your hangar snapshots, images, accounts, cookies, and credentials are not affected.")
             }
+            .alert(item: itemTranslationModePromptBinding) { prompt in
+                Alert(
+                    title: Text(prompt.title),
+                    message: Text(prompt.message),
+                    primaryButton: .default(Text(prompt.onDeviceActionTitle)) {
+                        itemTranslationMissModeRawValue =
+                            HangarItemTranslationMissMode.onDevice.rawValue
+                        appModel.selectItemTranslationMissMode(.onDevice)
+                    },
+                    secondaryButton: .default(Text(prompt.onlineActionTitle)) {
+                        itemTranslationMissModeRawValue =
+                            HangarItemTranslationMissMode.cloudReview.rawValue
+                        appModel.selectItemTranslationMissMode(.cloudReview)
+                    }
+                )
+            }
             .sheet(isPresented: $isShowingProPlans) {
                 ProPlansSheet(
                     subscriptionStore: appModel.subscriptionStore,
@@ -311,6 +350,13 @@ struct SettingsView: View {
                     .presentationDetents([.medium, .large])
             }
         }
+    }
+
+    private var itemTranslationModePromptBinding: Binding<AppModel.ItemTranslationModePrompt?> {
+        Binding(
+            get: { appModel.itemTranslationModePrompt },
+            set: { _ in }
+        )
     }
 
     private var translationLoadingBarPreviewBinding: Binding<Bool> {

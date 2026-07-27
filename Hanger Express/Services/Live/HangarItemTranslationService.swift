@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 nonisolated struct HostedHangarItemTranslationClient: Sendable {
@@ -31,13 +32,28 @@ nonisolated struct HostedHangarItemTranslationClient: Sendable {
             do {
                 let (data, response) = try await urlSession.data(for: Self.makeRequest(for: url))
 
-                if let httpResponse = response as? HTTPURLResponse,
-                   !(200 ..< 300).contains(httpResponse.statusCode) {
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw HostedShipCatalogError.invalidItemTranslationFeed(
+                        "The translation feed did not return an HTTP response."
+                    )
+                }
+                if !(200 ..< 300).contains(httpResponse.statusCode) {
                     throw HostedShipCatalogError.httpStatus(httpResponse.statusCode)
                 }
 
+                let dictionary = try Self.decodeDictionary(
+                    from: data,
+                    expectedLocale: expectedLocale
+                )
+                try Self.verifyResponseMetadata(
+                    data: data,
+                    response: httpResponse,
+                    dictionary: dictionary,
+                    requiresMetadata: url.host
+                        == HostedShipFeedEndpoints.cloudTranslationBaseURL.host
+                )
                 return FetchedDictionary(
-                    dictionary: try Self.decodeDictionary(from: data, expectedLocale: expectedLocale),
+                    dictionary: dictionary,
                     data: data
                 )
             } catch {
@@ -74,6 +90,68 @@ nonisolated struct HostedHangarItemTranslationClient: Sendable {
             },
             expectedLocale: expectedLocale
         )
+    }
+
+    static func verifyResponseMetadata(
+        data: Data,
+        response: HTTPURLResponse,
+        dictionary: HangarItemTranslationDictionary,
+        requiresMetadata: Bool
+    ) throws {
+        let checksum = response.value(
+            forHTTPHeaderField: "x-content-sha256"
+        )?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let version = response.value(
+            forHTTPHeaderField: "x-dictionary-version"
+        )?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let count = response.value(
+            forHTTPHeaderField: "x-dictionary-entry-count"
+        )?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let entityTag = response.value(
+            forHTTPHeaderField: "etag"
+        )?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if requiresMetadata,
+           checksum == nil || version == nil || count == nil || entityTag == nil {
+            throw HostedShipCatalogError.invalidItemTranslationFeed(
+                "The Remote translation feed is missing integrity metadata."
+            )
+        }
+
+        if let checksum {
+            let actualChecksum = SHA256.hash(data: data)
+                .map { String(format: "%02x", $0) }
+                .joined()
+            guard checksum.count == 64,
+                  checksum == checksum.lowercased(),
+                  checksum.allSatisfy(\.isHexDigit),
+                  checksum == actualChecksum else {
+                throw HostedShipCatalogError.invalidItemTranslationFeed(
+                    "The translation feed checksum does not match its body."
+                )
+            }
+        }
+        if let version {
+            guard Int(version) == dictionary.version else {
+                throw HostedShipCatalogError.invalidItemTranslationFeed(
+                    "The translation feed version header does not match its body."
+                )
+            }
+        }
+        if let count {
+            guard Int(count) == dictionary.entries.count else {
+                throw HostedShipCatalogError.invalidItemTranslationFeed(
+                    "The translation feed entry-count header does not match its body."
+                )
+            }
+        }
+        if let entityTag {
+            guard !entityTag.isEmpty, entityTag.count <= 256 else {
+                throw HostedShipCatalogError.invalidItemTranslationFeed(
+                    "The translation feed ETag is invalid."
+                )
+            }
+        }
     }
 
     private static func makeRequest(for url: URL) -> URLRequest {
