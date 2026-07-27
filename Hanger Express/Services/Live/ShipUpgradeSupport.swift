@@ -1154,6 +1154,9 @@ nonisolated struct HostedLimitedShipSaleClient: Sendable {
 public nonisolated enum HostedShipFeedEndpoints {
     public static let primaryBaseURL = URL(string: "https://starcitizen-info.pages.dev")!
     public static let fallbackBaseURL = URL(string: "https://therealwisewolfholo.github.io/StarCitizen-Info")!
+    static let cloudTranslationBaseURL = URL(
+        string: "https://hangar-express-translations.liuchen2004.workers.dev"
+    )!
 
     public static let catalogURLs: [URL] = [
         primaryBaseURL.appendingPathComponent("ships.json"),
@@ -1181,6 +1184,9 @@ public nonisolated enum HostedShipFeedEndpoints {
         }
 
         return [
+            cloudTranslationBaseURL
+                .appendingPathComponent("item-translations")
+                .appendingPathComponent("\(locale).json"),
             primaryBaseURL
                 .appendingPathComponent("item-translations")
                 .appendingPathComponent("\(locale).json"),
