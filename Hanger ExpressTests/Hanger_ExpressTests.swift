@@ -4538,6 +4538,22 @@ struct Hanger_ExpressTests {
         #expect(FleetRoleFormatter.summary(type: nil, focus: "Light Freight / Starter") == "Light Freight | Starter")
     }
 
+    @Test func fleetRoleTranslationSplitsColonSeparatedPhrases() {
+        #expect(
+            HangarTranslationPhraseParser.colonSeparatedPhrases(
+                in: "Combat: Heavy Tank"
+            ) == ["Combat", "Heavy Tank"]
+        )
+        #expect(
+            HangarTranslationPhraseParser.colonSeparatedPhrases(
+                in: " Combat : Heavy Tank: Assault "
+            ) == ["Combat", "Heavy Tank: Assault"]
+        )
+        #expect(HangarTranslationPhraseParser.colonSeparatedPhrases(in: "Combat") == nil)
+        #expect(HangarTranslationPhraseParser.colonSeparatedPhrases(in: ": Heavy Tank") == nil)
+        #expect(HangarTranslationPhraseParser.colonSeparatedPhrases(in: "Combat: ") == nil)
+    }
+
     @Test func fleetPresentationFormatterNormalizesLegacySlashRoleStringsAndShortManufacturers() async throws {
         #expect(
             FleetPresentationFormatter.roleSummary(
