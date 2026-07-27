@@ -3213,33 +3213,7 @@ struct Hanger_ExpressTests {
     }
 
     @Test func cloudTranslationClassifierIncludesOnlyStructuredCatalogFields() throws {
-        #expect(!CloudHangarItemTranslationRollout.isEnabled)
-        #expect(
-            !HangarItemTranslationMissMode.needsUserSelection(
-                for: .simplifiedChinese,
-                hasRecordedSelection: false
-            )
-        )
-        #expect(
-            HangarItemTranslationMissMode.needsUserSelection(
-                for: .simplifiedChinese,
-                hasRecordedSelection: false,
-                rolloutEnabled: true
-            )
-        )
-        #expect(
-            !HangarItemTranslationMissMode.needsUserSelection(
-                for: .simplifiedChinese,
-                hasRecordedSelection: true,
-                rolloutEnabled: true
-            )
-        )
-        #expect(
-            !HangarItemTranslationMissMode.needsUserSelection(
-                for: .original,
-                hasRecordedSelection: false
-            )
-        )
+        #expect(CloudHangarItemTranslationRollout.isEnabled)
 
         let sourceSnapshot = PreviewHangarRepository.sampleSnapshot
         let snapshot = HangarSnapshot(
@@ -3319,17 +3293,17 @@ struct Hanger_ExpressTests {
         #expect(!candidates.map(\.source).contains(packageTitle))
     }
 
-    @Test func cloudTranslationMissModeIsMigrationSafeWhileRolloutIsDisabled() {
+    @Test func cloudTranslationMissModeHonorsRolloutAndDefaultsLocal() {
         #expect(
             HangarItemTranslationMissMode.resolved(
                 from: HangarItemTranslationMissMode.cloudReview.rawValue
-            ) == .onDevice
+            ) == .cloudReview
         )
         #expect(
             HangarItemTranslationMissMode.resolved(
                 from: HangarItemTranslationMissMode.cloudReview.rawValue,
-                rolloutEnabled: true
-            ) == .cloudReview
+                rolloutEnabled: false
+            ) == .onDevice
         )
         #expect(
             HangarItemTranslationMissMode.resolved(

@@ -64,28 +64,6 @@ struct SettingsView: View {
                         appModel.requestItemTranslationPreprocessingForCurrentSnapshot()
                     }
 
-                    if CloudHangarItemTranslationRollout.isEnabled,
-                       HangarItemLanguage.resolved(
-                           from: hangarItemLanguageRawValue
-                       ) == .simplifiedChinese {
-                        Picker(
-                            "Missing Translations",
-                            selection: $itemTranslationMissModeRawValue
-                        ) {
-                            Text("On Device")
-                                .tag(HangarItemTranslationMissMode.onDevice.rawValue)
-                            Text("Cloud Review")
-                                .tag(HangarItemTranslationMissMode.cloudReview.rawValue)
-                        }
-                        .pickerStyle(.menu)
-                        .onChange(of: itemTranslationMissModeRawValue) { _, _ in
-                            let mode = HangarItemTranslationMissMode(
-                                rawValue: itemTranslationMissModeRawValue
-                            ) ?? .onDevice
-                            appModel.selectItemTranslationMissMode(mode)
-                        }
-                    }
-
                     Picker("Appearance", selection: $appAppearanceRawValue) {
                         ForEach(AppAppearance.allCases) { appearance in
                             appearance.label
@@ -95,6 +73,44 @@ struct SettingsView: View {
                     .pickerStyle(.menu)
                 } header: {
                     Text("Display")
+                }
+
+                if CloudHangarItemTranslationRollout.isEnabled,
+                   HangarItemLanguage.resolved(
+                       from: hangarItemLanguageRawValue
+                   ) == .simplifiedChinese {
+                    Section {
+                        Picker(
+                            "Translation Mode",
+                            selection: $itemTranslationMissModeRawValue
+                        ) {
+                            Text("Local")
+                                .tag(HangarItemTranslationMissMode.onDevice.rawValue)
+                            Text("Cloud")
+                                .tag(HangarItemTranslationMissMode.cloudReview.rawValue)
+                        }
+                        .pickerStyle(.menu)
+                        .onChange(of: itemTranslationMissModeRawValue) { _, _ in
+                            let mode = HangarItemTranslationMissMode(
+                                rawValue: itemTranslationMissModeRawValue
+                            ) ?? .onDevice
+                            appModel.selectItemTranslationMissMode(mode)
+                        }
+                    } header: {
+                        Text("Item Translation")
+                    } footer: {
+                        if HangarItemTranslationMissMode.resolved(
+                            from: itemTranslationMissModeRawValue
+                        ) == .cloudReview {
+                            Text(
+                                "Cloud mode sends only missing public catalog terms—such as ship, package, item, manufacturer, role, paint, insurance, and upgrade names—to Hangar Express's Cloudflare service for translation review. It never sends RSI credentials or cookies, account or email details, pledge IDs, prices, buyback notes, hangar logs, raw page content, or text you enter. New terms remain in English until reviewed and published."
+                            )
+                        } else {
+                            Text(
+                                "Both modes download the approved hosted dictionary. Local mode uses Apple's on-device translation model for missing terms and does not send those terms to the Hangar Express translation service."
+                            )
+                        }
+                    }
                 }
 
                 Section {
@@ -326,22 +342,6 @@ struct SettingsView: View {
             } message: {
                 Text("Clearing translation cache removes the hosted item translation dictionary and saved on-device translations. Your hangar snapshots, images, accounts, cookies, and credentials are not affected.")
             }
-            .alert(item: itemTranslationModePromptBinding) { prompt in
-                Alert(
-                    title: Text(prompt.title),
-                    message: Text(prompt.message),
-                    primaryButton: .default(Text(prompt.onDeviceActionTitle)) {
-                        itemTranslationMissModeRawValue =
-                            HangarItemTranslationMissMode.onDevice.rawValue
-                        appModel.selectItemTranslationMissMode(.onDevice)
-                    },
-                    secondaryButton: .default(Text(prompt.onlineActionTitle)) {
-                        itemTranslationMissModeRawValue =
-                            HangarItemTranslationMissMode.cloudReview.rawValue
-                        appModel.selectItemTranslationMissMode(.cloudReview)
-                    }
-                )
-            }
             .sheet(isPresented: $isShowingProPlans) {
                 ProPlansSheet(
                     subscriptionStore: appModel.subscriptionStore,
@@ -350,13 +350,6 @@ struct SettingsView: View {
                     .presentationDetents([.medium, .large])
             }
         }
-    }
-
-    private var itemTranslationModePromptBinding: Binding<AppModel.ItemTranslationModePrompt?> {
-        Binding(
-            get: { appModel.itemTranslationModePrompt },
-            set: { _ in }
-        )
     }
 
     private var translationLoadingBarPreviewBinding: Binding<Bool> {

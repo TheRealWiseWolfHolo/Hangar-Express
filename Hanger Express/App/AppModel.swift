@@ -357,28 +357,6 @@ final class AppModel {
         }
     }
 
-    struct ItemTranslationModePrompt: Identifiable {
-        let id = UUID()
-
-        var title: String {
-            AppLocalizer.string("Choose Translation Mode")
-        }
-
-        var message: String {
-            AppLocalizer.string(
-                "Choose how Hangar Express handles Simplified Chinese item terms missing from the verified online dictionary. On Device uses Apple's downloaded translation model. Online sends only eligible public catalog terms for review; unknown terms remain in English until approved."
-            )
-        }
-
-        var onDeviceActionTitle: String {
-            AppLocalizer.string("On Device")
-        }
-
-        var onlineActionTitle: String {
-            AppLocalizer.string("Online")
-        }
-    }
-
     struct ItemTranslationPreloadProgress: Equatable {
         enum Phase: Equatable {
             case preparing
@@ -672,7 +650,6 @@ final class AppModel {
     var authenticationFlowID = UUID()
     var reauthenticationPrompt: ReauthenticationPrompt?
     var versionRefreshPrompt: VersionRefreshPrompt?
-    var itemTranslationModePrompt: ItemTranslationModePrompt?
     var itemTranslationPreprocessPrompt: ItemTranslationPreprocessPrompt?
     var itemTranslationPreloadProgress: ItemTranslationPreloadProgress?
     var itemTranslationPreloadLogEntries: [ItemTranslationPreloadLogEntry] = []
@@ -862,8 +839,6 @@ final class AppModel {
 
     func selectItemTranslationMissMode(_ mode: HangarItemTranslationMissMode) {
         userDefaults.set(mode.rawValue, forKey: HangarItemTranslationMissMode.storageKey)
-        userDefaults.set(true, forKey: HangarItemTranslationMissMode.userSelectedStorageKey)
-        itemTranslationModePrompt = nil
         itemTranslationPreprocessPrompt = nil
 
         guard let snapshot else {
@@ -1427,38 +1402,10 @@ final class AppModel {
             itemTranslationPreloadProgressDismissalTask = nil
             itemTranslationPreloadProgress = nil
             resetItemTranslationPreloadLogs()
-            itemTranslationModePrompt = nil
             itemTranslationPreprocessPrompt = nil
             clearPendingItemTranslationPreload()
             return
         }
-
-        if HangarItemTranslationMissMode.needsUserSelection(
-            for: language,
-            hasRecordedSelection: userDefaults.bool(
-                forKey: HangarItemTranslationMissMode.userSelectedStorageKey
-            )
-        ) {
-            itemTranslationPreloadTask?.cancel()
-            itemTranslationPreloadTask = nil
-            itemTranslationPreloadGeneration &+= 1
-            itemTranslationPreloadStallTask?.cancel()
-            itemTranslationPreloadStallTask = nil
-            itemTranslationPreloadProgressDismissalTask?.cancel()
-            itemTranslationPreloadProgressDismissalTask = nil
-            itemTranslationPreloadProgress = nil
-            itemTranslationPreprocessPrompt = nil
-            resetItemTranslationPreloadLogs()
-            appendItemTranslationPreloadLog(
-                "Waiting for the user to choose an item translation mode."
-            )
-            if itemTranslationModePrompt == nil {
-                itemTranslationModePrompt = ItemTranslationModePrompt()
-            }
-            return
-        }
-
-        itemTranslationModePrompt = nil
 
         guard !suspendedItemTranslationAutoPreloadLanguages.contains(language) else {
             appendItemTranslationPreloadLog("Automatic translation preload skipped while waiting for cache-clear rebuild confirmation.")
