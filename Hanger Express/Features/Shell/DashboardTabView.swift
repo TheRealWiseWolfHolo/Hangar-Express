@@ -121,18 +121,6 @@ struct DashboardTabView: View {
         } message: {
             Text("The refresh diagnostics log was copied to the clipboard so the tester can send it to you.")
         }
-        .alert(item: itemTranslationModePromptBinding) { prompt in
-            Alert(
-                title: Text(prompt.title),
-                message: Text(prompt.message),
-                primaryButton: .default(Text(prompt.onDeviceActionTitle)) {
-                    appModel.selectItemTranslationMissMode(.onDevice)
-                },
-                secondaryButton: .default(Text(prompt.onlineActionTitle)) {
-                    appModel.selectItemTranslationMissMode(.cloudReview)
-                }
-            )
-        }
         .alert(item: itemTranslationPreprocessPromptBinding) { prompt in
             Alert(
                 title: Text(prompt.title),
@@ -202,13 +190,6 @@ struct DashboardTabView: View {
                     appModel.dismissItemTranslationPreprocessPrompt()
                 }
             }
-        )
-    }
-
-    private var itemTranslationModePromptBinding: Binding<AppModel.ItemTranslationModePrompt?> {
-        Binding(
-            get: { appModel.itemTranslationModePrompt },
-            set: { _ in }
         )
     }
 

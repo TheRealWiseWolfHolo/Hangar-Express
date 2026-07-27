@@ -1,9 +1,9 @@
 import Foundation
 
 nonisolated enum CloudHangarItemTranslationRollout {
-    // The implementation remains available for a later explicit rollout, but
-    // the app must not prompt for or submit cloud translation misses yet.
-    static let isEnabled = false
+    // Cloud submission is opt-in from Settings. Existing and invalid
+    // preferences continue to resolve to the on-device mode.
+    static let isEnabled = true
 }
 
 nonisolated enum HangarItemTranslationMissMode: String, CaseIterable, Sendable {
@@ -11,7 +11,6 @@ nonisolated enum HangarItemTranslationMissMode: String, CaseIterable, Sendable {
     case cloudReview
 
     static let storageKey = "hangar.itemTranslation.missMode"
-    static let userSelectedStorageKey = "hangar.itemTranslation.missMode.userSelected"
 
     static func resolved(
         from rawValue: String,
@@ -21,16 +20,6 @@ nonisolated enum HangarItemTranslationMissMode: String, CaseIterable, Sendable {
             return .onDevice
         }
         return Self(rawValue: rawValue) ?? .onDevice
-    }
-
-    static func needsUserSelection(
-        for language: HangarItemLanguage,
-        hasRecordedSelection: Bool,
-        rolloutEnabled: Bool = CloudHangarItemTranslationRollout.isEnabled
-    ) -> Bool {
-        rolloutEnabled
-            && language == .simplifiedChinese
-            && !hasRecordedSelection
     }
 }
 
