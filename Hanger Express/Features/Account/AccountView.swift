@@ -185,7 +185,10 @@ struct AccountView: View {
             .sheet(item: $presentedTool) { tool in
                 switch tool {
                 case .allShips:
-                    AllShipsBrowserView(reloadToken: appModel.hangarFleetImageReloadToken)
+                    AllShipsBrowserView(
+                        reloadToken: appModel.hangarFleetImageReloadToken,
+                        itemTranslationDictionaryRefreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
+                    )
                 case .wbccuDeals:
                     WBCCUDealsView(
                         appModel: appModel,

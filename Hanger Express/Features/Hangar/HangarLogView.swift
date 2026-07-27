@@ -289,7 +289,9 @@ struct HangarLogView: View {
             .task {
                 await runPresentationSynchronizationLoop()
             }
-            .task(id: hangarItemLanguageRawValue) {
+            .task(
+                id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
+            ) {
                 await loadItemTranslationDictionary()
             }
             .onChange(of: hangarLogs.count) { _, newCount in
@@ -317,7 +319,10 @@ struct HangarLogView: View {
     }
 
     private func loadItemTranslationDictionary() async {
-        await itemTranslationState.loadDictionary(for: hangarItemLanguageRawValue)
+        await itemTranslationState.loadDictionary(
+            for: hangarItemLanguageRawValue,
+            refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
+        )
     }
 
     @MainActor

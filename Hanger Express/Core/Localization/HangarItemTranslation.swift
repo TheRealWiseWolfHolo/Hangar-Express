@@ -560,8 +560,9 @@ nonisolated struct MaskedHangarItemText: Equatable, Sendable {
 @MainActor
 @Observable
 final class HangarItemTranslationViewState {
-    private var dictionary: HangarItemTranslationDictionary?
+    private(set) var dictionary: HangarItemTranslationDictionary?
     private var loadedRawValue: String?
+    private var loadedRefreshGeneration = -1
     private var requestedRawValue: String?
 
     func translator(for rawValue: String) -> HangarItemTranslator {
@@ -572,8 +573,12 @@ final class HangarItemTranslationViewState {
         )
     }
 
-    func loadDictionary(for rawValue: String) async {
-        guard loadedRawValue != rawValue else {
+    func loadDictionary(
+        for rawValue: String,
+        refreshGeneration: Int = 0
+    ) async {
+        guard loadedRawValue != rawValue
+                || loadedRefreshGeneration != refreshGeneration else {
             return
         }
 
@@ -583,6 +588,7 @@ final class HangarItemTranslationViewState {
         guard language.translationLocaleIdentifier != nil else {
             dictionary = nil
             loadedRawValue = rawValue
+            loadedRefreshGeneration = refreshGeneration
             return
         }
 
@@ -597,5 +603,31 @@ final class HangarItemTranslationViewState {
 
         dictionary = loadedDictionary
         loadedRawValue = rawValue
+        loadedRefreshGeneration = refreshGeneration
+    }
+
+    @discardableResult
+    func refreshDictionary(for rawValue: String) async throws -> HangarItemTranslationDictionary {
+        let language = HangarItemLanguage.resolved(from: rawValue)
+        guard language.translationLocaleIdentifier != nil else {
+            throw HostedShipCatalogError.invalidItemTranslationFeed(
+                "Original item language does not have a remote feed."
+            )
+        }
+
+        requestedRawValue = rawValue
+        let refreshedDictionary = try await HostedHangarItemTranslationStore.shared
+            .refreshDictionary(
+                for: language,
+                using: HostedHangarItemTranslationClient(language: language)
+            )
+
+        guard requestedRawValue == rawValue else {
+            return refreshedDictionary
+        }
+
+        dictionary = refreshedDictionary
+        loadedRawValue = rawValue
+        return refreshedDictionary
     }
 }
