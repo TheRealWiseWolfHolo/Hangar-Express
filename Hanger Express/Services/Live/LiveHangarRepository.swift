@@ -5135,10 +5135,15 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         try await prepareWebView(with: cookies)
         try await load(url: url)
 
+        let nativeAuthentication = Self.deviceManagementAuthenticationArguments(
+            from: cookies + (await currentRSICookies())
+        )
         let result = try await evaluate(
             script: Self.authorizedDevicesExtractionScript,
             arguments: [
-                "currentPassword": password ?? ""
+                "currentPassword": password ?? "",
+                "nativeRsiToken": nativeAuthentication.rsiToken,
+                "nativeRsiDevice": nativeAuthentication.rsiDevice
             ],
             as: RemoteAuthorizedDevicesLookup.self
         )
@@ -5169,12 +5174,17 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         try await prepareWebView(with: cookies)
         try await load(url: url)
 
+        let nativeAuthentication = Self.deviceManagementAuthenticationArguments(
+            from: cookies + (await currentRSICookies())
+        )
         let result = try await evaluate(
             script: Self.removeAuthorizedDeviceScript,
             arguments: [
                 "deviceID": device.id,
                 "deviceName": device.displayName,
-                "currentPassword": password ?? ""
+                "currentPassword": password ?? "",
+                "nativeRsiToken": nativeAuthentication.rsiToken,
+                "nativeRsiDevice": nativeAuthentication.rsiDevice
             ],
             as: RemoteAuthorizedDeviceRemoval.self
         )
@@ -5213,11 +5223,16 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
                 "name": device.displayName
             ]
         }
+        let nativeAuthentication = Self.deviceManagementAuthenticationArguments(
+            from: cookies + (await currentRSICookies())
+        )
         let result = try await evaluate(
             script: Self.removeAuthorizedDevicesScript,
             arguments: [
                 "devicesToRemove": devicePayload,
-                "currentPassword": password ?? ""
+                "currentPassword": password ?? "",
+                "nativeRsiToken": nativeAuthentication.rsiToken,
+                "nativeRsiDevice": nativeAuthentication.rsiDevice
             ],
             as: RemoteAuthorizedDeviceBulkRemoval.self
         )
@@ -5235,6 +5250,27 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
                 .nilIfEmpty ?? "RSI did not remove the selected authorized devices."
             throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
         }
+    }
+
+    nonisolated static func deviceManagementAuthenticationArguments(
+        from cookies: [SessionCookie],
+        now: Date = .now
+    ) -> (rsiToken: String, rsiDevice: String) {
+        // RSI launcher sessions store these values as HttpOnly cookies. WKWebView sends
+        // them automatically, but document.cookie cannot expose them to the fetch script.
+        let value: ([String]) -> String = { names in
+            let acceptedNames = Set(names.map { $0.lowercased() })
+            return cookies.reversed().first { cookie in
+                acceptedNames.contains(cookie.name.lowercased()) &&
+                    !(cookie.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) &&
+                    (cookie.expiresAt.map { $0 > now } ?? true)
+            }?.value ?? ""
+        }
+
+        return (
+            rsiToken: value(["Rsi-Token", "rsi-token"]),
+            rsiDevice: value(["_rsi_device"])
+        )
     }
 
     fileprivate func currentRSICookies() async -> [SessionCookie] {
@@ -9795,10 +9831,22 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     private static let authorizedDevicesExtractionScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
     const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
+    const nativeRsiTokenValue = typeof nativeRsiToken === 'string' ? nativeRsiToken : '';
+    const nativeRsiDeviceValue = typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '';
     const cookieValue = (name) => {
       const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
       const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
       return match ? decodeURIComponent(match[1]) : '';
+    };
+    const isAuthenticationFailure = (payload, responseText) => {
+      const raw = normalizeText([
+        payload?.code,
+        payload?.msg,
+        payload?.message,
+        responseText
+      ].filter(Boolean).join(' ')).toLowerCase();
+      return raw.includes('errnotauthenticated') ||
+        raw.includes('must be authenticated to reach this area');
     };
     const isPasswordConfirmationRequired = (payload, responseText) => {
       const raw = normalizeText([
@@ -9831,8 +9879,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || nativeRsiTokenValue;
+    const rsiDevice = cookieValue('_rsi_device') || nativeRsiDeviceValue;
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -9953,7 +10001,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       }
       lastResponsePreview = normalizeText(responseText).slice(0, 280);
 
-      if (response.status === 401 || response.status === 403) {
+      if (response.status === 401 || response.status === 403 || isAuthenticationFailure(payload, responseText)) {
         return {
           accessDenied: true,
           status: 'access-denied',
@@ -10028,10 +10076,22 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     private static let removeAuthorizedDeviceScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
     const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
+    const nativeRsiTokenValue = typeof nativeRsiToken === 'string' ? nativeRsiToken : '';
+    const nativeRsiDeviceValue = typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '';
     const cookieValue = (name) => {
       const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
       const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
       return match ? decodeURIComponent(match[1]) : '';
+    };
+    const isAuthenticationFailure = (payload, responseText) => {
+      const raw = normalizeText([
+        payload?.code,
+        payload?.msg,
+        payload?.message,
+        responseText
+      ].filter(Boolean).join(' ')).toLowerCase();
+      return raw.includes('errnotauthenticated') ||
+        raw.includes('must be authenticated to reach this area');
     };
     const isPasswordConfirmationRequired = (payload, responseText) => {
       const raw = normalizeText([
@@ -10068,8 +10128,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || nativeRsiTokenValue;
+    const rsiDevice = cookieValue('_rsi_device') || nativeRsiDeviceValue;
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -10159,7 +10219,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     let didConfirmPassword = false;
     let passwordConfirmationDebug = '';
 
-    if (response.status === 401 || response.status === 403) {
+    if (response.status === 401 || response.status === 403 || isAuthenticationFailure(payload, responseText)) {
       return {
         accessDenied: true,
         status: 'access-denied',
@@ -10184,7 +10244,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         }
 
         ({ response, responseText, payload } = await postRemoval());
-        if (response.status === 401 || response.status === 403) {
+        if (response.status === 401 || response.status === 403 || isAuthenticationFailure(payload, responseText)) {
           return {
             accessDenied: true,
             status: 'access-denied',
@@ -10216,10 +10276,22 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     private static let removeAuthorizedDevicesScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
     const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
+    const nativeRsiTokenValue = typeof nativeRsiToken === 'string' ? nativeRsiToken : '';
+    const nativeRsiDeviceValue = typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '';
     const cookieValue = (name) => {
       const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
       const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
       return match ? decodeURIComponent(match[1]) : '';
+    };
+    const isAuthenticationFailure = (payload, responseText) => {
+      const raw = normalizeText([
+        payload?.code,
+        payload?.msg,
+        payload?.message,
+        responseText
+      ].filter(Boolean).join(' ')).toLowerCase();
+      return raw.includes('errnotauthenticated') ||
+        raw.includes('must be authenticated to reach this area');
     };
     const isPasswordConfirmationRequired = (payload, responseText) => {
       const raw = normalizeText([
@@ -10266,8 +10338,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || nativeRsiTokenValue;
+    const rsiDevice = cookieValue('_rsi_device') || nativeRsiDeviceValue;
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -10359,7 +10431,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     for (const device of targetDevices) {
       let { response, responseText, payload } = await postRemoval(device);
-      if (response.status === 401 || response.status === 403) {
+      if (response.status === 401 || response.status === 403 || isAuthenticationFailure(payload, responseText)) {
         return {
           accessDenied: true,
           status: 'access-denied',
@@ -10387,7 +10459,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         }
 
         ({ response, responseText, payload } = await postRemoval(device));
-        if (response.status === 401 || response.status === 403) {
+        if (response.status === 401 || response.status === 403 || isAuthenticationFailure(payload, responseText)) {
           return {
             accessDenied: true,
             status: 'access-denied',

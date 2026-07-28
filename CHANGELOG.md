@@ -31,6 +31,7 @@
 ### Fixed
 - Fixed tool reordering so the selected icon follows the drag while surrounding icons animate into place, instead of lifting the entire Tools section.
 - Fixed the dragged tool remaining enlarged after release and removed animation lag from finger tracking. Tool tiles now grow throughout the full one-second hold, provide a haptic cue when reordering activates, use a scroll-cooperative recognizer before activation, and disable page scrolling while an icon is being dragged.
+- Fixed Logged-In Device Management for valid RSI sessions whose authentication cookies are HttpOnly by supplying the native session tokens to device requests, while treating RSI's HTTP 200 `ErrNotAuthenticated` response as an expired session that requires sign-in.
 
 ## v1.0.8 (In Progress)
 
