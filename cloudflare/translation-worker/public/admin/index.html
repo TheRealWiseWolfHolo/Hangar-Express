@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Translation Review · Hanger Express</title>
+    <link rel="stylesheet" href="/admin/admin.css?v=20260729.1">
+    <script type="module" src="/admin/admin.js?v=20260729.1"></script>
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">文</div>
+        <div>
+          <p class="eyebrow">Hanger Express</p>
+          <h1>Translation Review</h1>
+        </div>
+      </div>
+      <div class="session">
+        <span class="session-dot" aria-hidden="true"></span>
+        <span id="session-email">Checking Access session…</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="summary-grid" aria-label="Translation summary">
+        <article class="summary-card">
+          <span class="summary-label">Pending review</span>
+          <strong id="summary-pending">—</strong>
+          <span class="summary-note">Machine suggestions</span>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Approved</span>
+          <strong id="summary-approved">—</strong>
+          <span class="summary-note">Ready for publishing</span>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Edited</span>
+          <strong id="summary-edited">—</strong>
+          <span class="summary-note">Human corrections</span>
+        </article>
+        <article class="summary-card release-card">
+          <span class="summary-label">Dictionary state</span>
+          <strong id="summary-dictionary">—</strong>
+          <span id="summary-release" class="summary-note">Checking release state…</span>
+        </article>
+      </section>
+
+      <div id="error-banner" class="error-banner" role="alert" hidden></div>
+
+      <section class="ai-queue-panel" aria-labelledby="ai-queue-title">
+        <div class="ai-queue-heading">
+          <div>
+            <p class="eyebrow">Workers AI queue</p>
+            <h2 id="ai-queue-title">Failed translation retries</h2>
+          </div>
+          <button id="retry-failed-button" class="secondary-button" type="button" disabled>
+            Retry failed entries
+          </button>
+        </div>
+        <div class="ai-progress-row">
+          <progress id="ai-progress" value="0" max="1"></progress>
+          <strong id="ai-progress-count">Checking queue…</strong>
+        </div>
+        <p id="ai-progress-detail" class="ai-progress-detail">
+          Loading AI processing status…
+        </p>
+        <div class="ai-allowance">
+          <div class="ai-allowance-copy">
+            <span class="field-label">Today’s application allowance</span>
+            <div class="ai-progress-row">
+              <progress id="ai-allowance-progress" value="0" max="1"></progress>
+              <strong id="ai-allowance-count">Checking usage…</strong>
+            </div>
+            <p id="ai-allowance-detail" class="ai-progress-detail">
+              Loading request and character usage…
+            </p>
+          </div>
+          <button
+            id="reset-ai-allowance-button"
+            class="quiet-button compact"
+            type="button"
+            disabled
+          >
+            Reset daily allowance
+          </button>
+        </div>
+      </section>
+
+      <section class="release-panel" aria-labelledby="release-title">
+        <div class="release-overview">
+          <div>
+            <p class="eyebrow">R2 release channel</p>
+            <h2 id="release-title">Dictionary publishing</h2>
+            <p id="release-description" class="release-description">
+              Loading verified release history…
+            </p>
+          </div>
+          <div class="publish-controls">
+            <label class="release-note-field">
+              <span>Release note</span>
+              <input
+                id="release-note-input"
+                type="text"
+                maxlength="240"
+                placeholder="Describe these changes"
+              >
+            </label>
+            <button id="publish-button" class="primary-button publish-button" type="button" disabled>
+              Publish changes
+            </button>
+          </div>
+        </div>
+        <div class="release-history-wrap">
+          <div class="release-history-heading">
+            <span class="field-label">Release history</span>
+            <span id="release-action-state" class="save-state" aria-live="polite"></span>
+          </div>
+          <div id="release-list" class="release-list"></div>
+        </div>
+        <section id="release-comparison" class="release-comparison" aria-labelledby="release-comparison-title" hidden>
+          <div class="release-comparison-heading">
+            <div>
+              <span class="field-label">Verified release diff</span>
+              <h3 id="release-comparison-title">Release comparison</h3>
+            </div>
+            <button id="close-comparison-button" class="quiet-button compact" type="button">
+              Close
+            </button>
+          </div>
+          <p id="release-comparison-summary" class="release-comparison-summary"></p>
+          <div id="release-comparison-list" class="release-comparison-list"></div>
+        </section>
+      </section>
+
+      <section id="review-workspace" class="workspace">
+        <aside class="queue-panel" aria-label="Translation queue">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Review queue</p>
+              <h2>Translations</h2>
+            </div>
+            <button id="refresh-button" class="quiet-button compact" type="button">
+              ↻ Full refresh
+            </button>
+          </div>
+
+          <form id="filter-form" class="filters" role="search">
+            <label class="search-field">
+              <span class="sr-only">Search source or translation</span>
+              <span aria-hidden="true">⌕</span>
+              <input id="search-input" type="search" maxlength="100" placeholder="Search source or translation">
+            </label>
+            <div class="filter-row">
+              <label>
+                <span class="sr-only">Status</span>
+                <select id="status-filter">
+                  <option value="pending">Pending</option>
+                  <option value="failed">Failed</option>
+                  <option value="approved">Approved</option>
+                  <option value="edited">Edited</option>
+                  <option value="rejected">Rejected</option>
+                  <option value="">All statuses</option>
+                </select>
+              </label>
+              <label>
+                <span class="sr-only">Kind</span>
+                <select id="kind-filter">
+                  <option value="">All kinds</option>
+                </select>
+              </label>
+            </div>
+          </form>
+
+          <div id="queue-status" class="queue-status" aria-live="polite">Loading queue…</div>
+          <div id="translation-list" class="translation-list"></div>
+          <button id="load-more-button" class="secondary-button load-more" type="button" hidden>
+            Load more
+          </button>
+        </aside>
+
+        <section class="detail-panel" aria-label="Translation detail">
+          <div id="empty-detail" class="empty-detail">
+            <div class="empty-mark" aria-hidden="true">译</div>
+            <h2>Select a translation</h2>
+            <p>Choose an entry from the queue to inspect its source, suggestion, aliases, and review history.</p>
+          </div>
+
+          <div id="detail-content" hidden>
+            <div class="detail-heading">
+              <div>
+                <div class="detail-badges">
+                  <span id="detail-status" class="status-badge"></span>
+                  <span id="detail-kind" class="kind-badge"></span>
+                  <span id="detail-origin" class="origin-badge"></span>
+                </div>
+                <h2 id="detail-source"></h2>
+                <p id="detail-normalized" class="normalized-source"></p>
+              </div>
+              <button id="copy-source-button" class="secondary-button compact" type="button">
+                Copy source
+              </button>
+            </div>
+
+            <div class="translation-comparison">
+              <article>
+                <span class="field-label">Machine suggestion</span>
+                <p id="detail-machine" lang="zh-Hans"></p>
+              </article>
+              <article class="approved-value">
+                <span class="field-label">Approved translation</span>
+                <p id="detail-approved" lang="zh-Hans"></p>
+              </article>
+            </div>
+
+            <section class="similar-card" aria-labelledby="similar-title">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">Reviewer reference</p>
+                  <h3 id="similar-title">Closest approved translations</h3>
+                </div>
+                <span class="summary-note">Up to 2 entries</span>
+              </div>
+              <div id="similar-list" class="similar-list"></div>
+            </section>
+
+            <section class="review-card" aria-labelledby="review-title">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">Reviewer decision</p>
+                  <h3 id="review-title">Approve or correct</h3>
+                </div>
+                <span id="save-state" class="save-state" aria-live="polite"></span>
+              </div>
+
+              <div class="review-editor-grid">
+                <div class="review-source-field">
+                  <span class="field-label">English original</span>
+                  <p id="review-source" class="review-source-copy" lang="en"></p>
+                </div>
+
+                <label class="edit-field">
+                  <span class="field-label">Chinese translation</span>
+                  <textarea id="translation-input" rows="3" maxlength="500" lang="zh-Hans"></textarea>
+                  <small><span id="translation-length">0</span>/500 characters</small>
+                </label>
+              </div>
+
+              <div class="action-row primary-actions">
+                <button id="approve-button" class="primary-button" type="button">Approve translation</button>
+                <button id="reject-button" class="danger-button" type="button">Reject</button>
+              </div>
+
+              <div class="defer-row">
+                <label>
+                  <span>Review later</span>
+                  <select id="defer-duration">
+                    <option value="1">Tomorrow</option>
+                    <option value="3">In 3 days</option>
+                    <option value="7">In 1 week</option>
+                    <option value="30">In 30 days</option>
+                  </select>
+                </label>
+                <button id="defer-button" class="quiet-button" type="button">Defer</button>
+              </div>
+            </section>
+
+            <div class="detail-columns">
+              <section class="info-card">
+                <div class="section-heading">
+                  <h3>Entry details</h3>
+                </div>
+                <dl id="entry-metadata" class="metadata"></dl>
+                <div class="alias-section">
+                  <span class="field-label">Aliases</span>
+                  <div id="alias-list" class="alias-list"></div>
+                </div>
+              </section>
+
+              <section class="info-card">
+                <div class="section-heading">
+                  <h3>Revision history</h3>
+                  <span id="revision-count" class="count-badge">0</span>
+                </div>
+                <ol id="revision-list" class="revision-list"></ol>
+              </section>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>
