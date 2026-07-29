@@ -885,7 +885,7 @@ select {
 
 .review-editor-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   margin: 18px 0 14px;
 }
@@ -1265,9 +1265,6 @@ button:disabled {
     margin-top: 16px;
   }
 
-  .review-editor-grid {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (max-width: 500px) {
