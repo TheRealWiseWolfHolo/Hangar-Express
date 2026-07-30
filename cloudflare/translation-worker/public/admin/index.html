@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
     <title>Translation Review · Hanger Express</title>
-    <link rel="stylesheet" href="/admin/admin.css?v=20260729.2">
-    <script type="module" src="/admin/admin.js?v=20260729.1"></script>
+    <link rel="stylesheet" href="/admin/admin.css?v=20260729.3">
+    <script type="module" src="/admin/admin.js?v=20260729.2"></script>
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -89,6 +89,61 @@
             Reset daily allowance
           </button>
         </div>
+      </section>
+
+      <section class="glossary-panel" aria-labelledby="glossary-title">
+        <div class="glossary-heading">
+          <div>
+            <p class="eyebrow">Approved terminology</p>
+            <h2 id="glossary-title">Add dictionary entry</h2>
+            <p class="glossary-description">
+              Save a reusable phrase and refresh every pending suggestion that contains it.
+            </p>
+          </div>
+          <span class="glossary-badge">Human approved</span>
+        </div>
+
+        <form id="glossary-form" class="glossary-form">
+          <div class="glossary-fields">
+            <label>
+              <span class="field-label">English phrase</span>
+              <input
+                id="glossary-source-input"
+                type="text"
+                maxlength="160"
+                autocomplete="off"
+                placeholder="C1 Spirit"
+                required
+              >
+            </label>
+            <label>
+              <span class="field-label">Chinese translation</span>
+              <input
+                id="glossary-translation-input"
+                type="text"
+                maxlength="500"
+                autocomplete="off"
+                lang="zh-Hans"
+                placeholder="星灵 C1"
+                required
+              >
+            </label>
+          </div>
+
+          <div class="glossary-impact">
+            <div>
+              <strong id="glossary-match-count">Enter an English phrase</strong>
+              <p id="glossary-match-detail">
+                Complete word and phrase boundaries are used when checking pending entries.
+              </p>
+            </div>
+            <button id="glossary-submit-button" class="primary-button" type="submit" disabled>
+              Add and apply
+            </button>
+          </div>
+          <div id="glossary-examples" class="glossary-examples" hidden></div>
+          <p id="glossary-action-state" class="save-state" aria-live="polite"></p>
+        </form>
       </section>
 
       <section class="release-panel" aria-labelledby="release-title">

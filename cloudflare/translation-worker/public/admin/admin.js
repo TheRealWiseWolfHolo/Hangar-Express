@@ -6,7 +6,7 @@ import {
   selectionAfterReviewedEntry,
 } from "./review-decision.js";
 
-const ADMIN_UI_BUILD = "2026.07.29.1";
+const ADMIN_UI_BUILD = "2026.07.29.2";
 
 const elements = {
   sessionEmail: document.querySelector("#session-email"),
@@ -33,6 +33,14 @@ const elements = {
   aiAllowanceCount: document.querySelector("#ai-allowance-count"),
   aiAllowanceDetail: document.querySelector("#ai-allowance-detail"),
   resetAIAllowance: document.querySelector("#reset-ai-allowance-button"),
+  glossaryForm: document.querySelector("#glossary-form"),
+  glossarySource: document.querySelector("#glossary-source-input"),
+  glossaryTranslation: document.querySelector("#glossary-translation-input"),
+  glossarySubmit: document.querySelector("#glossary-submit-button"),
+  glossaryMatchCount: document.querySelector("#glossary-match-count"),
+  glossaryMatchDetail: document.querySelector("#glossary-match-detail"),
+  glossaryExamples: document.querySelector("#glossary-examples"),
+  glossaryActionState: document.querySelector("#glossary-action-state"),
   error: document.querySelector("#error-banner"),
   refresh: document.querySelector("#refresh-button"),
   filterForm: document.querySelector("#filter-form"),
@@ -81,6 +89,10 @@ const state = {
   releasing: false,
   retrying: false,
   resettingAIAllowance: false,
+  glossarySaving: false,
+  glossaryPreview: null,
+  glossaryPreviewTimer: null,
+  glossaryPreviewGeneration: 0,
   loading: false,
   saving: false,
   searchTimer: null,
@@ -153,6 +165,171 @@ async function api(path, options = {}) {
     throw error;
   }
   return body;
+}
+
+function glossaryValues() {
+  return {
+    source: elements.glossarySource.value.trim().replace(/\s+/gu, " "),
+    translation: elements.glossaryTranslation.value.trim().replace(/\s+/gu, " "),
+  };
+}
+
+function updateGlossarySubmit() {
+  const values = glossaryValues();
+  elements.glossarySubmit.disabled =
+    state.glossarySaving ||
+    values.source.length < 2 ||
+    values.source.length > 160 ||
+    values.translation.length < 1 ||
+    values.translation.length > 500;
+  elements.glossarySubmit.textContent = state.glossarySaving
+    ? "Adding entry…"
+    : "Add and apply";
+}
+
+function renderGlossaryExamples(examples = []) {
+  elements.glossaryExamples.hidden = examples.length === 0;
+  elements.glossaryExamples.replaceChildren(
+    ...examples.map((example) => {
+      const row = document.createElement("div");
+      row.className = "glossary-example";
+      const source = document.createElement("span");
+      source.textContent = example.source;
+      const translation = document.createElement("span");
+      translation.lang = "zh-Hans";
+      translation.textContent =
+        example.machineTranslation ?? "No machine suggestion";
+      row.append(source, translation);
+      return row;
+    }),
+  );
+}
+
+function resetGlossaryPreview() {
+  state.glossaryPreview = null;
+  elements.glossaryMatchCount.textContent = "Enter an English phrase";
+  elements.glossaryMatchDetail.textContent =
+    "Complete word and phrase boundaries are used when checking pending entries.";
+  renderGlossaryExamples();
+}
+
+async function loadGlossaryPreview() {
+  const source = glossaryValues().source;
+  const generation = ++state.glossaryPreviewGeneration;
+  if (source.length < 2 || source.length > 160) {
+    resetGlossaryPreview();
+    return;
+  }
+
+  elements.glossaryMatchCount.textContent = "Checking pending entries…";
+  elements.glossaryMatchDetail.textContent =
+    "Looking for complete phrase matches in the current review queue.";
+  try {
+    const preview = await api(
+      `/admin/api/glossary/preview?source=${encodeURIComponent(source)}`,
+    );
+    if (
+      generation !== state.glossaryPreviewGeneration ||
+      source !== glossaryValues().source
+    ) {
+      return;
+    }
+    state.glossaryPreview = preview;
+    elements.glossaryMatchCount.textContent =
+      preview.matchCount === 0
+        ? "No pending entries match"
+        : `${preview.matchCount} pending ${
+            preview.matchCount === 1 ? "entry" : "entries"
+          } will refresh`;
+    elements.glossaryMatchDetail.textContent =
+      preview.matchCount === 0
+        ? "The approved phrase will still be added to the dictionary."
+        : "Matching suggestions will be queued for regeneration with the new phrase.";
+    renderGlossaryExamples(preview.examples);
+  } catch (error) {
+    if (generation !== state.glossaryPreviewGeneration) {
+      return;
+    }
+    state.glossaryPreview = null;
+    elements.glossaryMatchCount.textContent = "Unable to preview matches";
+    elements.glossaryMatchDetail.textContent = error.message;
+    renderGlossaryExamples();
+  }
+}
+
+function scheduleGlossaryPreview() {
+  clearTimeout(state.glossaryPreviewTimer);
+  state.glossaryPreviewTimer = setTimeout(() => {
+    void loadGlossaryPreview();
+  }, 350);
+  updateGlossarySubmit();
+}
+
+async function addGlossaryEntry() {
+  if (state.glossarySaving) {
+    return;
+  }
+  const values = glossaryValues();
+  if (
+    values.source.length < 2 ||
+    values.translation.length === 0
+  ) {
+    updateGlossarySubmit();
+    return;
+  }
+
+  const matchCount = state.glossaryPreview?.matchCount ?? 0;
+  const impact =
+    matchCount > 0
+      ? `\n\n${matchCount} pending ${
+          matchCount === 1 ? "entry" : "entries"
+        } will be queued for regeneration.`
+      : "";
+  if (
+    !window.confirm(
+      `Add this approved dictionary phrase?\n\n` +
+      `${values.source}\n${values.translation}${impact}`,
+    )
+  ) {
+    return;
+  }
+
+  clearError();
+  state.glossarySaving = true;
+  elements.glossaryActionState.textContent =
+    "Saving phrase and checking pending entries…";
+  updateGlossarySubmit();
+  try {
+    const result = await api("/admin/api/glossary", {
+      method: "POST",
+      body: JSON.stringify(values),
+    });
+    elements.glossarySource.value = "";
+    elements.glossaryTranslation.value = "";
+    ++state.glossaryPreviewGeneration;
+    resetGlossaryPreview();
+    await Promise.all([
+      loadSummary(),
+      loadAIRetryStatus(),
+      loadAIUsage(),
+      loadList({ preserveSelection: true }),
+    ]);
+    const queuedCopy =
+      result.queuedPending > 0
+        ? ` ${result.queuedPending} pending suggestions queued for refresh.`
+        : "";
+    showToast(`Dictionary entry added.${queuedCopy}`);
+    elements.glossaryActionState.textContent =
+      result.queuedPending > 0
+        ? `${result.queuedPending} pending suggestions are now in the AI refresh queue.`
+        : "Dictionary entry saved. No pending suggestions needed a refresh.";
+  } catch (error) {
+    showError(error.message);
+    elements.glossaryActionState.textContent = "";
+  } finally {
+    state.glossarySaving = false;
+    updateGlossarySubmit();
+  }
 }
 
 function statusMap(summary) {
@@ -1129,6 +1306,19 @@ elements.retryFailed.addEventListener("click", () => {
 
 elements.resetAIAllowance.addEventListener("click", () => {
   void resetAIAllowance();
+});
+
+elements.glossarySource.addEventListener("input", () => {
+  scheduleGlossaryPreview();
+});
+
+elements.glossaryTranslation.addEventListener("input", () => {
+  updateGlossarySubmit();
+});
+
+elements.glossaryForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void addGlossaryEntry();
 });
 
 elements.publish.addEventListener("click", () => {
