@@ -149,6 +149,15 @@ struct DashboardTabView: View {
             .presentationDetents(prompt.updateNotes.isEmpty ? [.height(240)] : [.height(430), .large])
             .presentationDragIndicator(.visible)
         }
+        .sheet(item: itemTranslationMethodPromptBinding) { prompt in
+            ItemTranslationMethodChooserView(
+                prompt: prompt,
+                onSelect: appModel.selectItemTranslationMissMode
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .interactiveDismissDisabled()
+        }
     }
 
     private func shouldShowItemTranslationPreloadCard(
@@ -201,6 +210,13 @@ struct DashboardTabView: View {
                     appModel.dismissVersionRefreshPrompt()
                 }
             }
+        )
+    }
+
+    private var itemTranslationMethodPromptBinding: Binding<AppModel.ItemTranslationMethodPrompt?> {
+        Binding(
+            get: { appModel.itemTranslationMethodPrompt },
+            set: { _ in }
         )
     }
 
