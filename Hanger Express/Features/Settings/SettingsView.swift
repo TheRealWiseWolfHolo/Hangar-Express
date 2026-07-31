@@ -170,7 +170,7 @@ struct SettingsView: View {
                             from: itemTranslationMissModeRawValue
                         ) == .cloudReview {
                             Text(
-                                "Cloud mode sends only missing public catalog terms—such as ship, package, item, manufacturer, role, paint, insurance, and upgrade names—to Hangar Express's Remote service for translation review. It never sends RSI credentials or cookies, account or email details, pledge IDs, prices, buyback notes, hangar logs, raw page content, or text you enter. New terms remain in English until reviewed and published."
+                                "Only text that needs translation is uploaded. No personally identifiable information is uploaded. New terms remain in English until reviewed and published."
                             )
                         } else {
                             Text(

@@ -28,6 +28,7 @@
 - Added persistent drag reordering to the Tools grid after a deliberate one-second hold.
 - Renamed the Tools grid entries with shorter, clearer English and Simplified Chinese labels.
 - Moved cloud terminology generation into a durable background queue and made the app upload up to four batches in parallel, so catalog-term submissions finish quickly on the phone while generation and retry work continue in the cloud.
+- Simplified the Cloud Review privacy message to clearly state that only text needing translation is uploaded and that uploads contain no personally identifiable information.
 
 ### Fixed
 - Fixed tool reordering so the selected icon follows the drag while surrounding icons animate into place, instead of lifting the entire Tools section.
