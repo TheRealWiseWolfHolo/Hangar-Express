@@ -4966,6 +4966,79 @@ struct Hanger_ExpressTests {
         #expect(grouped.last?.representative.insurance == "120 months")
     }
 
+    @Test func profileBackgroundOptionsCacheReusesAndInvalidatesFleetState() async throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: directoryURL)
+        }
+
+        let firstShip = FleetShip(
+            id: 1,
+            displayName: "Polaris",
+            manufacturer: "RSI",
+            role: "Capital combat",
+            msrpUSD: 975,
+            insurance: "LTI",
+            sourcePackageID: 101,
+            sourcePackageName: "Polaris Pack",
+            meltValueUSD: 750,
+            canGift: true,
+            canReclaim: true
+        )
+        let duplicateShip = FleetShip(
+            id: 2,
+            displayName: "Polaris",
+            manufacturer: "RSI",
+            role: "Capital combat",
+            msrpUSD: 975,
+            insurance: "LTI",
+            sourcePackageID: 102,
+            sourcePackageName: "Fleet Pack",
+            meltValueUSD: 750,
+            canGift: false,
+            canReclaim: false,
+            imageURL: URL(string: "https://example.com/polaris.webp")
+        )
+        let cache = ProfileBackgroundOptionsCache(directoryURL: directoryURL)
+        let initialOptions = await cache.options(
+            for: [firstShip, duplicateShip],
+            accountKey: "test-account"
+        )
+
+        #expect(initialOptions.count == 1)
+        #expect(initialOptions.first?.quantity == 2)
+        #expect(initialOptions.first?.imageURL == duplicateShip.imageURL)
+
+        let reloadedCache = ProfileBackgroundOptionsCache(directoryURL: directoryURL)
+        let diskOptions = await reloadedCache.cachedOptions(for: "test-account")
+        #expect(diskOptions == initialOptions)
+
+        let changedFleet = [
+            firstShip,
+            FleetShip(
+                id: 3,
+                displayName: "Zeus Mk II CL",
+                manufacturer: "RSI",
+                role: "Cargo",
+                msrpUSD: 175,
+                insurance: "120 months",
+                sourcePackageID: 103,
+                sourcePackageName: "Zeus Pack",
+                meltValueUSD: 150,
+                canGift: true,
+                canReclaim: true
+            )
+        ]
+        let refreshedOptions = await reloadedCache.options(
+            for: changedFleet,
+            accountKey: "test-account"
+        )
+
+        #expect(refreshedOptions.count == 2)
+        #expect(refreshedOptions.map(\.displayName).contains("Zeus Mk II CL"))
+    }
+
     @Test func fleetProjectorPrefersHostedShipImageForMatchedShips() async throws {
         let hangarImageURL = try #require(URL(string: "https://example.com/hangar-thumb.jpg"))
         let hostedImageURL = try #require(URL(string: "https://example.com/ship-listing-wide.webp"))
