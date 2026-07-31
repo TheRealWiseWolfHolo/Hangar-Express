@@ -3340,6 +3340,19 @@ struct Hanger_ExpressTests {
         )
     }
 
+    @Test func translationDictionaryBackgroundRefreshSkipsEnglish() {
+        #expect(
+            !HangarItemTranslationBackgroundRefreshPolicy.shouldRefresh(
+                for: .original
+            )
+        )
+        #expect(
+            HangarItemTranslationBackgroundRefreshPolicy.shouldRefresh(
+                for: .simplifiedChinese
+            )
+        )
+    }
+
     @Test func cloudTranslationCandidatesRejectPrivateContentShapes() {
         #expect(
             CloudHangarItemTranslationCandidate(

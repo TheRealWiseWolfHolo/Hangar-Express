@@ -9,6 +9,7 @@
 - Added clearly labeled anticipated dates for nine major annual Star Citizen events, projected from their official 2025 month/day windows.
 
 ### Changed
+- Silently refreshes the hosted Hangar item translation dictionary whenever the app launches or returns to the foreground while a translated item language is selected; English skips the refresh entirely.
 - Started the `1.0.9` release branch and release-note tracking for ongoing work.
 - Set the app release metadata to version 1.0.9, build 45.
 - Began the Early Access overhaul with a compact Settings status row and moved the profile badge preference into Manage Plans, while preserving existing StoreKit product IDs and saved entitlement keys so current access carries forward after updating.
