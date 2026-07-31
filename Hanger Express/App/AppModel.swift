@@ -280,6 +280,18 @@ final class AppModel {
         }
     }
 
+    struct ItemTranslationMethodPrompt: Identifiable {
+        enum Reason: Equatable {
+            case languageSelection
+            case appUpdate
+        }
+
+        let id = UUID()
+        let language: HangarItemLanguage
+        let currentMode: HangarItemTranslationMissMode
+        let reason: Reason
+    }
+
     struct ItemTranslationPreprocessPrompt: Identifiable {
         enum Reason {
             case missingCache
@@ -668,6 +680,7 @@ final class AppModel {
     var authenticationFlowID = UUID()
     var reauthenticationPrompt: ReauthenticationPrompt?
     var versionRefreshPrompt: VersionRefreshPrompt?
+    var itemTranslationMethodPrompt: ItemTranslationMethodPrompt?
     var itemTranslationPreprocessPrompt: ItemTranslationPreprocessPrompt?
     var itemTranslationPreloadProgress: ItemTranslationPreloadProgress?
     var cloudItemTranslationUploadProgress: CloudItemTranslationUploadProgress?
@@ -701,6 +714,7 @@ final class AppModel {
     private var itemTranslationPreloadGeneration = 0
     private var suspendedItemTranslationAutoPreloadLanguages: Set<HangarItemLanguage> = []
     private var dismissedItemTranslationPreprocessLanguages: Set<HangarItemLanguage> = []
+    private var pendingUpgradeItemTranslationMethodPrompt: ItemTranslationMethodPrompt?
 
     private enum ItemTranslationPreloadPresentation {
         case visible
@@ -708,6 +722,7 @@ final class AppModel {
     }
 
     private static let lastLaunchedVersionDefaultsKey = "app.lastLaunchedVersion"
+    private static let itemTranslationMethodAcknowledgedVersionDefaultsKey = "hangar.itemTranslation.methodAcknowledgedVersion"
     private static let meltRequestTimeoutSeconds = 20
     private static let giftRequestTimeoutSeconds = 20
     private static let upgradeRequestTimeoutSeconds = 20
@@ -858,7 +873,15 @@ final class AppModel {
     }
 
     func selectItemTranslationMissMode(_ mode: HangarItemTranslationMissMode) {
+        itemTranslationMethodPrompt = nil
+        pendingUpgradeItemTranslationMethodPrompt = nil
         userDefaults.set(mode.rawValue, forKey: HangarItemTranslationMissMode.storageKey)
+        if let currentVersion = currentAppVersionIdentifier() {
+            userDefaults.set(
+                currentVersion,
+                forKey: Self.itemTranslationMethodAcknowledgedVersionDefaultsKey
+            )
+        }
         itemTranslationPreprocessPrompt = nil
 
         guard let snapshot else {
@@ -1908,6 +1931,7 @@ final class AppModel {
 
     func dismissVersionRefreshPrompt() {
         versionRefreshPrompt = nil
+        presentPendingUpgradeItemTranslationMethodPrompt()
     }
 
     func handleAppDidBecomeActive() async {
@@ -3688,9 +3712,34 @@ final class AppModel {
         let previousVersion = userDefaults.string(forKey: Self.lastLaunchedVersionDefaultsKey)
         userDefaults.set(currentVersion, forKey: Self.lastLaunchedVersionDefaultsKey)
 
-        guard let previousVersion,
-              previousVersion != currentVersion,
-              session != nil else {
+        guard let previousVersion else {
+            userDefaults.set(
+                currentVersion,
+                forKey: Self.itemTranslationMethodAcknowledgedVersionDefaultsKey
+            )
+            return
+        }
+
+        let shouldPresentVersionRefresh = previousVersion != currentVersion && session != nil
+        let acknowledgedMethodVersion = userDefaults.string(
+            forKey: Self.itemTranslationMethodAcknowledgedVersionDefaultsKey
+        )
+
+        if acknowledgedMethodVersion != currentVersion,
+           HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade() {
+            let prompt = ItemTranslationMethodPrompt(
+                language: currentHangarItemLanguage,
+                currentMode: currentHangarItemTranslationMissMode,
+                reason: .appUpdate
+            )
+            if shouldPresentVersionRefresh {
+                pendingUpgradeItemTranslationMethodPrompt = prompt
+            } else {
+                itemTranslationMethodPrompt = prompt
+            }
+        }
+
+        guard shouldPresentVersionRefresh else {
             return
         }
 
@@ -3699,6 +3748,21 @@ final class AppModel {
             currentVersion: currentVersion,
             updateNoteKeys: updateNoteKeys(for: currentVersion)
         )
+    }
+
+    private func presentPendingUpgradeItemTranslationMethodPrompt() {
+        guard let prompt = pendingUpgradeItemTranslationMethodPrompt else {
+            return
+        }
+
+        pendingUpgradeItemTranslationMethodPrompt = nil
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard self?.versionRefreshPrompt == nil else {
+                return
+            }
+            self?.itemTranslationMethodPrompt = prompt
+        }
     }
 
     private func updateNoteKeys(for versionIdentifier: String) -> [String] {

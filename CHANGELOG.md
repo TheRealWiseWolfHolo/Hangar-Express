@@ -3,6 +3,7 @@
 ## v1.0.9 (In Progress)
 
 ### Added
+- Added a translation-method chooser when selecting a translated Hangar item language and after upgrading, with clear Local and Cloud explanations, the current choice preserved, and a reminder that the method can be changed later in Settings.
 - Added a WBCCU Deals tool that displays current StarCitizen-Info Warbond upgrade offers with ship artwork, standard and Warbond values, savings, and feed freshness.
 - Added an Event Calendar tool with official CIG and Bar Citizen dates from StarCitizen-Info, agenda and location filters, in-app event sources, sharing, Calendar export, and an offline last-known-good feed.
 - Added clearly labeled anticipated dates for nine major annual Star Citizen events, projected from their official 2025 month/day windows.

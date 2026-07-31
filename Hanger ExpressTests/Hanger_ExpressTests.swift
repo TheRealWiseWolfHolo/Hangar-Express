@@ -3313,6 +3313,33 @@ struct Hanger_ExpressTests {
         )
     }
 
+    @Test func translationMethodPromptPolicyCoversSelectionsAndUpgrades() {
+        #expect(
+            !HangarItemTranslationMethodPromptPolicy.shouldPrompt(
+                for: .original
+            )
+        )
+        #expect(
+            HangarItemTranslationMethodPromptPolicy.shouldPrompt(
+                for: .simplifiedChinese
+            )
+        )
+        #expect(
+            !HangarItemTranslationMethodPromptPolicy.shouldPrompt(
+                for: .simplifiedChinese,
+                rolloutEnabled: false
+            )
+        )
+        #expect(
+            HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade()
+        )
+        #expect(
+            !HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade(
+                rolloutEnabled: false
+            )
+        )
+    }
+
     @Test func cloudTranslationCandidatesRejectPrivateContentShapes() {
         #expect(
             CloudHangarItemTranslationCandidate(
