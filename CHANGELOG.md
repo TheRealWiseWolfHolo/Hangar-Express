@@ -9,7 +9,7 @@
 
 ### Changed
 - Started the `1.0.9` release branch and release-note tracking for ongoing work.
-- Set the app release metadata to version 1.0.9, build 44.
+- Set the app release metadata to version 1.0.9, build 45.
 - Began the Early Access overhaul with a compact Settings status row and moved the profile badge preference into Manage Plans, while preserving existing StoreKit product IDs and saved entitlement keys so current access carries forward after updating.
 - Removed duplicate lifetime-plan details from the Early Access status card so lifetime owners see one concise Lifetime Access line.
 - Kept Manage Plans card fills and borders visible when expanding the sheet to full height.
@@ -27,6 +27,7 @@
 - Reorganized Tools into a compact two-column grid with icon tiles and concise titles.
 - Added persistent drag reordering to the Tools grid after a deliberate one-second hold.
 - Renamed the Tools grid entries with shorter, clearer English and Simplified Chinese labels.
+- Moved cloud terminology generation into a durable background queue and made the app upload up to four batches in parallel, so catalog-term submissions finish quickly on the phone while generation and retry work continue in the cloud.
 
 ### Fixed
 - Fixed tool reordering so the selected icon follows the drag while surrounding icons animate into place, instead of lifting the entire Tools section.

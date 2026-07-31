@@ -3334,8 +3334,67 @@ struct Hanger_ExpressTests {
         )
     }
 
+    @Test func cloudTranslationCandidatesRemoveCouponCodesBeforeSubmission() throws {
+        let candidate = try #require(
+            CloudHangarItemTranslationCandidate(
+                source: "6 Months Imperator Reward - 20% Coupon: SRGKCLLUFL",
+                kind: .package
+            )
+        )
+        let safeCandidate = try #require(
+            CloudHangarItemTranslationCandidate(
+                source: "6 Months Imperator Reward - 20% Coupon",
+                kind: .package
+            )
+        )
+        let spacedCandidate = try #require(
+            CloudHangarItemTranslationCandidate(
+                source: "Reward - 10 % coupon ： PRIVATE-CODE",
+                kind: .package
+            )
+        )
+
+        #expect(candidate.source == "6 Months Imperator Reward - 20% Coupon")
+        #expect(candidate.clientID == safeCandidate.clientID)
+        #expect(spacedCandidate.source == "Reward - 10 % coupon")
+        #expect(
+            CloudHangarItemTranslationCandidate(
+                source: "Upgrade: Terrapin to Corsair",
+                kind: .upgrade
+            )?.source == "Upgrade: Terrapin to Corsair"
+        )
+    }
+
+    @Test func cloudTranslationRequestNeverContainsCouponCode() throws {
+        let privateCode = "SRGKCLLUFL"
+        let candidate = try #require(
+            CloudHangarItemTranslationCandidate(
+                source: "6 Months Imperator Reward - 20% Coupon: \(privateCode)",
+                kind: .package
+            )
+        )
+        let client = CloudHangarItemTranslationClient(
+            baseURL: URL(string: "https://cloud-translation.example.com")!
+        )
+        let request = try client.resolveRequest(
+            for: [candidate],
+            dictionaryVersion: 9
+        )
+        let data = try #require(request.httpBody)
+        let body = try #require(String(data: data, encoding: .utf8))
+        #expect(!body.contains(privateCode))
+
+        let payload = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let items = try #require(payload["items"] as? [[String: Any]])
+        let item = try #require(items.first)
+        #expect(item["source"] as? String == "6 Months Imperator Reward - 20% Coupon")
+    }
+
     @Test func cloudTranslationClientBatchesDeduplicatesAndDiscardsPendingText() async throws {
         let observationBox = CloudTranslationRequestObservationBox()
+        let progressBox = CloudTranslationUploadProgressBox()
         let session = makeCloudTranslationMockURLSession { request in
             let data = try #require(request.httpBody)
             let payload = try #require(
@@ -3384,7 +3443,10 @@ struct Hanger_ExpressTests {
 
         let results = try await client.submit(
             uniqueCandidates + [uniqueCandidates[0]],
-            dictionaryVersion: 9
+            dictionaryVersion: 9,
+            batchHandler: { _, progress in
+                progressBox.append(progress)
+            }
         )
 
         #expect(results.count == 30)
@@ -3425,6 +3487,13 @@ struct Hanger_ExpressTests {
                 allowsConstrainedNetworkAccess: false,
                 allowsExpensiveNetworkAccess: false
             )
+        ])
+        #expect(progressBox.values == [
+            CloudHangarItemTranslationUploadProgress(completedCount: 6, totalCount: 30),
+            CloudHangarItemTranslationUploadProgress(completedCount: 12, totalCount: 30),
+            CloudHangarItemTranslationUploadProgress(completedCount: 18, totalCount: 30),
+            CloudHangarItemTranslationUploadProgress(completedCount: 24, totalCount: 30),
+            CloudHangarItemTranslationUploadProgress(completedCount: 30, totalCount: 30),
         ])
     }
 
@@ -6158,6 +6227,21 @@ private final class CloudTranslationRequestObservationBox: @unchecked Sendable {
     }
 
     func append(_ value: CloudTranslationRequestObservation) {
+        lock.withLock {
+            storedValues.append(value)
+        }
+    }
+}
+
+private final class CloudTranslationUploadProgressBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValues: [CloudHangarItemTranslationUploadProgress] = []
+
+    var values: [CloudHangarItemTranslationUploadProgress] {
+        lock.withLock { storedValues }
+    }
+
+    func append(_ value: CloudHangarItemTranslationUploadProgress) {
         lock.withLock {
             storedValues.append(value)
         }
