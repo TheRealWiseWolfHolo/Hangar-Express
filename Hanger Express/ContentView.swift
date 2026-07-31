@@ -14,6 +14,9 @@ struct ContentView: View {
             }
             .onChange(of: scenePhase) { _, newPhase in
                 guard newPhase == .active else {
+                    Task {
+                        await OnDeviceHangarItemTranslationService.shared.flushPersistedCache()
+                    }
                     return
                 }
 

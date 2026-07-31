@@ -1998,7 +1998,7 @@ final class AppModel {
         dismissedItemTranslationPreprocessLanguages.removeAll()
         itemTranslationPreprocessPrompt = nil
         clearPendingItemTranslationPreload()
-        OnDeviceHangarItemTranslationService.shared.clear()
+        await OnDeviceHangarItemTranslationService.shared.clear()
 
         if rebuildPromptLanguage.translationLocaleIdentifier != nil,
            currentHangarItemTranslationMissMode == .onDevice,
