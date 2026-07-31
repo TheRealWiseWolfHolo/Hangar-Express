@@ -68,14 +68,15 @@ private actor OneShotAsyncResult<Value: Sendable> {
 final class OnDeviceHangarItemTranslationService {
     static let shared = OnDeviceHangarItemTranslationService()
 
-    private let directoryURL: URL
-    private let cacheURL: URL
+    private let persistenceWriter: OnDeviceTranslationCachePersistenceWriter
     private var cachedTranslations: [CacheKey: String] = [:]
     private var preprocessedLocales: Set<String> = []
     private var preprocessedTranslationKeys: Set<CacheKey> = []
     private var installedStatusByLocale: [String: TranslationModelInstallStatus] = [:]
     private var inFlightPreloadKeys: Set<CacheKey> = []
     private var inFlightOnDemandTranslationTasks: [CacheKey: Task<String?, Never>] = [:]
+    private var persistenceEpoch = 0
+    private var persistenceRevision = 0
     private(set) var cacheGeneration = 0
 
     private static let cacheVersion = 1
@@ -88,8 +89,11 @@ final class OnDeviceHangarItemTranslationService {
         directoryURL: URL? = nil
     ) {
         let rootDirectoryURL = directoryURL ?? Self.defaultDirectoryURL(fileManager: fileManager)
-        self.directoryURL = rootDirectoryURL
-        cacheURL = rootDirectoryURL.appendingPathComponent("translations.json", isDirectory: false)
+        let cacheURL = rootDirectoryURL.appendingPathComponent("translations.json", isDirectory: false)
+        persistenceWriter = OnDeviceTranslationCachePersistenceWriter(
+            directoryURL: rootDirectoryURL,
+            cacheURL: cacheURL
+        )
         let persistedCache = Self.loadPersistedCache(from: cacheURL)
         cachedTranslations = persistedCache.translations
         preprocessedLocales = persistedCache.preprocessedLocales
@@ -201,7 +205,7 @@ final class OnDeviceHangarItemTranslationService {
         }
 
         cachedTranslations[cacheKey] = translatedText
-        persistCache()
+        scheduleCachePersistence()
         cacheGeneration &+= 1
 
         return itemTranslator.normalizedMachineTranslationSpacing(
@@ -411,6 +415,7 @@ final class OnDeviceHangarItemTranslationService {
         logHandler?("Pending machine translation sources=\(pendingSources.count).")
         guard !pendingSources.isEmpty else {
             markLocalePreprocessed(targetLocale)
+            await flushPersistedCache()
             logHandler?("No pending machine translation sources; marked locale as preprocessed.")
             progressHandler?(
                 OnDeviceHangarItemTranslationPreloadProgress(
@@ -522,9 +527,9 @@ final class OnDeviceHangarItemTranslationService {
                     }
                 }
                 if !batchResult.didFail || !batchResult.translations.isEmpty {
-                    persistCache()
+                    scheduleCachePersistence()
                     cacheGeneration &+= 1
-                    logHandler?("Persisted translation cache after batch \(batchResult.batchNumber).")
+                    logHandler?("Queued translation cache persistence after batch \(batchResult.batchNumber).")
                 }
 
                 let progressPhase: OnDeviceHangarItemTranslationPreloadProgress.Phase
@@ -550,9 +555,14 @@ final class OnDeviceHangarItemTranslationService {
                 logHandler?("Marked locale \(targetLocale) as preprocessed.")
             }
         }
+
+        if !Task.isCancelled {
+            await flushPersistedCache()
+            logHandler?("Flushed the latest translation cache state.")
+        }
     }
 
-    func clear() {
+    func clear() async {
         for task in inFlightOnDemandTranslationTasks.values {
             task.cancel()
         }
@@ -562,8 +572,19 @@ final class OnDeviceHangarItemTranslationService {
         installedStatusByLocale.removeAll()
         inFlightPreloadKeys.removeAll()
         inFlightOnDemandTranslationTasks.removeAll()
+        persistenceEpoch &+= 1
+        persistenceRevision = 0
         cacheGeneration &+= 1
-        try? FileManager.default.removeItem(at: directoryURL)
+        await persistenceWriter.clear(throughEpoch: persistenceEpoch)
+    }
+
+    func flushPersistedCache() async {
+        guard persistenceRevision > 0 else {
+            return
+        }
+
+        let snapshot = makePersistenceSnapshot(incrementingRevision: true)
+        await persistenceWriter.flush(snapshot)
     }
 
     private func installedStatus(targetLocale: String) async -> TranslationModelInstallStatus {
@@ -895,44 +916,32 @@ final class OnDeviceHangarItemTranslationService {
             return
         }
 
-        persistCache()
+        scheduleCachePersistence()
         cacheGeneration &+= 1
     }
 
-    private func persistCache() {
-        do {
-            try FileManager.default.createDirectory(
-                at: directoryURL,
-                withIntermediateDirectories: true
-            )
-            let payload = PersistedTranslationCache(
-                version: Self.cacheVersion,
-                preprocessedLocales: Array(preprocessedLocales).sorted(),
-                preprocessedEntries: preprocessedTranslationKeys.map { key in
-                    PersistedTranslationCache.ProcessedEntry(
-                        source: key.source,
-                        targetLocale: key.targetLocale,
-                        dictionaryVersion: key.dictionaryVersion
-                    )
-                },
-                entries: cachedTranslations.map { key, translation in
-                    PersistedTranslationCache.Entry(
-                        source: key.source,
-                        targetLocale: key.targetLocale,
-                        dictionaryVersion: key.dictionaryVersion,
-                        translation: translation
-                    )
-                }
-            )
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            let data = try encoder.encode(payload)
-            try data.write(to: cacheURL, options: [.atomic])
-        } catch {
-#if DEBUG
-            print("OnDeviceHangarItemTranslationService failed to persist cache: \(error)")
-#endif
+    private func scheduleCachePersistence() {
+        let snapshot = makePersistenceSnapshot(incrementingRevision: true)
+        Task {
+            await persistenceWriter.schedule(snapshot)
         }
+    }
+
+    private func makePersistenceSnapshot(
+        incrementingRevision: Bool
+    ) -> OnDeviceTranslationCachePersistenceSnapshot {
+        if incrementingRevision {
+            persistenceRevision &+= 1
+        }
+
+        return OnDeviceTranslationCachePersistenceSnapshot(
+            epoch: persistenceEpoch,
+            revision: persistenceRevision,
+            cacheVersion: Self.cacheVersion,
+            preprocessedLocales: preprocessedLocales,
+            preprocessedTranslationKeys: preprocessedTranslationKeys,
+            cachedTranslations: cachedTranslations
+        )
     }
 
     private static func loadPersistedCache(from cacheURL: URL) -> PersistedTranslationCacheState {
@@ -996,7 +1005,7 @@ final class OnDeviceHangarItemTranslationService {
     }
 }
 
-private nonisolated struct CacheKey: Hashable, Sendable {
+nonisolated struct CacheKey: Hashable, Sendable {
     let source: String
     let targetLocale: String
     let dictionaryVersion: Int?
@@ -1024,15 +1033,15 @@ private nonisolated struct TranslationBatchResult: Sendable {
     let didFail: Bool
 }
 
-private struct PersistedTranslationCache: Codable {
-    struct Entry: Codable {
+private nonisolated struct PersistedTranslationCache: Codable, Sendable {
+    struct Entry: Codable, Sendable {
         let source: String
         let targetLocale: String
         let dictionaryVersion: Int?
         let translation: String
     }
 
-    struct ProcessedEntry: Codable {
+    struct ProcessedEntry: Codable, Sendable {
         let source: String
         let targetLocale: String
         let dictionaryVersion: Int?
@@ -1048,6 +1057,229 @@ private struct PersistedTranslationCacheState {
     let translations: [CacheKey: String]
     let preprocessedLocales: Set<String>
     let preprocessedTranslationKeys: Set<CacheKey>
+}
+
+nonisolated struct OnDeviceTranslationCachePersistenceSnapshot: Sendable {
+    let epoch: Int
+    let revision: Int
+    let cacheVersion: Int
+    let preprocessedLocales: Set<String>
+    let preprocessedTranslationKeys: Set<CacheKey>
+    let cachedTranslations: [CacheKey: String]
+}
+
+actor OnDeviceTranslationCachePersistenceWriter {
+    typealias WriteOperation = @Sendable (
+        _ snapshot: OnDeviceTranslationCachePersistenceSnapshot,
+        _ directoryURL: URL,
+        _ cacheURL: URL
+    ) async -> Void
+
+    private struct FlushWaiter {
+        let epoch: Int
+        let revision: Int
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
+    private let directoryURL: URL
+    private let cacheURL: URL
+    private let writeOperation: WriteOperation
+    private var currentEpoch = 0
+    private var completedRevision = 0
+    private var pendingSnapshot: OnDeviceTranslationCachePersistenceSnapshot?
+    private var activeSnapshot: OnDeviceTranslationCachePersistenceSnapshot?
+    private var isDraining = false
+    private var isClearing = false
+    private var flushWaiters: [FlushWaiter] = []
+    private var drainWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(
+        directoryURL: URL,
+        cacheURL: URL,
+        writeOperation: WriteOperation? = nil
+    ) {
+        self.directoryURL = directoryURL
+        self.cacheURL = cacheURL
+        self.writeOperation = writeOperation ?? Self.writeSnapshot
+    }
+
+    func schedule(_ snapshot: OnDeviceTranslationCachePersistenceSnapshot) {
+        guard snapshot.epoch >= currentEpoch else {
+            return
+        }
+
+        if snapshot.epoch > currentEpoch {
+            currentEpoch = snapshot.epoch
+            completedRevision = 0
+            pendingSnapshot = nil
+            resumeObsoleteFlushWaiters()
+        }
+
+        if let pendingSnapshot,
+           pendingSnapshot.epoch == snapshot.epoch,
+           pendingSnapshot.revision >= snapshot.revision {
+            return
+        }
+
+        if let activeSnapshot,
+           activeSnapshot.epoch == snapshot.epoch,
+           activeSnapshot.revision >= snapshot.revision {
+            return
+        }
+
+        guard snapshot.revision > completedRevision else {
+            return
+        }
+
+        pendingSnapshot = snapshot
+        startDrainingIfNeeded()
+    }
+
+    func flush(_ snapshot: OnDeviceTranslationCachePersistenceSnapshot) async {
+        schedule(snapshot)
+        guard snapshot.epoch == currentEpoch,
+              completedRevision < snapshot.revision else {
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            flushWaiters.append(
+                FlushWaiter(
+                    epoch: snapshot.epoch,
+                    revision: snapshot.revision,
+                    continuation: continuation
+                )
+            )
+        }
+    }
+
+    func clear(throughEpoch epoch: Int) async {
+        guard epoch >= currentEpoch else {
+            return
+        }
+
+        currentEpoch = epoch
+        completedRevision = 0
+        pendingSnapshot = nil
+        isClearing = true
+        resumeObsoleteFlushWaiters()
+
+        if isDraining {
+            await withCheckedContinuation { continuation in
+                drainWaiters.append(continuation)
+            }
+        }
+
+        await Task.detached(priority: .utility) { [directoryURL] in
+            try? FileManager.default.removeItem(at: directoryURL)
+        }.value
+
+        isClearing = false
+        startDrainingIfNeeded()
+    }
+
+    private func startDrainingIfNeeded() {
+        guard !isDraining,
+              !isClearing,
+              pendingSnapshot != nil else {
+            return
+        }
+
+        isDraining = true
+        Task {
+            await drain()
+        }
+    }
+
+    private func drain() async {
+        while !isClearing, let snapshot = pendingSnapshot {
+            pendingSnapshot = nil
+            activeSnapshot = snapshot
+            await writeOperation(snapshot, directoryURL, cacheURL)
+            activeSnapshot = nil
+
+            if snapshot.epoch == currentEpoch {
+                completedRevision = max(completedRevision, snapshot.revision)
+            }
+            resumeSatisfiedFlushWaiters()
+        }
+
+        isDraining = false
+        let waiters = drainWaiters
+        drainWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+
+        startDrainingIfNeeded()
+    }
+
+    private func resumeSatisfiedFlushWaiters() {
+        var remainingWaiters: [FlushWaiter] = []
+        for waiter in flushWaiters {
+            if waiter.epoch < currentEpoch
+                || (waiter.epoch == currentEpoch && waiter.revision <= completedRevision) {
+                waiter.continuation.resume()
+            } else {
+                remainingWaiters.append(waiter)
+            }
+        }
+        flushWaiters = remainingWaiters
+    }
+
+    private func resumeObsoleteFlushWaiters() {
+        var remainingWaiters: [FlushWaiter] = []
+        for waiter in flushWaiters {
+            if waiter.epoch < currentEpoch {
+                waiter.continuation.resume()
+            } else {
+                remainingWaiters.append(waiter)
+            }
+        }
+        flushWaiters = remainingWaiters
+    }
+
+    private nonisolated static func writeSnapshot(
+        _ snapshot: OnDeviceTranslationCachePersistenceSnapshot,
+        directoryURL: URL,
+        cacheURL: URL
+    ) async {
+        await Task.detached(priority: .utility) {
+            do {
+                try FileManager.default.createDirectory(
+                    at: directoryURL,
+                    withIntermediateDirectories: true
+                )
+                let payload = PersistedTranslationCache(
+                    version: snapshot.cacheVersion,
+                    preprocessedLocales: Array(snapshot.preprocessedLocales).sorted(),
+                    preprocessedEntries: snapshot.preprocessedTranslationKeys.map { key in
+                        PersistedTranslationCache.ProcessedEntry(
+                            source: key.source,
+                            targetLocale: key.targetLocale,
+                            dictionaryVersion: key.dictionaryVersion
+                        )
+                    },
+                    entries: snapshot.cachedTranslations.map { key, translation in
+                        PersistedTranslationCache.Entry(
+                            source: key.source,
+                            targetLocale: key.targetLocale,
+                            dictionaryVersion: key.dictionaryVersion,
+                            translation: translation
+                        )
+                    }
+                )
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys]
+                let data = try encoder.encode(payload)
+                try data.write(to: cacheURL, options: [.atomic])
+            } catch {
+#if DEBUG
+                print("OnDeviceHangarItemTranslationService failed to persist cache: \(error)")
+#endif
+            }
+        }.value
+    }
 }
 
 private extension Array {

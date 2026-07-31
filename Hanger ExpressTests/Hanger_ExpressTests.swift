@@ -4080,6 +4080,74 @@ struct Hanger_ExpressTests {
         #expect(reloadedService.hasAvailableCache(for: .simplifiedChinese))
     }
 
+    @Test func onDeviceTranslationCacheWriterCoalescesIntermediateSnapshots() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+        let recorder = TranslationCacheCoalescingRecorder()
+        let writer = OnDeviceTranslationCachePersistenceWriter(
+            directoryURL: tempDirectory,
+            cacheURL: tempDirectory.appendingPathComponent("translations.json"),
+            writeOperation: { snapshot, _, _ in
+                await recorder.record(snapshot)
+            }
+        )
+
+        await writer.schedule(
+            makeTranslationCachePersistenceSnapshot(revision: 1)
+        )
+        await recorder.waitUntilFirstWriteStarts()
+
+        for revision in 2 ... 20 {
+            await writer.schedule(
+                makeTranslationCachePersistenceSnapshot(revision: revision)
+            )
+        }
+        await recorder.releaseFirstWrite()
+        await writer.flush(makeTranslationCachePersistenceSnapshot(revision: 20))
+
+        let writtenRevisions = await recorder.writtenRevisions()
+        #expect(writtenRevisions == [1, 20])
+    }
+
+    @Test func onDeviceTranslationCacheClearCannotBeUndoneByAnOlderWrite() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let cacheURL = tempDirectory.appendingPathComponent("translations.json")
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+        let recorder = TranslationCacheWriteRecorder(delayNanoseconds: 80_000_000)
+        let writer = OnDeviceTranslationCachePersistenceWriter(
+            directoryURL: tempDirectory,
+            cacheURL: cacheURL,
+            writeOperation: { snapshot, directoryURL, cacheURL in
+                await recorder.record(snapshot)
+                try? FileManager.default.createDirectory(
+                    at: directoryURL,
+                    withIntermediateDirectories: true
+                )
+                try? Data("revision-\(snapshot.revision)".utf8).write(
+                    to: cacheURL,
+                    options: [.atomic]
+                )
+            }
+        )
+
+        await writer.schedule(makeTranslationCachePersistenceSnapshot(revision: 1))
+        try await Task.sleep(nanoseconds: 10_000_000)
+        await writer.clear(throughEpoch: 1)
+        #expect(!FileManager.default.fileExists(atPath: cacheURL.path))
+
+        await writer.flush(
+            makeTranslationCachePersistenceSnapshot(epoch: 1, revision: 1)
+        )
+        #expect(FileManager.default.fileExists(atPath: cacheURL.path))
+        #expect(try String(contentsOf: cacheURL, encoding: .utf8) == "revision-1")
+    }
+
     @Test func onDeviceTranslationSearchTextIncludesEnglishAndCachedItemLanguageText() throws {
         let tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -6043,6 +6111,85 @@ private func makeHostedShipDetailPayload(description: String, technicalValue: St
         }
         """.utf8
     )
+}
+
+private func makeTranslationCachePersistenceSnapshot(
+    epoch: Int = 0,
+    revision: Int
+) -> OnDeviceTranslationCachePersistenceSnapshot {
+    let key = CacheKey(
+        source: "Source \(revision)",
+        targetLocale: "zh-Hans",
+        dictionaryVersion: 1
+    )
+    return OnDeviceTranslationCachePersistenceSnapshot(
+        epoch: epoch,
+        revision: revision,
+        cacheVersion: 1,
+        preprocessedLocales: ["zh-Hans"],
+        preprocessedTranslationKeys: [key],
+        cachedTranslations: [key: "Translation \(revision)"]
+    )
+}
+
+private actor TranslationCacheWriteRecorder {
+    private let delayNanoseconds: UInt64
+    private var revisions: [Int] = []
+
+    init(delayNanoseconds: UInt64) {
+        self.delayNanoseconds = delayNanoseconds
+    }
+
+    func record(_ snapshot: OnDeviceTranslationCachePersistenceSnapshot) async {
+        revisions.append(snapshot.revision)
+        try? await Task.sleep(nanoseconds: delayNanoseconds)
+    }
+
+    func writtenRevisions() -> [Int] {
+        revisions
+    }
+}
+
+private actor TranslationCacheCoalescingRecorder {
+    private var revisions: [Int] = []
+    private var didStartFirstWrite = false
+    private var didReleaseFirstWrite = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    func record(_ snapshot: OnDeviceTranslationCachePersistenceSnapshot) async {
+        revisions.append(snapshot.revision)
+        guard revisions.count == 1 else { return }
+
+        didStartFirstWrite = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+
+        guard !didReleaseFirstWrite else { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiter = continuation
+        }
+    }
+
+    func waitUntilFirstWriteStarts() async {
+        guard !didStartFirstWrite else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func releaseFirstWrite() {
+        didReleaseFirstWrite = true
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
+
+    func writtenRevisions() -> [Int] {
+        revisions
+    }
 }
 
 private func makeHangarItemTranslationPayload(version: Int = 1) -> Data {
