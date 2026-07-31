@@ -877,7 +877,7 @@
 "Downloading and verifying the latest cloud dictionary…" = "正在下载并验证最新的云端词典…";
 "Refresh failed: %@" = "刷新失败：%@";
 "Refresh translations from cloud" = "从云端刷新翻译";
-"Cloud mode sends only missing public catalog terms—such as ship, package, item, manufacturer, role, paint, insurance, and upgrade names—to Hangar Express's Cloudflare service for translation review. It never sends RSI credentials or cookies, account or email details, pledge IDs, prices, buyback notes, hangar logs, raw page content, or text you enter. New terms remain in English until reviewed and published." = "云端模式只会将缺失的公开商品目录术语（例如舰船、组合包、物品、制造商、定位、涂装、保险和升级名称）发送到机库通的 Cloudflare 服务供翻译审核。它绝不会发送 RSI 凭据或 Cookie、账户或电子邮箱信息、承诺包 ID、价格、回购备注、机库日志、原始页面内容或你输入的文字。新术语在审核并发布前会继续显示英文。";
+"Only text that needs translation is uploaded. No personally identifiable information is uploaded. New terms remain in English until reviewed and published." = "仅上传需要翻译的文本，不会上传任何个人身份信息。新术语在审核并发布前会继续显示英文。";
 "Both modes download the approved hosted dictionary. Local mode uses Apple's on-device translation model for missing terms and does not send those terms to the Hangar Express translation service." = "两种模式都会下载已审核的托管词典。本地模式会使用 Apple 的设备端翻译模型处理缺失术语，并且不会将这些术语发送到机库通翻译服务。";
 "Original" = "原文";
 "Choose the app language, item language, and appearance. Item language uses StarCitizen-Info terms first, then the on-device translation model when available." = "选择应用语言、物品语言和外观。物品语言会先使用 StarCitizen-Info 术语，若可用再使用本机翻译模型。";
