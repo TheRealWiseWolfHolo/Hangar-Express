@@ -38,6 +38,12 @@ nonisolated enum HangarItemTranslationMethodPromptPolicy {
     }
 }
 
+nonisolated enum HangarItemTranslationBackgroundRefreshPolicy {
+    static func shouldRefresh(for language: HangarItemLanguage) -> Bool {
+        language.translationLocaleIdentifier != nil
+    }
+}
+
 nonisolated enum CloudHangarItemTranslationKind: String, Codable, CaseIterable, Sendable {
     case insurance
     case item

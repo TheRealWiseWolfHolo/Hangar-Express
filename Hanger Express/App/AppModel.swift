@@ -712,6 +712,9 @@ final class AppModel {
     private var itemTranslationPreloadProgressDismissalTask: Task<Void, Never>?
     private var itemTranslationPreloadStallTask: Task<Void, Never>?
     private var itemTranslationPreloadGeneration = 0
+    private var silentItemTranslationDictionaryRefreshTask: Task<Void, Never>?
+    private var silentItemTranslationDictionaryRefreshGeneration = 0
+    private var lastSilentItemTranslationDictionaryRefreshStartedAt: Date?
     private var suspendedItemTranslationAutoPreloadLanguages: Set<HangarItemLanguage> = []
     private var dismissedItemTranslationPreprocessLanguages: Set<HangarItemLanguage> = []
     private var pendingUpgradeItemTranslationMethodPrompt: ItemTranslationMethodPrompt?
@@ -737,6 +740,7 @@ final class AppModel {
     private static let itemTranslationPreloadPreparingTimeoutNanoseconds: UInt64 = 35_000_000_000
     private static let itemTranslationPreloadTranslatingTimeoutNanoseconds: UInt64 = 60_000_000_000
     private static let itemTranslationDictionaryLoadTimeoutNanoseconds: UInt64 = 12_000_000_000
+    private static let silentItemTranslationDictionaryRefreshCoalescingInterval: TimeInterval = 5
     private static let itemTranslationPreloadMaximumLogEntries = 80
     private static let itemTranslationPendingPreloadLanguageDefaultsKey = "hangar.itemTranslation.pendingPreloadLanguage"
     private static let versionUpdateNoteKeysByShortVersion: [String: [String]] = [
@@ -1028,6 +1032,7 @@ final class AppModel {
         defer { startupActivity = nil }
         applyStoredSessions(await sessionStore.loadSnapshot(), resetContent: true)
         detectAppUpdateIfNeeded()
+        scheduleSilentItemTranslationDictionaryRefreshIfNeeded()
         await reconcileLaunchState()
     }
 
@@ -1935,6 +1940,7 @@ final class AppModel {
     }
 
     func handleAppDidBecomeActive() async {
+        scheduleSilentItemTranslationDictionaryRefreshIfNeeded()
         await subscriptionStore.refreshPurchasedProducts()
 
         guard hasBootstrapped else {
@@ -1948,6 +1954,13 @@ final class AppModel {
         )
         defer { startupActivity = nil }
         await reconcileLaunchState()
+    }
+
+    func handleAppDidLeaveActiveState() {
+        lastSilentItemTranslationDictionaryRefreshStartedAt = nil
+        silentItemTranslationDictionaryRefreshTask?.cancel()
+        silentItemTranslationDictionaryRefreshTask = nil
+        silentItemTranslationDictionaryRefreshGeneration &+= 1
     }
 
     func beginReauthentication() async {
@@ -3748,6 +3761,77 @@ final class AppModel {
             currentVersion: currentVersion,
             updateNoteKeys: updateNoteKeys(for: currentVersion)
         )
+    }
+
+    private func scheduleSilentItemTranslationDictionaryRefreshIfNeeded(
+        now: Date = .now
+    ) {
+        let language = currentHangarItemLanguage
+        guard HangarItemTranslationBackgroundRefreshPolicy.shouldRefresh(
+            for: language
+        ) else {
+            silentItemTranslationDictionaryRefreshTask?.cancel()
+            silentItemTranslationDictionaryRefreshTask = nil
+            silentItemTranslationDictionaryRefreshGeneration &+= 1
+            return
+        }
+
+        guard silentItemTranslationDictionaryRefreshTask == nil else {
+            return
+        }
+
+        if let lastStartedAt = lastSilentItemTranslationDictionaryRefreshStartedAt,
+           now.timeIntervalSince(lastStartedAt)
+            < Self.silentItemTranslationDictionaryRefreshCoalescingInterval {
+            return
+        }
+
+        lastSilentItemTranslationDictionaryRefreshStartedAt = now
+        silentItemTranslationDictionaryRefreshGeneration &+= 1
+        let generation = silentItemTranslationDictionaryRefreshGeneration
+        silentItemTranslationDictionaryRefreshTask = Task.detached(priority: .utility) { [weak self] in
+            do {
+                _ = try await HostedHangarItemTranslationStore.shared.refreshDictionary(
+                    for: language,
+                    using: HostedHangarItemTranslationClient(language: language)
+                )
+                await self?.completeSilentItemTranslationDictionaryRefresh(
+                    for: language,
+                    generation: generation,
+                    errorDescription: nil
+                )
+            } catch {
+                await self?.completeSilentItemTranslationDictionaryRefresh(
+                    for: language,
+                    generation: generation,
+                    errorDescription: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private func completeSilentItemTranslationDictionaryRefresh(
+        for language: HangarItemLanguage,
+        generation: Int,
+        errorDescription: String?
+    ) {
+        guard generation == silentItemTranslationDictionaryRefreshGeneration else {
+            return
+        }
+
+        silentItemTranslationDictionaryRefreshTask = nil
+        guard errorDescription == nil else {
+#if DEBUG
+            let message = errorDescription ?? "Unknown error"
+            print("Silent item translation dictionary refresh failed: \(message)")
+#endif
+            return
+        }
+
+        guard currentHangarItemLanguage == language else {
+            return
+        }
+        itemTranslationDictionaryRefreshGeneration &+= 1
     }
 
     private func presentPendingUpgradeItemTranslationMethodPrompt() {
