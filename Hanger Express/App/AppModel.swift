@@ -526,7 +526,6 @@ final class AppModel {
     struct CloudItemTranslationUploadProgress: Equatable {
         enum Phase: Equatable {
             case uploading
-            case completed
             case interrupted
         }
 
@@ -1623,15 +1622,7 @@ final class AppModel {
             cloudItemTranslationUploadProgress = nil
             message = "Cloud Review has no terms eligible for submission at this dictionary version."
         case let .submitted(count):
-            let totalCount = max(
-                cloudItemTranslationUploadProgress?.totalCount ?? count,
-                count
-            )
-            cloudItemTranslationUploadProgress = CloudItemTranslationUploadProgress(
-                phase: .completed,
-                completedCount: count,
-                totalCount: totalCount
-            )
+            cloudItemTranslationUploadProgress = nil
             message = "Cloud Review queued \(count) catalog term\(count == 1 ? "" : "s") for review."
         case let .unavailable(count):
             if let progress = cloudItemTranslationUploadProgress {

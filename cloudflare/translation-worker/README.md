@@ -22,9 +22,10 @@ are specified in [`IOS_INTEGRATION_PLAN.md`](./IOS_INTEGRATION_PLAN.md).
 - D1 concurrency claims prevent duplicate AI work.
 - Unreviewed machine suggestions never leave the review queue; the public API
   reports `pending` without returning their text.
-- New claims are persisted to D1 and sent to Cloudflare Queues before the app
-  receives a `pending` result. Queue consumers run Workers AI in the background;
-  the scheduled retry path recovers failed delivery or generation.
+- The public endpoint performs bounded request and item validation, sends the
+  accepted text directly to Cloudflare Queues, and immediately returns a
+  `pending` result. Queue consumers perform all D1 deduplication, claim, Workers
+  AI, and retry-job work in the background.
 - Failed claims become retryable after `retry_after`, and abandoned generation
   leases can be reclaimed after ten minutes.
 - D1 daily request and character budgets bound Workers AI usage.
@@ -226,9 +227,10 @@ Verified on 2026-07-26:
   production probes verify `415` for non-JSON requests, `413` above 32 KiB,
   and rejection above six items without consuming additional Workers AI
   budget.
-- Durable background generation is deployed as public Worker version
-  `4751b0c3-6058-4445-9b20-1c42ad3e61cd`; the production queue has one producer
-  and one consumer, with D1-backed scheduled retry as its delivery fallback.
+- Direct queue handoff and durable background generation are deployed as public
+  Worker version `ca499757-5e0f-484e-ae20-3f618d2758b5`; the production queue
+  has one producer and one consumer, with D1-backed scheduled retry as its
+  delivery fallback.
 
 The release workflow was exercised with a real correction to `Combat Support`
 from `战场支援` to `战斗支援`: version 2 was published and independently matched
@@ -301,11 +303,10 @@ The development configuration permits at most 100 new AI translations and
 budget. Exhaustion returns an `unavailable` result and never blocks the app.
 
 Resolve requests must be JSON, are streamed through a 32 KiB body ceiling, and
-contain no more than six items. Six is the hard code ceiling even if a deployed
-environment variable is accidentally raised; it keeps the worst retry path
-below the Workers Free-plan subrequest limit. Repeated sightings update their
-D1 popularity counter at most once per source per hour to bound write
-amplification.
+contain no more than 50 items. Fifty is the hard code ceiling even if a deployed
+environment variable is accidentally raised and remains below Cloudflare
+Queues' 100-message `sendBatch` ceiling. Repeated sightings update their D1
+popularity counter at most once per source per hour to bound write amplification.
 
 Workers AI exceptions atomically mark the claimed translation failed and
 increment that UTC day's `ai_failures` counter. Budget exhaustion is recorded

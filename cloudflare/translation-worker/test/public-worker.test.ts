@@ -178,7 +178,7 @@ test("requires JSON and rejects oversized resolve bodies before binding work", a
   assert.equal(streamedOversized.status, 413);
 });
 
-test("enforces the fail-safe six-item resolve ceiling", async () => {
+test("enforces the fail-safe fifty-item resolve ceiling", async () => {
   const response = await translationWorker.fetch(
     new Request("https://example.com/v1/translations/resolve", {
       method: "POST",
@@ -186,7 +186,7 @@ test("enforces the fail-safe six-item resolve ceiling", async () => {
       body: JSON.stringify({
         sourceLocale: "en",
         targetLocale: "zh-Hans",
-        items: Array.from({ length: 7 }, (_, index) => ({
+        items: Array.from({ length: 51 }, (_, index) => ({
           clientID: String(index),
           source: `Catalog item ${index}`,
           kind: "item",
@@ -194,13 +194,89 @@ test("enforces the fail-safe six-item resolve ceiling", async () => {
       }),
     }),
     {
-      MAX_BATCH_SIZE: "25",
+      MAX_BATCH_SIZE: "100",
       MAX_SOURCE_LENGTH: "160",
     } as Env,
   );
 
   assert.equal(response.status, 400);
-  assert.match(await response.text(), /at most 6 entries/i);
+  assert.match(await response.text(), /at most 50 entries/i);
+});
+
+test("accepts validated text into the queue without reading D1 or running AI", async () => {
+  const messages: Array<{ body: unknown }> = [];
+  const env = {
+    TRANSLATION_QUEUE: {
+      async sendBatch(batch: Iterable<{ body: unknown }>) {
+        messages.push(...batch);
+        return {
+          metadata: {
+            metrics: { backlogCount: messages.length, backlogBytes: 0 },
+          },
+        };
+      },
+    },
+    get DB(): never {
+      throw new Error("D1 must not be touched by the upload request.");
+    },
+    get AI(): never {
+      throw new Error("Workers AI must not run in the upload request.");
+    },
+    MAX_BATCH_SIZE: "50",
+    MAX_SOURCE_LENGTH: "160",
+  } as unknown as Env;
+
+  const response = await translationWorker.fetch(
+    new Request("https://example.com/v1/translations/resolve", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sourceLocale: "en",
+        targetLocale: "zh-Hans",
+        items: [
+          { clientID: "a", source: "Caterpillar", kind: "ship" },
+          { clientID: "b", source: "Terrapin", kind: "ship" },
+        ],
+      }),
+    }),
+    env,
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(messages, [
+    {
+      body: {
+        version: 2,
+        clientID: "a",
+        source: "Caterpillar",
+        kind: "ship",
+      },
+    },
+    {
+      body: {
+        version: 2,
+        clientID: "b",
+        source: "Terrapin",
+        kind: "ship",
+      },
+    },
+  ]);
+  assert.deepEqual(await response.json(), {
+    translations: [
+      {
+        clientID: "a",
+        source: "Caterpillar",
+        status: "pending",
+        reason: "Translation is queued for human review.",
+      },
+      {
+        clientID: "b",
+        source: "Terrapin",
+        status: "pending",
+        reason: "Translation is queued for human review.",
+      },
+    ],
+  });
 });
 
 test("scheduled retries exit cleanly when the queue is empty", async () => {

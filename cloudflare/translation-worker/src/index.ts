@@ -1,5 +1,9 @@
 import { supportedTargetLocale } from "./contracts.ts";
-import type { ResolveResponse, ResolveResult } from "./contracts.ts";
+import type {
+  ResolveResponse,
+  ResolveResult,
+  TranslationKind,
+} from "./contracts.ts";
 import {
   existingResult,
   handleCurrentDictionary,
@@ -26,13 +30,24 @@ import {
 import type { ValidationLimits } from "./validation.ts";
 
 const translationModel = "@cf/meta/m2m100-1.2b";
-const maximumResolveBatchSize = 6;
+const maximumResolveBatchSize = 50;
 const maximumResolveRequestBytes = 32 * 1024;
 const scheduledRetryBatchSize = 6;
 
-interface TranslationQueueMessage {
+interface LegacyTranslationQueueMessage {
   entryID: number;
 }
+
+interface TranslationQueueMessage {
+  version: 2;
+  clientID: string;
+  source: string;
+  kind: TranslationKind;
+}
+
+type QueuedTranslationMessage =
+  | LegacyTranslationQueueMessage
+  | TranslationQueueMessage;
 
 class ResolveRequestTooLargeError extends Error {}
 
@@ -257,7 +272,6 @@ async function processRetryBatch(
 async function handleResolve(
   request: Request,
   env: Env,
-  context?: ExecutionContext,
 ): Promise<Response> {
   const contentType = request.headers.get("content-type")?.toLowerCase() ?? "";
   if (!contentType.startsWith("application/json")) {
@@ -284,12 +298,11 @@ async function handleResolve(
     return json({ error: requestValidation.error }, 400);
   }
 
-  const now = new Date();
   const translations: ResolveResult[] = [];
-  const queuedClaims: Array<{
+  const acceptedItems: Array<{
     clientID: string;
     source: string;
-    entryID: number;
+    kind: TranslationKind;
   }> = [];
 
   for (const rawItem of requestValidation.request.items) {
@@ -304,107 +317,47 @@ async function handleResolve(
       continue;
     }
 
-    try {
-      const claim = await findOrClaimTranslation(
-        env.DB,
-        supportedTargetLocale,
-        validation.validated,
-        now,
-      );
-      const existing = existingResult(
-        validation.validated.clientID,
-        validation.validated.source,
-        claim.stored,
-      );
-      if (existing) {
-        translations.push(existing);
-      } else if (!claim.ownsGeneration) {
-        translations.push({
-          clientID: validation.validated.clientID,
-          source: validation.validated.source,
-          status: claim.stored.retry_job_id === null ? "unavailable" : "pending",
-          reason: claim.stored.retry_job_id === null
-            ? "Translation is temporarily unavailable."
-            : "Translation is queued for human review.",
-        });
-      } else {
-        queuedClaims.push({
-          clientID: validation.validated.clientID,
-          source: validation.validated.source,
-          entryID: claim.stored.id,
-        });
-      }
-    } catch {
-      translations.push({
-        clientID: validation.validated.clientID,
-        source: validation.validated.source,
-        status: "unavailable",
-        reason: "Translation storage is temporarily unavailable.",
-      });
-    }
+    acceptedItems.push({
+      clientID: validation.validated.clientID,
+      source: validation.validated.source,
+      kind: validation.validated.kind,
+    });
   }
 
-  if (queuedClaims.length > 0) {
+  if (acceptedItems.length > 0) {
     try {
-      const queuedIDs = new Set(
-        await enqueueTranslations(
-          env.DB,
-          supportedTargetLocale,
-          queuedClaims.map((claim) => ({
-            id: claim.entryID,
-            source: claim.source,
-          })),
-          now,
-        ),
+      await env.TRANSLATION_QUEUE.sendBatch(
+        acceptedItems.map((item) => ({
+          body: {
+            version: 2,
+            clientID: item.clientID,
+            source: item.source,
+            kind: item.kind,
+          } satisfies TranslationQueueMessage,
+        })),
       );
-      const queueMessages = queuedClaims
-        .filter((claim) => queuedIDs.has(claim.entryID))
-        .map((claim) => ({ body: { entryID: claim.entryID } }));
-
-      for (const claim of queuedClaims) {
-        const queued = queuedIDs.has(claim.entryID);
+      for (const item of acceptedItems) {
         translations.push({
-          clientID: claim.clientID,
-          source: claim.source,
-          status: queued ? "pending" : "unavailable",
-          reason: queued
-            ? "Translation is queued for human review."
-            : "Translation storage is temporarily unavailable.",
+          clientID: item.clientID,
+          source: item.source,
+          status: "pending",
+          reason: "Translation is queued for human review.",
         });
-      }
-
-      if (queueMessages.length > 0) {
-        const delivery = env.TRANSLATION_QUEUE
-          .sendBatch(queueMessages)
-          .catch((error) => {
-            console.error(
-              JSON.stringify({
-                message: "Cloudflare Queue delivery failed; scheduled retry will recover it.",
-                entryIDs: queueMessages.map((message) => message.body.entryID),
-                error: error instanceof Error ? error.message : String(error),
-              }),
-            );
-          });
-        if (context) {
-          context.waitUntil(delivery);
-        } else {
-          await delivery;
-        }
       }
     } catch (error) {
       console.error(
         JSON.stringify({
-          message: "Translation queue persistence failed.",
-          entryIDs: queuedClaims.map((claim) => claim.entryID),
+          message: "Translation queue delivery failed.",
+          itemCount: acceptedItems.length,
           error: error instanceof Error ? error.message : String(error),
         }),
       );
-      for (const claim of queuedClaims) {
+      for (const item of acceptedItems) {
         translations.push({
-          clientID: claim.clientID,
-          source: claim.source,
+          clientID: item.clientID,
+          source: item.source,
           status: "unavailable",
-          reason: "Translation storage is temporarily unavailable.",
+          reason: "Translation queue is temporarily unavailable.",
         });
       }
     }
@@ -426,7 +379,7 @@ export default {
         return json({ status: "ok" });
       }
       if (request.method === "POST" && url.pathname === "/v1/translations/resolve") {
-        return handleResolve(request, env, context);
+        return handleResolve(request, env);
       }
       if (
         request.method === "GET" &&
@@ -473,23 +426,72 @@ export default {
     }
   },
   async queue(
-    batch: MessageBatch<TranslationQueueMessage>,
+    batch: MessageBatch<QueuedTranslationMessage>,
     env: Env,
   ): Promise<void> {
     for (const message of batch.messages) {
       try {
-        const claim = await claimQueuedTranslationByID(
+        if ("entryID" in message.body) {
+          const claim = await claimQueuedTranslationByID(
+            env.DB,
+            supportedTargetLocale,
+            message.body.entryID,
+            new Date(),
+          );
+          if (claim) {
+            await resolveNewTranslation(
+              env,
+              `queue-${claim.id}`,
+              claim.source,
+              claim.id,
+              new Date(),
+            );
+          }
+          message.ack();
+          continue;
+        }
+
+        const item = validateItem(message.body, limits(env));
+        if (!item.validated) {
+          message.ack();
+          continue;
+        }
+        const claim = await findOrClaimTranslation(
           env.DB,
           supportedTargetLocale,
-          message.body.entryID,
+          item.validated,
           new Date(),
         );
-        if (claim) {
+        const existing = existingResult(
+          item.validated.clientID,
+          item.validated.source,
+          claim.stored,
+        );
+        if (existing || !claim.ownsGeneration) {
+          message.ack();
+          continue;
+        }
+        const queuedIDs = await enqueueTranslations(
+          env.DB,
+          supportedTargetLocale,
+          [{ id: claim.stored.id, source: claim.stored.source }],
+          new Date(),
+        );
+        if (!queuedIDs.includes(claim.stored.id)) {
+          throw new Error("The queued translation could not be persisted.");
+        }
+        const generationClaim = await claimQueuedTranslationByID(
+          env.DB,
+          supportedTargetLocale,
+          queuedIDs[0],
+          new Date(),
+        );
+        if (generationClaim) {
           await resolveNewTranslation(
             env,
-            `queue-${claim.id}`,
-            claim.source,
-            claim.id,
+            `queue-${generationClaim.id}`,
+            generationClaim.source,
+            generationClaim.id,
             new Date(),
           );
         }
@@ -498,7 +500,9 @@ export default {
         console.error(
           JSON.stringify({
             message: "Queued translation processing failed.",
-            entryID: message.body.entryID,
+            item: "entryID" in message.body
+              ? message.body.entryID
+              : message.body.clientID,
             error: error instanceof Error ? error.message : String(error),
           }),
         );
@@ -506,4 +510,4 @@ export default {
       }
     }
   },
-} satisfies ExportedHandler<Env, TranslationQueueMessage>;
+} satisfies ExportedHandler<Env, QueuedTranslationMessage>;
