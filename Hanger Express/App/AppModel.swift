@@ -1994,6 +1994,7 @@ final class AppModel {
         }
 
         await snapshotStore.clear()
+        await ProfileBackgroundOptionsCache.shared.clear()
         URLCache.shared.removeAllCachedResponses()
         await imageCache.clear()
         await HostedShipCatalogStore.shared.clear()
