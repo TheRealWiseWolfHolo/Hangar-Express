@@ -1,0 +1,47 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hangar-express-translation-admin",
+  "main": "src/admin-worker.ts",
+  "compatibility_date": "2026-07-26",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": true,
+  "preview_urls": false,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cn-translation",
+      "database_id": "fbe07427-a156-415e-9605-76233202fcd2",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "RELEASES",
+      "bucket_name": "cn-translation-bucket"
+    }
+  ],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "html_handling": "none",
+    "not_found_handling": "none",
+    "run_worker_first": true
+  },
+  "vars": {
+    "ADMIN_API_ENABLED": "true",
+    "ADMIN_DEV_EMAIL": "",
+    "TEAM_DOMAIN": "https://wisewolfholo.cloudflareaccess.com",
+    "POLICY_AUD": "0c54b29618857d0b557ced36d2b6661d78125e395e7e4eb26ba1d55f3587f350",
+    "DAILY_AI_REQUEST_LIMIT": "100",
+    "DAILY_AI_CHARACTER_LIMIT": "10000"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    }
+  }
+}

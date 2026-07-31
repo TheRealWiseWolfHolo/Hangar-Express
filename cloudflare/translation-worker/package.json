@@ -1,0 +1,28 @@
+{
+  "name": "hangar-express-translation-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "npm run deploy:public",
+    "deploy:public": "wrangler deploy",
+    "deploy:admin": "wrangler deploy --config wrangler.admin.jsonc",
+    "dev": "npm run dev:public",
+    "dev:public": "wrangler dev",
+    "dev:admin": "wrangler dev --config wrangler.admin.jsonc",
+    "build-import": "node scripts/build-curated-import.ts",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.public.json && tsc --noEmit -p tsconfig.admin.json",
+    "types": "npm run types:public && npm run types:admin",
+    "types:public": "wrangler types worker-configuration.d.ts",
+    "types:admin": "wrangler types worker-admin-configuration.d.ts --config wrangler.admin.jsonc --env-interface AdminEnv"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "wrangler": "^4.86.0"
+  },
+  "dependencies": {
+    "jose": "^6.2.4",
+    "opencc-js": "^1.4.1"
+  }
+}

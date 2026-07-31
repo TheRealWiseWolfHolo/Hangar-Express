@@ -1,0 +1,63 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hangar-express-translations",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-26",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": true,
+  "preview_urls": false,
+  "ai": {
+    "binding": "AI"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cn-translation",
+      "database_id": "fbe07427-a156-415e-9605-76233202fcd2",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "RELEASES",
+      "bucket_name": "cn-translation-bucket"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "TRANSLATION_QUEUE",
+        "queue": "hangar-express-translation-generation"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "hangar-express-translation-generation",
+        "max_batch_size": 6,
+        "max_batch_timeout": 2,
+        "max_retries": 3,
+        "max_concurrency": 1
+      }
+    ]
+  },
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
+  },
+  "vars": {
+    "DAILY_AI_REQUEST_LIMIT": "100",
+    "DAILY_AI_CHARACTER_LIMIT": "10000",
+    "MAX_BATCH_SIZE": "6",
+    "MAX_SOURCE_LENGTH": "160"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    }
+  }
+}

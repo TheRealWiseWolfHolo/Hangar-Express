@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "worker-configuration.d.ts",
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "src/access.ts",
+    "src/admin.ts",
+    "src/admin-worker.ts",
+    "src/publisher.ts"
+  ]
+}

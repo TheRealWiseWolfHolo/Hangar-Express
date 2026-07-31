@@ -146,6 +146,7 @@ struct SettingsView: View {
                                     dictionary: itemTranslationState.dictionary
                                 ),
                                 dictionary: itemTranslationState.dictionary,
+                                uploadProgress: appModel.cloudItemTranslationUploadProgress,
                                 refreshState: cloudDictionaryRefreshState,
                                 onRefresh: {
                                     Task {
@@ -629,6 +630,7 @@ private struct ProPlansSheet: View {
 private struct CloudTranslationDictionaryStatusView: View {
     let coverage: CloudTranslationCoverage
     let dictionary: HangarItemTranslationDictionary?
+    let uploadProgress: AppModel.CloudItemTranslationUploadProgress?
     let refreshState: CloudTranslationDictionaryRefreshState
     let onRefresh: () -> Void
 
@@ -669,6 +671,36 @@ private struct CloudTranslationDictionaryStatusView: View {
                 .foregroundStyle(.secondary)
             }
 
+            if let uploadProgress {
+                Divider()
+
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        uploadProgressTitle(uploadProgress.phase)
+                            .font(.subheadline.weight(.semibold))
+
+                        Spacer()
+
+                        Text(
+                            AppLocalizer.format(
+                                "%lld of %lld",
+                                Int64(uploadProgress.completedCount),
+                                Int64(uploadProgress.totalCount)
+                            )
+                        )
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    }
+
+                    ProgressView(value: uploadProgress.fractionComplete)
+                        .tint(uploadProgress.phase == .interrupted ? .orange : .blue)
+
+                    uploadProgressDetail(uploadProgress)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     if let dictionary {
@@ -706,6 +738,40 @@ private struct CloudTranslationDictionaryStatusView: View {
             }
         }
         .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private func uploadProgressTitle(
+        _ phase: AppModel.CloudItemTranslationUploadProgress.Phase
+    ) -> some View {
+        switch phase {
+        case .uploading:
+            Text("Uploading missing terms")
+        case .completed:
+            Text("Upload complete")
+        case .interrupted:
+            Text("Upload paused")
+        }
+    }
+
+    @ViewBuilder
+    private func uploadProgressDetail(
+        _ progress: AppModel.CloudItemTranslationUploadProgress
+    ) -> some View {
+        switch progress.phase {
+        case .uploading:
+            Text(
+                AppLocalizer.format(
+                    "%lld of %lld catalog terms uploaded.",
+                    Int64(progress.completedCount),
+                    Int64(progress.totalCount)
+                )
+            )
+        case .completed:
+            Text("All eligible missing terms were sent to cloud processing.")
+        case .interrupted:
+            Text("Completed batches were saved. The remaining terms will retry later.")
+        }
     }
 
     @ViewBuilder

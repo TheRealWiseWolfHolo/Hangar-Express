@@ -22,6 +22,9 @@ are specified in [`IOS_INTEGRATION_PLAN.md`](./IOS_INTEGRATION_PLAN.md).
 - D1 concurrency claims prevent duplicate AI work.
 - Unreviewed machine suggestions never leave the review queue; the public API
   reports `pending` without returning their text.
+- New claims are persisted to D1 and sent to Cloudflare Queues before the app
+  receives a `pending` result. Queue consumers run Workers AI in the background;
+  the scheduled retry path recovers failed delivery or generation.
 - Failed claims become retryable after `retry_after`, and abandoned generation
   leases can be reclaimed after ten minutes.
 - D1 daily request and character budgets bound Workers AI usage.
@@ -53,6 +56,7 @@ identifiers, and user-entered text must remain on device.
 npm install
 npx wrangler d1 create cn-translation
 npx wrangler r2 bucket create cn-translation-bucket
+npx wrangler queues create hangar-express-translation-generation
 ```
 
 Copy the returned D1 database ID into `wrangler.jsonc`, replacing
@@ -222,6 +226,9 @@ Verified on 2026-07-26:
   production probes verify `415` for non-JSON requests, `413` above 32 KiB,
   and rejection above six items without consuming additional Workers AI
   budget.
+- Durable background generation is deployed as public Worker version
+  `4751b0c3-6058-4445-9b20-1c42ad3e61cd`; the production queue has one producer
+  and one consumer, with D1-backed scheduled retry as its delivery fallback.
 
 The release workflow was exercised with a real correction to `Combat Support`
 from `战场支援` to `战斗支援`: version 2 was published and independently matched

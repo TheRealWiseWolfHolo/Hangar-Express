@@ -35,27 +35,33 @@ nonisolated enum CloudHangarItemTranslationKind: String, Codable, CaseIterable, 
 }
 
 nonisolated struct CloudHangarItemTranslationCandidate: Hashable, Sendable {
+    private static let couponCodeExpression = try? NSRegularExpression(
+        pattern: #"\b([0-9]{1,3}\s*%\s*Coupon)\s*[:：]"#,
+        options: [.caseInsensitive]
+    )
+
     let source: String
     let kind: CloudHangarItemTranslationKind
 
     init?(source: String, kind: CloudHangarItemTranslationKind) {
-        let containsControlCharacter = source.unicodeScalars.contains {
+        let cloudSafeSource = Self.removingCouponCode(from: source)
+        let containsControlCharacter = cloudSafeSource.unicodeScalars.contains {
             ($0.value <= 0x1F && $0.value != 0x09) || $0.value == 0x7F
         }
         guard !containsControlCharacter,
-              !source.contains("\n"),
-              !source.contains("\r"),
-              source.range(
+              !cloudSafeSource.contains("\n"),
+              !cloudSafeSource.contains("\r"),
+              cloudSafeSource.range(
                   of: #"\b\S+@\S+\.\S+\b"#,
                   options: [.regularExpression, .caseInsensitive]
               ) == nil,
-              source.range(
+              cloudSafeSource.range(
                   of: #"\b(?:https?://|www\.)\S+"#,
                   options: [.regularExpression, .caseInsensitive]
               ) == nil else {
             return nil
         }
-        let normalizedSource = source
+        let normalizedSource = cloudSafeSource
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
@@ -66,6 +72,19 @@ nonisolated struct CloudHangarItemTranslationCandidate: Hashable, Sendable {
 
         self.source = normalizedSource
         self.kind = kind
+    }
+
+    private static func removingCouponCode(from source: String) -> String {
+        let fullRange = NSRange(source.startIndex ..< source.endIndex, in: source)
+        guard let match = couponCodeExpression?.firstMatch(
+            in: source,
+            range: fullRange
+        ),
+              let couponRange = Range(match.range(at: 1), in: source) else {
+            return source
+        }
+
+        return String(source[..<couponRange.upperBound])
     }
 
     var clientID: String {
@@ -92,11 +111,11 @@ nonisolated enum CloudHangarItemTranslationSuggestionClassifier {
 
         func add(_ source: String?, kind: CloudHangarItemTranslationKind) {
             guard let source,
-                  dictionary?.translation(for: source) == nil,
                   let candidate = CloudHangarItemTranslationCandidate(
                       source: source,
                       kind: kind
-                  ) else {
+                  ),
+                  dictionary?.translation(for: candidate.source) == nil else {
                 return
             }
             let key = "\(candidate.kind.rawValue)\n\(candidate.normalizedLookupKey)"
@@ -167,6 +186,18 @@ nonisolated struct CloudHangarItemTranslationResult: Equatable, Sendable {
     let reason: String?
 }
 
+nonisolated struct CloudHangarItemTranslationUploadProgress: Equatable, Sendable {
+    let completedCount: Int
+    let totalCount: Int
+
+    var fractionComplete: Double {
+        guard totalCount > 0 else {
+            return 0
+        }
+        return Double(min(max(completedCount, 0), totalCount)) / Double(totalCount)
+    }
+}
+
 nonisolated enum CloudHangarItemTranslationClientError: Error, Equatable {
     case invalidResponse
     case httpStatus(Int)
@@ -174,6 +205,7 @@ nonisolated enum CloudHangarItemTranslationClientError: Error, Equatable {
 
 nonisolated struct CloudHangarItemTranslationClient: Sendable {
     static let maximumServerBatchSize = 6
+    static let maximumConcurrentUploads = 4
     static let productionBaseURL = URL(
         string: "https://hangar-express-translations.liuchen2004.workers.dev"
     )!
@@ -197,26 +229,82 @@ nonisolated struct CloudHangarItemTranslationClient: Sendable {
 
     func submit(
         _ candidates: [CloudHangarItemTranslationCandidate],
-        dictionaryVersion: Int?
+        dictionaryVersion: Int?,
+        batchHandler: (
+            @Sendable (
+                [CloudHangarItemTranslationResult],
+                CloudHangarItemTranslationUploadProgress
+            ) async -> Void
+        )? = nil
     ) async throws -> [CloudHangarItemTranslationResult] {
         let uniqueCandidates = Self.deduplicated(candidates)
-        var results: [CloudHangarItemTranslationResult] = []
-        results.reserveCapacity(uniqueCandidates.count)
-
-        for batchStart in stride(
+        let batches = stride(
             from: 0,
             to: uniqueCandidates.count,
             by: maximumBatchSize
-        ) {
-            let batchEnd = min(batchStart + maximumBatchSize, uniqueCandidates.count)
-            results.append(
-                contentsOf: try await submitBatch(
-                    Array(uniqueCandidates[batchStart ..< batchEnd]),
-                    dictionaryVersion: dictionaryVersion
-                )
+        ).map { batchStart in
+            let batchEnd = min(
+                batchStart + maximumBatchSize,
+                uniqueCandidates.count
             )
+            return Array(uniqueCandidates[batchStart ..< batchEnd])
         }
-        return results
+        guard !batches.isEmpty else {
+            return []
+        }
+
+        var orderedResults = Array<[CloudHangarItemTranslationResult]?>(
+            repeating: nil,
+            count: batches.count
+        )
+        var completedCount = 0
+        try await withThrowingTaskGroup(
+            of: (Int, [CloudHangarItemTranslationResult]).self
+        ) { group in
+            var nextBatchIndex = 0
+            let initialUploadCount = min(
+                Self.maximumConcurrentUploads,
+                batches.count
+            )
+            for batchIndex in 0 ..< initialUploadCount {
+                group.addTask { [self] in
+                    (
+                        batchIndex,
+                        try await submitBatch(
+                            batches[batchIndex],
+                            dictionaryVersion: dictionaryVersion
+                        )
+                    )
+                }
+                nextBatchIndex += 1
+            }
+
+            while let (batchIndex, batchResults) = try await group.next() {
+                orderedResults[batchIndex] = batchResults
+                completedCount += batchResults.count
+                await batchHandler?(
+                    batchResults,
+                    CloudHangarItemTranslationUploadProgress(
+                        completedCount: completedCount,
+                        totalCount: uniqueCandidates.count
+                    )
+                )
+                if nextBatchIndex < batches.count {
+                    let batchIndex = nextBatchIndex
+                    group.addTask { [self] in
+                        (
+                            batchIndex,
+                            try await submitBatch(
+                                batches[batchIndex],
+                                dictionaryVersion: dictionaryVersion
+                            )
+                        )
+                    }
+                    nextBatchIndex += 1
+                }
+            }
+        }
+        return orderedResults.compactMap { $0 }.flatMap { $0 }
     }
 
     private func submitBatch(
@@ -227,35 +315,10 @@ nonisolated struct CloudHangarItemTranslationClient: Sendable {
             return []
         }
 
-        let endpoint = baseURL
-            .appendingPathComponent("v1")
-            .appendingPathComponent("translations")
-            .appendingPathComponent("resolve")
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 30
-        request.allowsConstrainedNetworkAccess = false
-        request.allowsExpensiveNetworkAccess = false
-        request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.setValue("application/json", forHTTPHeaderField: "accept")
-        request.httpBody = try JSONEncoder().encode(
-            ResolveRequest(
-                sourceLocale: "en",
-                targetLocale: "zh-Hans",
-                dictionaryVersion: dictionaryVersion.flatMap {
-                    $0 > 0 ? $0 : nil
-                },
-                items: candidates.map {
-                    ResolveRequest.Item(
-                        clientID: $0.clientID,
-                        source: $0.source,
-                        kind: $0.kind
-                    )
-                }
-            )
+        let request = try resolveRequest(
+            for: candidates,
+            dictionaryVersion: dictionaryVersion
         )
-
         let (data, response) = try await urlSession.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw CloudHangarItemTranslationClientError.invalidResponse
@@ -291,6 +354,41 @@ nonisolated struct CloudHangarItemTranslationClient: Sendable {
                 reason: result.reason
             )
         }
+    }
+
+    func resolveRequest(
+        for candidates: [CloudHangarItemTranslationCandidate],
+        dictionaryVersion: Int?
+    ) throws -> URLRequest {
+        let endpoint = baseURL
+            .appendingPathComponent("v1")
+            .appendingPathComponent("translations")
+            .appendingPathComponent("resolve")
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 30
+        request.allowsConstrainedNetworkAccess = false
+        request.allowsExpensiveNetworkAccess = false
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("application/json", forHTTPHeaderField: "accept")
+        request.httpBody = try JSONEncoder().encode(
+            ResolveRequest(
+                sourceLocale: "en",
+                targetLocale: "zh-Hans",
+                dictionaryVersion: dictionaryVersion.flatMap {
+                    $0 > 0 ? $0 : nil
+                },
+                items: candidates.map {
+                    ResolveRequest.Item(
+                        clientID: $0.clientID,
+                        source: $0.source,
+                        kind: $0.kind
+                    )
+                }
+            )
+        )
+        return request
     }
 
     private static func deduplicated(
@@ -375,7 +473,10 @@ actor CloudHangarItemTranslationSubmissionStore {
         mode: HangarItemTranslationMissMode,
         client: CloudHangarItemTranslationClient = CloudHangarItemTranslationClient(),
         now: Date = .now,
-        rolloutEnabled: Bool = CloudHangarItemTranslationRollout.isEnabled
+        rolloutEnabled: Bool = CloudHangarItemTranslationRollout.isEnabled,
+        progressHandler: (
+            @MainActor @Sendable (CloudHangarItemTranslationUploadProgress) -> Void
+        )? = nil
     ) async -> CloudHangarItemTranslationSubmissionOutcome {
         guard rolloutEnabled, mode == .cloudReview else {
             return .disabled
@@ -408,22 +509,36 @@ actor CloudHangarItemTranslationSubmissionStore {
         isSubmitting = true
         defer { isSubmitting = false }
 
+        await progressHandler?(
+            CloudHangarItemTranslationUploadProgress(
+                completedCount: 0,
+                totalCount: pendingCandidates.count
+            )
+        )
+
         do {
             let results = try await client.submit(
                 pendingCandidates,
-                dictionaryVersion: dictionary.version
+                dictionaryVersion: dictionary.version,
+                batchHandler: { [weak self] batchResults, progress in
+                    await self?.recordCompletedBatch(
+                        batchResults,
+                        dictionaryVersion: dictionary.version,
+                        now: now
+                    )
+                    await progressHandler?(progress)
+                }
             )
-            for result in results {
-                state.record(
-                    result,
+            return .submitted(results.count)
+        } catch {
+            let retryCandidates = pendingCandidates.filter {
+                state.shouldSubmit(
+                    $0,
                     dictionaryVersion: dictionary.version,
                     now: now
                 )
             }
-            saveState()
-            return .submitted(results.count)
-        } catch {
-            for candidate in pendingCandidates {
+            for candidate in retryCandidates {
                 state.record(
                     CloudHangarItemTranslationResult(
                         candidate: candidate,
@@ -435,8 +550,23 @@ actor CloudHangarItemTranslationSubmissionStore {
                 )
             }
             saveState()
-            return .unavailable(pendingCandidates.count)
+            return .unavailable(retryCandidates.count)
         }
+    }
+
+    private func recordCompletedBatch(
+        _ results: [CloudHangarItemTranslationResult],
+        dictionaryVersion: Int,
+        now: Date
+    ) {
+        for result in results {
+            state.record(
+                result,
+                dictionaryVersion: dictionaryVersion,
+                now: now
+            )
+        }
+        saveState()
     }
 
     private func saveState() {

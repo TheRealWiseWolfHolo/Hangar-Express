@@ -523,6 +523,25 @@ final class AppModel {
         }
     }
 
+    struct CloudItemTranslationUploadProgress: Equatable {
+        enum Phase: Equatable {
+            case uploading
+            case completed
+            case interrupted
+        }
+
+        let phase: Phase
+        let completedCount: Int
+        let totalCount: Int
+
+        var fractionComplete: Double {
+            guard totalCount > 0 else {
+                return 0
+            }
+            return Double(min(max(completedCount, 0), totalCount)) / Double(totalCount)
+        }
+    }
+
     struct ItemTranslationPreloadLogEntry: Identifiable, Equatable {
         let id = UUID()
         let occurredAt: Date
@@ -652,6 +671,7 @@ final class AppModel {
     var versionRefreshPrompt: VersionRefreshPrompt?
     var itemTranslationPreprocessPrompt: ItemTranslationPreprocessPrompt?
     var itemTranslationPreloadProgress: ItemTranslationPreloadProgress?
+    var cloudItemTranslationUploadProgress: CloudItemTranslationUploadProgress?
     var itemTranslationPreloadLogEntries: [ItemTranslationPreloadLogEntry] = []
     var itemTranslationDictionaryRefreshGeneration = 0
     private var hangarLogRefreshPreviewLogs: [HangarLogEntry] = []
@@ -1406,6 +1426,7 @@ final class AppModel {
             itemTranslationPreloadProgressDismissalTask?.cancel()
             itemTranslationPreloadProgressDismissalTask = nil
             itemTranslationPreloadProgress = nil
+            cloudItemTranslationUploadProgress = nil
             resetItemTranslationPreloadLogs()
             itemTranslationPreprocessPrompt = nil
             clearPendingItemTranslationPreload()
@@ -1493,6 +1514,7 @@ final class AppModel {
         itemTranslationPreloadProgressDismissalTask?.cancel()
         itemTranslationPreloadProgressDismissalTask = nil
         itemTranslationPreloadProgress = nil
+        cloudItemTranslationUploadProgress = nil
         appendItemTranslationPreloadLog(
             "Scheduled \(showsProgress ? "visible" : "silent") \(missMode.rawValue) preload. generation=\(preloadGeneration), language=\(language.rawValue), sourceCandidates=\(sources.count)."
         )
@@ -1526,7 +1548,13 @@ final class AppModel {
                     .submitSuggestions(
                         for: snapshot,
                         excluding: dictionaryResult.dictionary,
-                        mode: missMode
+                        mode: missMode,
+                        progressHandler: { progress in
+                            self.applyCloudItemTranslationUploadProgress(
+                                progress,
+                                generation: preloadGeneration
+                            )
+                        }
                     )
                 await self.applyCloudItemTranslationSubmissionOutcome(
                     outcome,
@@ -1583,19 +1611,53 @@ final class AppModel {
         let message: String
         switch outcome {
         case .disabled:
+            cloudItemTranslationUploadProgress = nil
             message = "Cloud Review is disabled; no suggestion request was sent."
         case .dictionaryUnavailable:
+            cloudItemTranslationUploadProgress = nil
             message = "Cloud Review skipped because no verified hosted dictionary was available."
         case .noEligibleCandidates:
+            cloudItemTranslationUploadProgress = nil
             message = "Cloud Review found no eligible catalog terminology."
         case .alreadySubmitted:
+            cloudItemTranslationUploadProgress = nil
             message = "Cloud Review has no terms eligible for submission at this dictionary version."
         case let .submitted(count):
+            let totalCount = max(
+                cloudItemTranslationUploadProgress?.totalCount ?? count,
+                count
+            )
+            cloudItemTranslationUploadProgress = CloudItemTranslationUploadProgress(
+                phase: .completed,
+                completedCount: count,
+                totalCount: totalCount
+            )
             message = "Cloud Review queued \(count) catalog term\(count == 1 ? "" : "s") for review."
         case let .unavailable(count):
+            if let progress = cloudItemTranslationUploadProgress {
+                cloudItemTranslationUploadProgress = CloudItemTranslationUploadProgress(
+                    phase: .interrupted,
+                    completedCount: progress.completedCount,
+                    totalCount: progress.totalCount
+                )
+            }
             message = "Cloud Review could not queue \(count) catalog term\(count == 1 ? "" : "s"); retry state was saved."
         }
         appendItemTranslationPreloadLog(message)
+    }
+
+    private func applyCloudItemTranslationUploadProgress(
+        _ progress: CloudHangarItemTranslationUploadProgress,
+        generation: Int
+    ) {
+        guard generation == itemTranslationPreloadGeneration else {
+            return
+        }
+        cloudItemTranslationUploadProgress = CloudItemTranslationUploadProgress(
+            phase: .uploading,
+            completedCount: progress.completedCount,
+            totalCount: progress.totalCount
+        )
     }
 
     private nonisolated static func loadItemTranslationDictionary(

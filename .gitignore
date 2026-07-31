@@ -33,4 +33,5 @@ embedded.mobileprovision
 
 # Node / Cloudflare Workers
 node_modules/
+.wrangler/
 .dev.vars
