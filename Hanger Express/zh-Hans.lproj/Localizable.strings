@@ -864,10 +864,8 @@
 "Cloud" = "云端";
 "Approved catalog coverage" = "已审核目录术语覆盖率";
 "Uploading missing terms" = "正在上传缺失术语";
-"Upload complete" = "上传完成";
 "Upload paused" = "上传已暂停";
 "%lld of %lld catalog terms uploaded." = "已上传 %lld / %lld 个目录术语。";
-"All eligible missing terms were sent to cloud processing." = "所有符合条件的缺失术语均已发送至云端处理。";
 "Completed batches were saved. The remaining terms will retry later." = "已保存完成的批次，其余术语稍后将自动重试。";
 "%lld of %lld" = "%lld / %lld";
 "%lld catalog terms are still missing from the approved dictionary." = "已审核词典中仍缺少 %lld 个目录术语。";

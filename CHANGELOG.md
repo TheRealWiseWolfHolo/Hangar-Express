@@ -29,6 +29,7 @@
 - Renamed the Tools grid entries with shorter, clearer English and Simplified Chinese labels.
 - Moved cloud terminology generation into a durable background queue and made the app upload up to four batches in parallel, so catalog-term submissions finish quickly on the phone while generation and retry work continue in the cloud.
 - Simplified the Cloud Review privacy message to clearly state that only text needing translation is uploaded and that uploads contain no personally identifiable information.
+- Reduced Cloud Review upload latency by sending validated text directly to Remote Queues in batches of up to 50, leaving every database lookup and AI task to the background consumer, and hiding the upload progress bar as soon as queueing completes.
 
 ### Fixed
 - Fixed tool reordering so the selected icon follows the drag while surrounding icons animate into place, instead of lifting the entire Tools section.

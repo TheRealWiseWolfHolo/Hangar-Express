@@ -747,8 +747,6 @@ private struct CloudTranslationDictionaryStatusView: View {
         switch phase {
         case .uploading:
             Text("Uploading missing terms")
-        case .completed:
-            Text("Upload complete")
         case .interrupted:
             Text("Upload paused")
         }
@@ -767,8 +765,6 @@ private struct CloudTranslationDictionaryStatusView: View {
                     Int64(progress.totalCount)
                 )
             )
-        case .completed:
-            Text("All eligible missing terms were sent to cloud processing.")
         case .interrupted:
             Text("Completed batches were saved. The remaining terms will retry later.")
         }

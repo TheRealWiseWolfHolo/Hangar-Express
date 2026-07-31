@@ -3453,35 +3453,7 @@ struct Hanger_ExpressTests {
         #expect(results.allSatisfy { $0.status == .pending })
         #expect(observationBox.values == [
             CloudTranslationRequestObservation(
-                itemCount: 6,
-                dictionaryVersion: 9,
-                contentType: "application/json",
-                allowsConstrainedNetworkAccess: false,
-                allowsExpensiveNetworkAccess: false
-            ),
-            CloudTranslationRequestObservation(
-                itemCount: 6,
-                dictionaryVersion: 9,
-                contentType: "application/json",
-                allowsConstrainedNetworkAccess: false,
-                allowsExpensiveNetworkAccess: false
-            ),
-            CloudTranslationRequestObservation(
-                itemCount: 6,
-                dictionaryVersion: 9,
-                contentType: "application/json",
-                allowsConstrainedNetworkAccess: false,
-                allowsExpensiveNetworkAccess: false
-            ),
-            CloudTranslationRequestObservation(
-                itemCount: 6,
-                dictionaryVersion: 9,
-                contentType: "application/json",
-                allowsConstrainedNetworkAccess: false,
-                allowsExpensiveNetworkAccess: false
-            ),
-            CloudTranslationRequestObservation(
-                itemCount: 6,
+                itemCount: 30,
                 dictionaryVersion: 9,
                 contentType: "application/json",
                 allowsConstrainedNetworkAccess: false,
@@ -3489,10 +3461,6 @@ struct Hanger_ExpressTests {
             )
         ])
         #expect(progressBox.values == [
-            CloudHangarItemTranslationUploadProgress(completedCount: 6, totalCount: 30),
-            CloudHangarItemTranslationUploadProgress(completedCount: 12, totalCount: 30),
-            CloudHangarItemTranslationUploadProgress(completedCount: 18, totalCount: 30),
-            CloudHangarItemTranslationUploadProgress(completedCount: 24, totalCount: 30),
             CloudHangarItemTranslationUploadProgress(completedCount: 30, totalCount: 30),
         ])
     }

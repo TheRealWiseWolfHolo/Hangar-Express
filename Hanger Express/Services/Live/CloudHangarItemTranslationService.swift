@@ -204,7 +204,7 @@ nonisolated enum CloudHangarItemTranslationClientError: Error, Equatable {
 }
 
 nonisolated struct CloudHangarItemTranslationClient: Sendable {
-    static let maximumServerBatchSize = 6
+    static let maximumServerBatchSize = 50
     static let maximumConcurrentUploads = 4
     static let productionBaseURL = URL(
         string: "https://hangar-express-translations.liuchen2004.remote.example.invalid"
