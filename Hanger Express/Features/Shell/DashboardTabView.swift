@@ -154,7 +154,7 @@ struct DashboardTabView: View {
                 prompt: prompt,
                 onSelect: appModel.selectItemTranslationMissMode
             )
-            .presentationDetents([.medium, .large])
+            .presentationDetents([.large])
             .presentationDragIndicator(.visible)
             .interactiveDismissDisabled()
         }

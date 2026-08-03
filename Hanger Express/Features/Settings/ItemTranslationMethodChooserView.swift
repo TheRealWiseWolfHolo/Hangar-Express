@@ -27,19 +27,19 @@ struct ItemTranslationMethodChooserView: View {
                     }
 
                     translationMethodCard(
-                        mode: .onDevice,
-                        title: "Local Translation",
-                        icon: "iphone.gen3",
-                        description: "Uses Apple’s on-device translation model for missing text. The text stays on this device, and the translation model may need to download first.",
-                        actionTitle: "Use Local"
-                    )
-
-                    translationMethodCard(
                         mode: .cloudReview,
                         title: "Cloud Translation",
                         icon: "icloud.and.arrow.up",
                         description: "Uploads only text that needs translation, with no personally identifiable information. Missing text may remain in English until it is processed, reviewed, and published.",
                         actionTitle: "Use Cloud"
+                    )
+
+                    translationMethodCard(
+                        mode: .onDevice,
+                        title: "Local Translation",
+                        icon: "iphone.gen3",
+                        description: "Uses Apple’s on-device translation model for missing text. The text stays on this device, and the translation model may need to download first.",
+                        actionTitle: "Use Local"
                     )
 
                     Label(
@@ -68,10 +68,10 @@ struct ItemTranslationMethodChooserView: View {
             HStack(alignment: .center, spacing: 12) {
                 Image(systemName: icon)
                     .font(.title2.weight(.semibold))
-                    .foregroundStyle(mode == .onDevice ? .green : .blue)
+                    .foregroundStyle(mode == .cloudReview ? Color.blue : Color.secondary)
                     .frame(width: 42, height: 42)
                     .background(
-                        (mode == .onDevice ? Color.green : Color.blue).opacity(0.12),
+                        (mode == .cloudReview ? Color.blue : Color.secondary).opacity(0.12),
                         in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                     )
 
@@ -103,7 +103,7 @@ struct ItemTranslationMethodChooserView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .tint(mode == .onDevice ? .green : .blue)
+            .tint(mode == .cloudReview ? Color.blue : Color(uiColor: .systemGray3))
         }
         .padding(16)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))

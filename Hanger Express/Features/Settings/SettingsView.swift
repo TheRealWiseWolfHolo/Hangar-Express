@@ -427,7 +427,7 @@ struct SettingsView: View {
                         appModel.selectItemTranslationMissMode(mode)
                     }
                 )
-                .presentationDetents([.medium, .large])
+                .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
                 .interactiveDismissDisabled()
             }
