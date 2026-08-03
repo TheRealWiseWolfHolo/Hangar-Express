@@ -275,6 +275,22 @@ nonisolated struct UserSession: Hashable, Sendable, Codable, Identifiable {
             createdAt: createdAt
         )
     }
+
+    func updatingProfile(handle: String, displayName: String, avatarURL: URL?) -> UserSession {
+        UserSession(
+            id: id,
+            handle: handle,
+            displayName: displayName,
+            email: email,
+            authMode: authMode,
+            accessLevel: accessLevel,
+            notes: notes,
+            avatarURL: avatarURL ?? self.avatarURL,
+            credentials: credentials,
+            cookies: cookies,
+            createdAt: createdAt
+        )
+    }
 }
 
 nonisolated struct AccountCredentials: Hashable, Sendable, Codable {
@@ -417,6 +433,28 @@ nonisolated enum RSISessionCookieSet {
             .lowercased()
         let path = cookie.path.isEmpty ? "/" : cookie.path
         return "\(domain)|\(path)|\(cookie.name.lowercased())"
+    }
+}
+
+nonisolated enum RSIProfileHandleResolver {
+    static func resolve(from candidates: [String?]) -> String? {
+        candidates.compactMap(normalizedHandle).first
+    }
+
+    static func normalizedHandle(_ candidate: String?) -> String? {
+        guard let candidate else {
+            return nil
+        }
+
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.contains("@"),
+              trimmed.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil,
+              trimmed.caseInsensitiveCompare("RSI Account") != .orderedSame else {
+            return nil
+        }
+
+        return trimmed
     }
 }
 
@@ -636,6 +674,37 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
             buyback: buyback,
             hangarLogs: hangarLogs,
             referralStats: referralStats
+        )
+    }
+
+    func preservingUnavailableProfile(from previousSnapshot: HangarSnapshot) -> HangarSnapshot {
+        let resolvedHandle = RSIProfileHandleResolver.normalizedHandle(accountHandle)
+            ?? RSIProfileHandleResolver.normalizedHandle(previousSnapshot.accountHandle)
+            ?? accountHandle
+
+        guard !didRefreshPrimaryOrganization,
+              previousSnapshot.didRefreshPrimaryOrganization else {
+            return updatingAccount(
+                accountHandle: resolvedHandle,
+                avatarURL: avatarURL,
+                primaryOrganization: primaryOrganization,
+                didRefreshPrimaryOrganization: didRefreshPrimaryOrganization,
+                storeCreditUSD: storeCreditUSD,
+                totalSpendUSD: totalSpendUSD,
+                referralStats: referralStats,
+                lastSyncedAt: lastSyncedAt
+            )
+        }
+
+        return updatingAccount(
+            accountHandle: resolvedHandle,
+            avatarURL: avatarURL,
+            primaryOrganization: previousSnapshot.primaryOrganization,
+            didRefreshPrimaryOrganization: true,
+            storeCreditUSD: storeCreditUSD,
+            totalSpendUSD: totalSpendUSD,
+            referralStats: referralStats,
+            lastSyncedAt: lastSyncedAt
         )
     }
 

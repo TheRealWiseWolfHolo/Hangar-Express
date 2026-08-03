@@ -45,6 +45,7 @@ final class LiveHangarRepository: HangarRepository {
     }
 
     private struct FullAccountRefreshPayload {
+        let accountHandle: String?
         let avatarURL: URL?
         let primaryOrganization: AccountOrganization?
         let didRefreshPrimaryOrganization: Bool
@@ -88,7 +89,7 @@ final class LiveHangarRepository: HangarRepository {
         let resolvedAccountPayload = try await accountPayload
 
         return HangarSnapshot(
-            accountHandle: session.handle,
+            accountHandle: resolvedAccountPayload.accountHandle ?? session.handle,
             lastSyncedAt: .now,
             avatarURL: resolvedAccountPayload.avatarURL ?? session.avatarURL,
             primaryOrganization: resolvedAccountPayload.primaryOrganization,
@@ -350,7 +351,7 @@ final class LiveHangarRepository: HangarRepository {
         )
 
         return snapshot.updatingAccount(
-            accountHandle: session.handle,
+            accountHandle: accountContext.accountHandle ?? snapshot.accountHandle,
             avatarURL: accountContext.didRefreshAccountOverview ? accountContext.avatarURL : snapshot.avatarURL,
             primaryOrganization: accountContext.didRefreshPrimaryOrganization ? accountContext.primaryOrganization : snapshot.primaryOrganization,
             didRefreshPrimaryOrganization: accountContext.didRefreshPrimaryOrganization || snapshot.didRefreshPrimaryOrganization,
@@ -459,6 +460,7 @@ final class LiveHangarRepository: HangarRepository {
         )
 
         return FullAccountRefreshPayload(
+            accountHandle: accountContext.accountHandle,
             avatarURL: accountContext.avatarURL,
             primaryOrganization: accountContext.primaryOrganization,
             didRefreshPrimaryOrganization: accountContext.didRefreshPrimaryOrganization,
@@ -2271,6 +2273,7 @@ final class LiveHangarRepository: HangarRepository {
         )
 
         return AccountRefreshContext(
+            accountHandle: accountOverview?.accountHandle,
             avatarURL: accountOverview?.avatarURL,
             primaryOrganization: accountOverview?.primaryOrganization,
             storeCreditUSD: accountOverview?.storeCreditUSD,
@@ -5401,11 +5404,15 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             throw LiveHangarRepositoryError.sessionExpired
         }
 
+        let resolvedAccountHandle = RSIProfileHandleResolver.resolve(
+            from: [payload.profileHandle, accountHandle, profileName]
+        )
         let primaryOrganizationOverview = try? await fetchPrimaryOrganization(
-            profileCandidates: [accountHandle, profileName]
+            profileCandidates: [resolvedAccountHandle, accountHandle, profileName].compactMap { $0 }
         )
 
         return AccountOverview(
+            accountHandle: resolvedAccountHandle,
             storeCreditUSD: storeCreditUSD,
             totalSpendUSD: billingPayload.totalSpendText.flatMap(RSIStoreCreditParser.parseCurrencyText),
             avatarURL: normalizedRSIURL(from: payload.avatarURL),
@@ -6826,6 +6833,36 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       }
     };
 
+    const extractProfileHandle = (sourceNode, triggerNode) => {
+      const roots = [sourceNode, triggerNode, document.querySelector('header'), document.querySelector('nav')]
+        .filter((root, index, values) => root && values.indexOf(root) === index);
+
+      for (const root of roots) {
+        const links = root.matches?.('a[href*="/citizens/"]')
+          ? [root]
+          : Array.from(root.querySelectorAll?.('a[href*="/citizens/"]') || []);
+
+        for (const link of links) {
+          try {
+            const url = new URL(link.getAttribute('href') || link.href, window.location.href);
+            const match = url.pathname.match(new RegExp('/citizens/([^/?#]+)', 'i'));
+            if (!match?.[1]) {
+              continue;
+            }
+
+            const handle = decodeURIComponent(match[1]).trim();
+            if (handle && !handle.includes('@')) {
+              return handle;
+            }
+          } catch {
+            continue;
+          }
+        }
+      }
+
+      return '';
+    };
+
     await new Promise(resolve => setTimeout(resolve, 200));
     const graphQLStoreCreditValue = await fetchStructuredStoreCreditValue();
     const avatarTrigger = findAvatarTrigger();
@@ -6835,12 +6872,14 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     const accountPanel = findVisibleAccountPanel();
     const storeCreditText = extractStoreCreditText(accountPanel);
     const avatarURL = extractAvatarURL(accountPanel, avatarTrigger);
+    const profileHandle = extractProfileHandle(accountPanel, avatarTrigger);
 
     return {
       accessDenied,
       graphQLStoreCreditValue: graphQLStoreCreditValue || null,
       storeCreditText: storeCreditText || null,
-      avatarURL: avatarURL || null
+      avatarURL: avatarURL || null,
+      profileHandle: profileHandle || null
     };
     """
 
@@ -10823,6 +10862,7 @@ nonisolated enum RSIStoreCreditParser {
 }
 
 private nonisolated struct AccountOverview {
+    let accountHandle: String?
     let storeCreditUSD: Decimal?
     let totalSpendUSD: Decimal?
     let avatarURL: URL?
@@ -11088,6 +11128,7 @@ private nonisolated struct RemoteAccountBalances: Decodable {
     let graphQLStoreCreditValue: String?
     let storeCreditText: String?
     let avatarURL: String?
+    let profileHandle: String?
 }
 
 private nonisolated struct RemotePrimaryOrganization: Decodable {
@@ -11134,6 +11175,7 @@ private nonisolated struct RemoteLegacyReferralPage: Decodable {
 }
 
 private nonisolated struct AccountRefreshContext {
+    let accountHandle: String?
     let avatarURL: URL?
     let primaryOrganization: AccountOrganization?
     let storeCreditUSD: Decimal?
