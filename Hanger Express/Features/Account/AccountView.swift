@@ -342,6 +342,7 @@ struct AccountView: View {
 
     private var profileDisplayName: String {
         let candidates = [
+            RSIProfileHandleResolver.normalizedHandle(snapshot.accountHandle),
             appModel.session?.displayName,
             appModel.session?.credentials?.loginIdentifier,
             appModel.session?.email

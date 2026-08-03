@@ -273,6 +273,46 @@ struct Hanger_ExpressTests {
         #expect(mergedCookies.first?.value == "refreshed-token")
     }
 
+    @Test func profileHandleResolverRejectsLoginIdentifiersAndUsesCitizenHandle() {
+        let resolvedHandle = RSIProfileHandleResolver.resolve(
+            from: ["liuchen2004@outlook.com", "  Wise-Wolf-Holo  ", "Fallback"]
+        )
+
+        #expect(resolvedHandle == "Wise-Wolf-Holo")
+        #expect(RSIProfileHandleResolver.normalizedHandle("RSI Account") == nil)
+        #expect(RSIProfileHandleResolver.normalizedHandle("not a handle") == nil)
+    }
+
+    @Test func unavailableProfileRefreshPreservesKnownOrganizationAndHandle() throws {
+        let knownOrganization = AccountOrganization(name: "Skewers Gentlemen's Club", rank: "President")
+        let previousSnapshot = PreviewHangarRepository.sampleSnapshot.updatingAccount(
+            accountHandle: "Wise-Wolf-Holo",
+            avatarURL: nil,
+            primaryOrganization: knownOrganization,
+            didRefreshPrimaryOrganization: true,
+            storeCreditUSD: 100,
+            totalSpendUSD: 200,
+            referralStats: .unavailable
+        )
+        let failedRefresh = PreviewHangarRepository.sampleSnapshot.updatingAccount(
+            accountHandle: "liuchen2004@outlook.com",
+            avatarURL: nil,
+            primaryOrganization: nil,
+            didRefreshPrimaryOrganization: false,
+            storeCreditUSD: 125,
+            totalSpendUSD: 225,
+            referralStats: .unavailable
+        )
+
+        let mergedSnapshot = failedRefresh.preservingUnavailableProfile(from: previousSnapshot)
+
+        #expect(mergedSnapshot.accountHandle == "Wise-Wolf-Holo")
+        #expect(mergedSnapshot.primaryOrganization == knownOrganization)
+        #expect(mergedSnapshot.didRefreshPrimaryOrganization)
+        #expect(mergedSnapshot.storeCreditUSD == 125)
+        #expect(mergedSnapshot.totalSpendUSD == 225)
+    }
+
     @Test func legacySessionsDecodeWithFullAccess() throws {
         let original = makeUserSession(
             handle: "legacy",

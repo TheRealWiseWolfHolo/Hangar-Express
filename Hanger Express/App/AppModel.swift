@@ -1270,6 +1270,7 @@ final class AppModel {
             )
             requestItemTranslationPreload(for: snapshot, promptsWhenCacheIsMissing: true)
             persistSnapshotInBackground(snapshot, for: session)
+            await persistResolvedAccountIdentityIfNeeded(from: snapshot, baseSession: session)
             schedulePostRefreshImageInvalidation(
                 for: resolvedScope,
                 previousSnapshot: existingSnapshot,
@@ -3420,8 +3421,12 @@ final class AppModel {
         existingSnapshot: HangarSnapshot?,
         progressRelay: RefreshProgressDisplayRelay
     ) async throws -> HangarSnapshot {
-        let refreshedSnapshot = try await hangarRepository.fetchSnapshot(for: session) { progress in
+        var refreshedSnapshot = try await hangarRepository.fetchSnapshot(for: session) { progress in
             progressRelay.submit(progress)
+        }
+
+        if let existingSnapshot {
+            refreshedSnapshot = refreshedSnapshot.preservingUnavailableProfile(from: existingSnapshot)
         }
 
         guard refreshedSnapshot.hangarLogs.isEmpty,
@@ -3433,6 +3438,29 @@ final class AppModel {
         return refreshedSnapshot.updatingHangarLogs(
             hangarLogs: existingSnapshot.hangarLogs
         )
+    }
+
+    private func persistResolvedAccountIdentityIfNeeded(
+        from snapshot: HangarSnapshot,
+        baseSession: UserSession
+    ) async {
+        guard let resolvedHandle = RSIProfileHandleResolver.normalizedHandle(snapshot.accountHandle),
+              resolvedHandle.caseInsensitiveCompare(baseSession.handle) != .orderedSame else {
+            return
+        }
+
+        let currentDisplayName = baseSession.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let loginIdentifier = baseSession.credentials?.loginIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shouldReplaceDisplayName = currentDisplayName.isEmpty
+            || currentDisplayName.contains("@")
+            || currentDisplayName.caseInsensitiveCompare(baseSession.email) == .orderedSame
+            || loginIdentifier.map { currentDisplayName.caseInsensitiveCompare($0) == .orderedSame } == true
+        let updatedSession = baseSession.updatingProfile(
+            handle: resolvedHandle,
+            displayName: shouldReplaceDisplayName ? resolvedHandle : currentDisplayName,
+            avatarURL: snapshot.avatarURL
+        )
+        applyStoredSessions(await sessionStore.save(updatedSession, makeActive: true), resetContent: false)
     }
 
     func loadMoreHangarLogEntries() async {
