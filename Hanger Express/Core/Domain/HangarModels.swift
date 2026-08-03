@@ -388,6 +388,38 @@ nonisolated struct SessionCookie: Hashable, Sendable, Codable {
     }
 }
 
+nonisolated enum RSISessionCookieSet {
+    static func merging(
+        savedCookies: [SessionCookie],
+        refreshedCookies: [SessionCookie],
+        now: Date = .now
+    ) -> [SessionCookie] {
+        var cookiesByKey: [String: SessionCookie] = [:]
+
+        for cookie in savedCookies + refreshedCookies {
+            let trimmedValue = cookie.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedValue.isEmpty,
+                  cookie.expiresAt.map({ $0 > now }) ?? true else {
+                continue
+            }
+
+            cookiesByKey[key(for: cookie)] = cookie
+        }
+
+        return cookiesByKey.values.sorted { lhs, rhs in
+            key(for: lhs) < key(for: rhs)
+        }
+    }
+
+    private static func key(for cookie: SessionCookie) -> String {
+        let domain = cookie.domain
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            .lowercased()
+        let path = cookie.path.isEmpty ? "/" : cookie.path
+        return "\(domain)|\(path)|\(cookie.name.lowercased())"
+    }
+}
+
 nonisolated enum TrustedDeviceDuration: String, CaseIterable, Identifiable, Hashable, Sendable, Codable {
     case session
     case day
