@@ -9,6 +9,7 @@
 - Added clearly labeled anticipated dates for nine major annual Star Citizen events, projected from their official 2025 month/day windows.
 
 ### Changed
+- Opens the item-translation method chooser at full height so every explanation is immediately visible, with Cloud presented first as the blue primary choice and Local shown as a neutral grey alternative.
 - Caches the Account profile-background choices locally and reuses them until the fleet inventory changes, avoiding repeated full-fleet grouping and sorting when Account is opened.
 - Silently refreshes the hosted Hangar item translation dictionary whenever the app launches or returns to the foreground while a translated item language is selected; English skips the refresh entirely.
 - Started the `1.0.9` release branch and release-note tracking for ongoing work.
