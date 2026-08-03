@@ -281,8 +281,15 @@ private struct RSICheckoutWebView: UIViewRepresentable {
 
             didLoadInitialPage = true
             Task { @MainActor in
-                await installCookies(cookies, in: webView)
-                webView.load(URLRequest(url: initialURL))
+                let installedCookies = await installCookies(cookies, in: webView)
+                var request = URLRequest(url: initialURL)
+                let requestCookies = installedCookies.filter {
+                    Self.cookie($0, appliesTo: initialURL)
+                }
+                for (field, value) in HTTPCookie.requestHeaderFields(with: requestCookies) {
+                    request.setValue(value, forHTTPHeaderField: field)
+                }
+                webView.load(request)
             }
         }
 
@@ -368,7 +375,7 @@ private struct RSICheckoutWebView: UIViewRepresentable {
             decisionHandler(.allow)
         }
 
-        private func installCookies(_ cookies: [SessionCookie], in webView: WKWebView) async {
+        private func installCookies(_ cookies: [SessionCookie], in webView: WKWebView) async -> [HTTPCookie] {
             let store = webView.configuration.websiteDataStore.httpCookieStore
             let existingCookies = await withCheckedContinuation { continuation in
                 store.getAllCookies { cookies in
@@ -384,15 +391,39 @@ private struct RSICheckoutWebView: UIViewRepresentable {
                 }
             }
 
-            for cookie in cookies {
-                guard let httpCookie = cookie.httpCookie else {
-                    continue
-                }
+            let requestedCookies = cookies.compactMap(\.httpCookie)
+            for httpCookie in requestedCookies {
+                await setCookie(httpCookie, in: store)
+            }
 
-                await withCheckedContinuation { continuation in
-                    store.setCookie(httpCookie) {
-                        continuation.resume()
-                    }
+            var installedCookies = await allCookies(from: store)
+            let installedKeys = Set(installedCookies.map(cookieKey))
+            let missingCookies = requestedCookies.filter {
+                !installedKeys.contains(cookieKey($0))
+            }
+
+            if !missingCookies.isEmpty {
+                for cookie in missingCookies {
+                    await setCookie(cookie, in: store)
+                }
+                installedCookies = await allCookies(from: store)
+            }
+
+            return installedCookies
+        }
+
+        private func setCookie(_ cookie: HTTPCookie, in store: WKHTTPCookieStore) async {
+            await withCheckedContinuation { continuation in
+                store.setCookie(cookie) {
+                    continuation.resume()
+                }
+            }
+        }
+
+        private func allCookies(from store: WKHTTPCookieStore) async -> [HTTPCookie] {
+            await withCheckedContinuation { continuation in
+                store.getAllCookies { cookies in
+                    continuation.resume(returning: cookies)
                 }
             }
         }
@@ -432,7 +463,40 @@ private struct RSICheckoutWebView: UIViewRepresentable {
         }
 
         private func cookieKey(_ cookie: HTTPCookie) -> String {
-            "\(cookie.domain)|\(cookie.path)|\(cookie.name)"
+            Self.cookieKey(cookie)
+        }
+
+        private static func cookieKey(_ cookie: HTTPCookie) -> String {
+            let domain = cookie.domain
+                .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                .lowercased()
+            let path = cookie.path.isEmpty ? "/" : cookie.path
+            return "\(domain)|\(path)|\(cookie.name.lowercased())"
+        }
+
+        private static func cookie(_ cookie: HTTPCookie, appliesTo url: URL) -> Bool {
+            guard let host = url.host?.lowercased() else {
+                return false
+            }
+
+            let domain = cookie.domain
+                .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                .lowercased()
+            guard host == domain || host.hasSuffix(".\(domain)") else {
+                return false
+            }
+
+            if cookie.isSecure, url.scheme?.lowercased() != "https" {
+                return false
+            }
+
+            if let expiresDate = cookie.expiresDate, expiresDate <= .now {
+                return false
+            }
+
+            let requestPath = url.path.isEmpty ? "/" : url.path
+            let cookiePath = cookie.path.isEmpty ? "/" : cookie.path
+            return requestPath.hasPrefix(cookiePath)
         }
 
         private func shouldOpenExternally(_ url: URL) -> Bool {

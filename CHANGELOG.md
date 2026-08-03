@@ -35,6 +35,7 @@
 - Reduced Cloud Review upload latency by sending validated text directly to Remote Queues in batches of up to 50, leaving every database lookup and AI task to the background consumer, and hiding the upload progress bar as soon as queueing completes.
 
 ### Fixed
+- Fixed intermittent signed-out WBCCU checkout pages by carrying the freshly prepared RSI session into the in-app browser, verifying WebKit retained its cookies, and attaching them to the first cart request.
 - Moved on-device translation cache encoding and atomic file writes off the main thread, coalesced intermediate saves, and added ordered completion and background flushes so large hangars stay responsive without changing existing cache data.
 - Fixed tool reordering so the selected icon follows the drag while surrounding icons animate into place, instead of lifting the entire Tools section.
 - Fixed the dragged tool remaining enlarged after release and removed animation lag from finger tracking. Tool tiles now grow throughout the full one-second hold, provide a haptic cue when reordering activates, use a scroll-cooperative recognizer before activation, and disable page scrolling while an icon is being dragged.

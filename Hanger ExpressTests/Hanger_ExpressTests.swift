@@ -230,6 +230,49 @@ struct Hanger_ExpressTests {
         #expect(rebuiltCookie.isHTTPOnly)
     }
 
+    @Test func refreshedRSICookiesReplaceSavedValuesAndDiscardExpiredCookies() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let savedToken = SessionCookie(
+            name: "Rsi-Token",
+            value: "saved-token",
+            domain: ".robertsspaceindustries.com",
+            path: "/",
+            expiresAt: now.addingTimeInterval(3_600),
+            isSecure: true,
+            isHTTPOnly: true,
+            version: 0
+        )
+        let refreshedToken = SessionCookie(
+            name: "rsi-token",
+            value: "refreshed-token",
+            domain: "robertsspaceindustries.com",
+            path: "/",
+            expiresAt: now.addingTimeInterval(7_200),
+            isSecure: true,
+            isHTTPOnly: true,
+            version: 0
+        )
+        let expiredDevice = SessionCookie(
+            name: "_rsi_device",
+            value: "expired-device",
+            domain: ".robertsspaceindustries.com",
+            path: "/",
+            expiresAt: now.addingTimeInterval(-1),
+            isSecure: true,
+            isHTTPOnly: true,
+            version: 0
+        )
+
+        let mergedCookies = RSISessionCookieSet.merging(
+            savedCookies: [savedToken, expiredDevice],
+            refreshedCookies: [refreshedToken],
+            now: now
+        )
+
+        #expect(mergedCookies.count == 1)
+        #expect(mergedCookies.first?.value == "refreshed-token")
+    }
+
     @Test func legacySessionsDecodeWithFullAccess() throws {
         let original = makeUserSession(
             handle: "legacy",

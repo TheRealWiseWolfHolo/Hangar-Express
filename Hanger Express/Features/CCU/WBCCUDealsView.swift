@@ -218,7 +218,10 @@ struct WBCCUDealsView: View {
 
         do {
             let preparation = try await appModel.prepareWBCCUCheckout(items: items)
-            let cookies = appModel.session?.cookies ?? preparation.updatedCookies
+            let cookies = RSISessionCookieSet.merging(
+                savedCookies: appModel.session?.cookies ?? [],
+                refreshedCookies: preparation.updatedCookies
+            )
             cartItems.removeAll()
             checkoutContext = RSICheckoutContext(
                 itemTitle: AppLocalizer.format("%lld Warbond upgrade(s)", items.count),
