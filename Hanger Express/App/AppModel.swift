@@ -708,6 +708,8 @@ final class AppModel {
     private var pendingAuthenticationDraft: AuthenticationDraft?
     private var silentHangarActionReconciliationTask: Task<Void, Never>?
     private var silentHangarActionReconciliationGeneration = 0
+    private var completedRefreshPresentationDismissalTask: Task<Void, Never>?
+    private var suppressesRefreshProgressUntilNextRefresh = false
     private var itemTranslationPreloadTask: Task<Void, Never>?
     private var itemTranslationPreloadProgressDismissalTask: Task<Void, Never>?
     private var itemTranslationPreloadStallTask: Task<Void, Never>?
@@ -1227,6 +1229,7 @@ final class AppModel {
         lastRefreshErrorScope = nil
 
         activeRefreshScope = resolvedScope
+        prepareRefreshPresentationForNewRefresh()
         refreshIndicatorStyle = .standardCard
         concurrentRefreshEntries = initialConcurrentRefreshEntries(for: session, scope: resolvedScope)
         refreshProgress = concurrentRefreshEntries.isEmpty ? initialProgress(for: session, scope: resolvedScope) : nil
@@ -1357,6 +1360,9 @@ final class AppModel {
     }
 
     private func clearRefreshPresentation() {
+        completedRefreshPresentationDismissalTask?.cancel()
+        completedRefreshPresentationDismissalTask = nil
+        suppressesRefreshProgressUntilNextRefresh = true
         refreshProgress = nil
         concurrentRefreshEntries = []
         activeRefreshScope = nil
@@ -3472,6 +3478,7 @@ final class AppModel {
         }
 
         activeRefreshScope = .hangarLog
+        prepareRefreshPresentationForNewRefresh()
         refreshIndicatorStyle = .standardCard
         refreshProgress = RefreshProgress(
             stage: .hangarLog,
@@ -3532,10 +3539,17 @@ final class AppModel {
     }
 
     private func applyIncomingRefreshProgress(_ progress: RefreshProgress) {
+        guard !suppressesRefreshProgressUntilNextRefresh else {
+            return
+        }
+
         guard let trackerID = progress.trackerID,
               let area = ConcurrentRefreshEntry.Area(rawValue: trackerID) else {
             concurrentRefreshEntries = []
             refreshProgress = progress
+            if progress.isFinalStepComplete {
+                scheduleCompletedRefreshPresentationDismissal()
+            }
             return
         }
 
@@ -3567,6 +3581,31 @@ final class AppModel {
                 completedUnitCount: 0,
                 totalUnitCount: nil
             )
+            scheduleCompletedRefreshPresentationDismissal()
+        }
+    }
+
+    private func prepareRefreshPresentationForNewRefresh() {
+        completedRefreshPresentationDismissalTask?.cancel()
+        completedRefreshPresentationDismissalTask = nil
+        suppressesRefreshProgressUntilNextRefresh = false
+    }
+
+    private func scheduleCompletedRefreshPresentationDismissal() {
+        guard completedRefreshPresentationDismissalTask == nil else {
+            return
+        }
+
+        completedRefreshPresentationDismissalTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled, let self else {
+                return
+            }
+
+            self.suppressesRefreshProgressUntilNextRefresh = true
+            self.refreshProgress = nil
+            self.concurrentRefreshEntries = []
+            self.completedRefreshPresentationDismissalTask = nil
         }
     }
 

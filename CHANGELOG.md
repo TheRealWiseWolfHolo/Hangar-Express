@@ -36,6 +36,7 @@
 - Reduced Cloud Review upload latency by sending validated text directly to Remote Queues in batches of up to 50, leaving every database lookup and AI task to the background consumer, and hiding the upload progress bar as soon as queueing completes.
 
 ### Fixed
+- Dismissed the refresh progress overlay one second after its final 100% completion update, instead of leaving a completed card visible while background refresh work finishes.
 - Fixed valid RSI organizations appearing unavailable when launcher authentication omitted the username by resolving the citizen handle from the authenticated account menu, saving that identity for later refreshes, and retaining the last successfully loaded organization during temporary lookup failures.
 - Fixed intermittent signed-out WBCCU checkout pages by carrying the freshly prepared RSI session into the in-app browser, verifying WebKit retained its cookies, and attaching them to the first cart request.
 - Moved on-device translation cache encoding and atomic file writes off the main thread, coalesced intermediate saves, and added ordered completion and background flushes so large hangars stay responsive without changing existing cache data.

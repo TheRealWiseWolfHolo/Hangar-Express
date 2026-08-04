@@ -1224,6 +1224,29 @@ struct Hanger_ExpressTests {
 
         #expect(progress.stepLabel == "Step 2 of 4")
         #expect(progress.fractionCompleted == 0.4)
+        #expect(!progress.isFinalStepComplete)
+    }
+
+    @Test func refreshProgressOnlyCompletesOnTheFinalFinishedStep() async throws {
+        let completedProgress = RefreshProgress(
+            stage: .account,
+            stepNumber: 2,
+            stepCount: 2,
+            detail: "Account overview sync complete.",
+            completedUnitCount: 1,
+            totalUnitCount: 1
+        )
+        let earlierStep = RefreshProgress(
+            stage: .account,
+            stepNumber: 1,
+            stepCount: 2,
+            detail: "First account step complete.",
+            completedUnitCount: 1,
+            totalUnitCount: 1
+        )
+
+        #expect(completedProgress.isFinalStepComplete)
+        #expect(!earlierStep.isFinalStepComplete)
     }
 
     @Test func storeCreditParserTreatsStructuredValuesAsMinorUnits() async throws {
