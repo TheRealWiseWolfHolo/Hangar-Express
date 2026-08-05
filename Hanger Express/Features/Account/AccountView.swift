@@ -7,6 +7,7 @@ struct AccountView: View {
 
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage(DisplayPreferences.earlyAccessBadgeKey) private var showsEarlyAccessBadge = DisplayPreferences.earlyAccessBadgeEnabledByDefault
+    @AppStorage("wbccuDeals.betaDisclaimerAcknowledged") private var hasAcknowledgedWBCCUDisclaimer = false
     @State private var isShowingSettings = false
     @State private var isShowingBackgroundPicker = false
     @State private var isShowingAccountTotalValueExplanation = false
@@ -15,6 +16,7 @@ struct AccountView: View {
     @State private var isOverviewEmailVisible = false
     @State private var isOverviewSavedLoginVisible = false
     @State private var presentedTool: FleetTool?
+    @State private var isShowingWBCCUDisclaimer = false
     @State private var isToolReordering = false
     @State private var isLoadingReferralInviteCode = false
     @State private var copiedReferralInviteCode = false
@@ -218,6 +220,15 @@ struct AccountView: View {
             } message: {
                 Text(referralInviteCopyErrorMessage ?? "")
             }
+            .alert("WBCCU Deals Beta", isPresented: $isShowingWBCCUDisclaimer) {
+                Button("Cancel", role: .cancel) {}
+                Button("Continue") {
+                    hasAcknowledgedWBCCUDisclaimer = true
+                    presentedTool = .wbccuDeals
+                }
+            } message: {
+                Text("WBCCU Deals is an experimental feature. It depends on live data and automated interactions with the RSI website, which may change or fail without notice. Verify every item, price, and cart before checkout. Use this feature at your own risk.")
+            }
             .task(id: profileBackgroundOptionsLoadID) {
                 await loadProfileBackgroundOptions()
             }
@@ -226,6 +237,11 @@ struct AccountView: View {
 
     private func handleToolSelection(_ tool: FleetTool) {
         guard tool.isAvailable else {
+            return
+        }
+
+        if tool == .wbccuDeals, !hasAcknowledgedWBCCUDisclaimer {
+            isShowingWBCCUDisclaimer = true
             return
         }
 
