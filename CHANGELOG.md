@@ -3,6 +3,7 @@
 ## v1.0.9 (In Progress)
 
 ### Added
+- Added a Beta badge and one-time experimental-feature disclaimer before opening WBCCU Deals for the first time.
 - Added an Apple Intelligence-inspired left-to-right reveal when Hangar item text changes from English to a translated language, including a subtle multicolor luminous edge and Reduce Motion support.
 - Added a translation-method chooser when selecting a translated Hangar item language and after upgrading, with clear Local and Cloud explanations, the current choice preserved, and a reminder that the method can be changed later in Settings.
 - Added a WBCCU Deals tool that displays current StarCitizen-Info Warbond upgrade offers with ship artwork, standard and Warbond values, savings, and feed freshness.

@@ -610,6 +610,10 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    var badgeText: String? {
+        self == .wbccuDeals ? "BETA" : nil
+    }
+
     var isAvailable: Bool {
         self == .allShips
             || self == .wbccuDeals
@@ -1027,12 +1031,27 @@ private struct FleetToolTile: View {
                         .fill((tool.isAvailable && isEnabled ? Color.accentColor : Color.secondary).opacity(0.12))
                 )
 
-            Text(tool.title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.primary)
-                .multilineTextAlignment(.center)
-                .lineLimit(2)
-                .minimumScaleFactor(0.85)
+            HStack(spacing: 6) {
+                Text(tool.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
+
+                if let badgeText = tool.badgeText {
+                    Text(badgeText)
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color.accentColor.opacity(0.14))
+                        )
+                        .accessibilityLabel(Text("Beta"))
+                }
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 16)
@@ -1044,7 +1063,11 @@ private struct FleetToolTile: View {
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .opacity(tool.isAvailable && isEnabled ? 1 : 0.62)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(tool.title)
+        .accessibilityLabel(
+            tool.badgeText == nil
+                ? tool.title
+                : AppLocalizer.format("%@, Beta", tool.title)
+        )
         .accessibilityAction {
             guard tool.isAvailable && isEnabled else {
                 return
