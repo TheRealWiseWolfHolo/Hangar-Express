@@ -2,15 +2,15 @@ import Foundation
 import Testing
 @testable import Hanger_Express
 
-struct DeviceManagementAuthenticationTests {
-    @Test func suppliesHttpOnlyRSICookiesToDeviceRequests() {
+struct BrowserAuthenticationTests {
+    @Test func suppliesHttpOnlyRSICookiesToEveryBrowserRequest() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let cookies = [
             makeCookie(name: "Rsi-Token", value: "launcher-token", expiresAt: now.addingTimeInterval(600)),
             makeCookie(name: "_rsi_device", value: "device-token", expiresAt: nil)
         ]
 
-        let arguments = RSIAccountPageBrowser.deviceManagementAuthenticationArguments(
+        let arguments = RSIAuthenticatedWebSession.authenticationValues(
             from: cookies,
             now: now
         )
@@ -27,7 +27,7 @@ struct DeviceManagementAuthenticationTests {
             makeCookie(name: "_rsi_device", value: "   ", expiresAt: nil)
         ]
 
-        let arguments = RSIAccountPageBrowser.deviceManagementAuthenticationArguments(
+        let arguments = RSIAuthenticatedWebSession.authenticationValues(
             from: cookies,
             now: now
         )

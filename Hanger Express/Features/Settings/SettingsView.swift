@@ -65,6 +65,7 @@ struct SettingsView: View {
     @State private var isShowingProPlans = false
     @State private var itemTranslationState = HangarItemTranslationViewState()
     @State private var cloudDictionaryRefreshState = CloudTranslationDictionaryRefreshState.idle
+    @State private var itemTranslationMethodPrompt: AppModel.ItemTranslationMethodPrompt?
 
     let appModel: AppModel
     let snapshot: HangarSnapshot
@@ -100,8 +101,10 @@ struct SettingsView: View {
                         }
                     }
                     .pickerStyle(.menu)
-                    .onChange(of: hangarItemLanguageRawValue) { _, _ in
-                        appModel.requestItemTranslationPreprocessingForCurrentSnapshot()
+                    .onChange(of: hangarItemLanguageRawValue) { _, newValue in
+                        handleItemLanguageChange(
+                            HangarItemLanguage.resolved(from: newValue)
+                        )
                     }
 
                     Picker("Appearance", selection: $appAppearanceRawValue) {
@@ -416,7 +419,37 @@ struct SettingsView: View {
                 )
                     .presentationDetents([.medium, .large])
             }
+            .sheet(item: $itemTranslationMethodPrompt) { prompt in
+                ItemTranslationMethodChooserView(
+                    prompt: prompt,
+                    onSelect: { mode in
+                        itemTranslationMethodPrompt = nil
+                        appModel.selectItemTranslationMissMode(mode)
+                    }
+                )
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .interactiveDismissDisabled()
+            }
         }
+    }
+
+    private func handleItemLanguageChange(_ language: HangarItemLanguage) {
+        guard HangarItemTranslationMethodPromptPolicy.shouldPrompt(
+            for: language
+        ) else {
+            itemTranslationMethodPrompt = nil
+            appModel.requestItemTranslationPreprocessingForCurrentSnapshot()
+            return
+        }
+
+        itemTranslationMethodPrompt = AppModel.ItemTranslationMethodPrompt(
+            language: language,
+            currentMode: HangarItemTranslationMissMode.resolved(
+                from: itemTranslationMissModeRawValue
+            ),
+            reason: .languageSelection
+        )
     }
 
     private var translationLoadingBarPreviewBinding: Binding<Bool> {

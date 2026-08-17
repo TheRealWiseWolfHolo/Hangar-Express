@@ -45,6 +45,7 @@ final class LiveHangarRepository: HangarRepository {
     }
 
     private struct FullAccountRefreshPayload {
+        let accountHandle: String?
         let avatarURL: URL?
         let primaryOrganization: AccountOrganization?
         let didRefreshPrimaryOrganization: Bool
@@ -88,7 +89,7 @@ final class LiveHangarRepository: HangarRepository {
         let resolvedAccountPayload = try await accountPayload
 
         return HangarSnapshot(
-            accountHandle: session.handle,
+            accountHandle: resolvedAccountPayload.accountHandle ?? session.handle,
             lastSyncedAt: .now,
             avatarURL: resolvedAccountPayload.avatarURL ?? session.avatarURL,
             primaryOrganization: resolvedAccountPayload.primaryOrganization,
@@ -350,7 +351,7 @@ final class LiveHangarRepository: HangarRepository {
         )
 
         return snapshot.updatingAccount(
-            accountHandle: session.handle,
+            accountHandle: accountContext.accountHandle ?? snapshot.accountHandle,
             avatarURL: accountContext.didRefreshAccountOverview ? accountContext.avatarURL : snapshot.avatarURL,
             primaryOrganization: accountContext.didRefreshPrimaryOrganization ? accountContext.primaryOrganization : snapshot.primaryOrganization,
             didRefreshPrimaryOrganization: accountContext.didRefreshPrimaryOrganization || snapshot.didRefreshPrimaryOrganization,
@@ -459,6 +460,7 @@ final class LiveHangarRepository: HangarRepository {
         )
 
         return FullAccountRefreshPayload(
+            accountHandle: accountContext.accountHandle,
             avatarURL: accountContext.avatarURL,
             primaryOrganization: accountContext.primaryOrganization,
             didRefreshPrimaryOrganization: accountContext.didRefreshPrimaryOrganization,
@@ -2271,6 +2273,7 @@ final class LiveHangarRepository: HangarRepository {
         )
 
         return AccountRefreshContext(
+            accountHandle: accountOverview?.accountHandle,
             avatarURL: accountOverview?.avatarURL,
             primaryOrganization: accountOverview?.primaryOrganization,
             storeCreditUSD: accountOverview?.storeCreditUSD,
@@ -4616,6 +4619,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     private var lastNavigationEvents: [String] = []
     private var lastNavigationFailureDescription: String?
     private var lastNavigationResponseSummary: String?
+    private var preparedSessionCookies: [HTTPCookie] = []
+    private var preparedScriptAuthenticationArguments: [String: Any] = [:]
     private let loadTimeoutNanoseconds: UInt64 = 30_000_000_000
     private let maximumNavigationEventCount = 10
 
@@ -5135,15 +5140,10 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         try await prepareWebView(with: cookies)
         try await load(url: url)
 
-        let nativeAuthentication = Self.deviceManagementAuthenticationArguments(
-            from: cookies + (await currentRSICookies())
-        )
         let result = try await evaluate(
             script: Self.authorizedDevicesExtractionScript,
             arguments: [
-                "currentPassword": password ?? "",
-                "nativeRsiToken": nativeAuthentication.rsiToken,
-                "nativeRsiDevice": nativeAuthentication.rsiDevice
+                "currentPassword": password ?? ""
             ],
             as: RemoteAuthorizedDevicesLookup.self
         )
@@ -5174,17 +5174,12 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         try await prepareWebView(with: cookies)
         try await load(url: url)
 
-        let nativeAuthentication = Self.deviceManagementAuthenticationArguments(
-            from: cookies + (await currentRSICookies())
-        )
         let result = try await evaluate(
             script: Self.removeAuthorizedDeviceScript,
             arguments: [
                 "deviceID": device.id,
                 "deviceName": device.displayName,
-                "currentPassword": password ?? "",
-                "nativeRsiToken": nativeAuthentication.rsiToken,
-                "nativeRsiDevice": nativeAuthentication.rsiDevice
+                "currentPassword": password ?? ""
             ],
             as: RemoteAuthorizedDeviceRemoval.self
         )
@@ -5223,16 +5218,11 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
                 "name": device.displayName
             ]
         }
-        let nativeAuthentication = Self.deviceManagementAuthenticationArguments(
-            from: cookies + (await currentRSICookies())
-        )
         let result = try await evaluate(
             script: Self.removeAuthorizedDevicesScript,
             arguments: [
                 "devicesToRemove": devicePayload,
-                "currentPassword": password ?? "",
-                "nativeRsiToken": nativeAuthentication.rsiToken,
-                "nativeRsiDevice": nativeAuthentication.rsiDevice
+                "currentPassword": password ?? ""
             ],
             as: RemoteAuthorizedDeviceBulkRemoval.self
         )
@@ -5252,30 +5242,9 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         }
     }
 
-    nonisolated static func deviceManagementAuthenticationArguments(
-        from cookies: [SessionCookie],
-        now: Date = .now
-    ) -> (rsiToken: String, rsiDevice: String) {
-        // RSI launcher sessions store these values as HttpOnly cookies. WKWebView sends
-        // them automatically, but document.cookie cannot expose them to the fetch script.
-        let value: ([String]) -> String = { names in
-            let acceptedNames = Set(names.map { $0.lowercased() })
-            return cookies.reversed().first { cookie in
-                acceptedNames.contains(cookie.name.lowercased()) &&
-                    !(cookie.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) &&
-                    (cookie.expiresAt.map { $0 > now } ?? true)
-            }?.value ?? ""
-        }
-
-        return (
-            rsiToken: value(["Rsi-Token", "rsi-token"]),
-            rsiDevice: value(["_rsi_device"])
-        )
-    }
-
     fileprivate func currentRSICookies() async -> [SessionCookie] {
         let store = webView.configuration.websiteDataStore.httpCookieStore
-        let cookies = await allCookies(from: store)
+        let cookies = await RSIAuthenticatedWebSession.allCookies(from: store)
         return cookies
             .filter { $0.domain.contains("robertsspaceindustries.com") }
             .map(SessionCookie.init)
@@ -5401,11 +5370,15 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             throw LiveHangarRepositoryError.sessionExpired
         }
 
+        let resolvedAccountHandle = RSIProfileHandleResolver.resolve(
+            from: [payload.profileHandle, accountHandle, profileName]
+        )
         let primaryOrganizationOverview = try? await fetchPrimaryOrganization(
-            profileCandidates: [accountHandle, profileName]
+            profileCandidates: [resolvedAccountHandle, accountHandle, profileName].compactMap { $0 }
         )
 
         return AccountOverview(
+            accountHandle: resolvedAccountHandle,
             storeCreditUSD: storeCreditUSD,
             totalSpendUSD: billingPayload.totalSpendText.flatMap(RSIStoreCreditParser.parseCurrencyText),
             avatarURL: normalizedRSIURL(from: payload.avatarURL),
@@ -5551,40 +5524,12 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     private func prepareWebView(with cookies: [SessionCookie]) async throws {
-        try await replaceCookies(cookies)
-    }
-
-    private func replaceCookies(_ cookies: [SessionCookie]) async throws {
-        let store = webView.configuration.websiteDataStore.httpCookieStore
-
-        let existingCookies = await allCookies(from: store)
-        for cookie in existingCookies where cookie.domain.contains("robertsspaceindustries.com") {
-            await withCheckedContinuation { continuation in
-                store.delete(cookie) {
-                    continuation.resume()
-                }
-            }
-        }
-
-        for cookie in cookies {
-            guard let httpCookie = cookie.httpCookie else {
-                continue
-            }
-
-            await withCheckedContinuation { continuation in
-                store.setCookie(httpCookie) {
-                    continuation.resume()
-                }
-            }
-        }
-    }
-
-    private func allCookies(from store: WKHTTPCookieStore) async -> [HTTPCookie] {
-        await withCheckedContinuation { continuation in
-            store.getAllCookies { cookies in
-                continuation.resume(returning: cookies)
-            }
-        }
+        let preparedSession = await RSIAuthenticatedWebSession.prepare(
+            cookies: cookies,
+            in: webView
+        )
+        preparedSessionCookies = preparedSession.cookies
+        preparedScriptAuthenticationArguments = preparedSession.scriptArguments
     }
 
     private func extractPledgeChunk(
@@ -5697,7 +5642,12 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
                     try? await Task.sleep(nanoseconds: self?.loadTimeoutNanoseconds ?? 30_000_000_000)
                     await self?.finishLoadingAfterTimeout(requestedURL: url)
                 }
-                webView.load(URLRequest(url: url))
+                webView.load(
+                    RSIAuthenticatedWebSession.request(
+                        url: url,
+                        cookies: preparedSessionCookies
+                    )
+                )
             }
         } onCancel: {
             Task { @MainActor [weak self] in
@@ -5924,9 +5874,12 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         arguments: [String: Any],
         as type: Value.Type
     ) async throws -> Value {
+        let resolvedArguments = preparedScriptAuthenticationArguments.merging(arguments) { _, actionValue in
+            actionValue
+        }
         let result = try await webView.callAsyncJavaScript(
             script,
-            arguments: arguments,
+            arguments: resolvedArguments,
             in: nil,
             contentWorld: .page
         )
@@ -6826,6 +6779,36 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       }
     };
 
+    const extractProfileHandle = (sourceNode, triggerNode) => {
+      const roots = [sourceNode, triggerNode, document.querySelector('header'), document.querySelector('nav')]
+        .filter((root, index, values) => root && values.indexOf(root) === index);
+
+      for (const root of roots) {
+        const links = root.matches?.('a[href*="/citizens/"]')
+          ? [root]
+          : Array.from(root.querySelectorAll?.('a[href*="/citizens/"]') || []);
+
+        for (const link of links) {
+          try {
+            const url = new URL(link.getAttribute('href') || link.href, window.location.href);
+            const match = url.pathname.match(new RegExp('/citizens/([^/?#]+)', 'i'));
+            if (!match?.[1]) {
+              continue;
+            }
+
+            const handle = decodeURIComponent(match[1]).trim();
+            if (handle && !handle.includes('@')) {
+              return handle;
+            }
+          } catch {
+            continue;
+          }
+        }
+      }
+
+      return '';
+    };
+
     await new Promise(resolve => setTimeout(resolve, 200));
     const graphQLStoreCreditValue = await fetchStructuredStoreCreditValue();
     const avatarTrigger = findAvatarTrigger();
@@ -6835,12 +6818,14 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     const accountPanel = findVisibleAccountPanel();
     const storeCreditText = extractStoreCreditText(accountPanel);
     const avatarURL = extractAvatarURL(accountPanel, avatarTrigger);
+    const profileHandle = extractProfileHandle(accountPanel, avatarTrigger);
 
     return {
       accessDenied,
       graphQLStoreCreditValue: graphQLStoreCreditValue || null,
       storeCreditText: storeCreditText || null,
-      avatarURL: avatarURL || null
+      avatarURL: avatarURL || null,
+      profileHandle: profileHandle || null
     };
     """
 
@@ -8035,8 +8020,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     clickElement(hangarLogButton);
 
     const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -8291,8 +8276,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -8654,8 +8639,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -9526,8 +9511,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -9634,8 +9619,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -9745,8 +9730,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -10727,8 +10712,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -10823,6 +10808,7 @@ nonisolated enum RSIStoreCreditParser {
 }
 
 private nonisolated struct AccountOverview {
+    let accountHandle: String?
     let storeCreditUSD: Decimal?
     let totalSpendUSD: Decimal?
     let avatarURL: URL?
@@ -11088,6 +11074,7 @@ private nonisolated struct RemoteAccountBalances: Decodable {
     let graphQLStoreCreditValue: String?
     let storeCreditText: String?
     let avatarURL: String?
+    let profileHandle: String?
 }
 
 private nonisolated struct RemotePrimaryOrganization: Decodable {
@@ -11134,6 +11121,7 @@ private nonisolated struct RemoteLegacyReferralPage: Decodable {
 }
 
 private nonisolated struct AccountRefreshContext {
+    let accountHandle: String?
     let avatarURL: URL?
     let primaryOrganization: AccountOrganization?
     let storeCreditUSD: Decimal?

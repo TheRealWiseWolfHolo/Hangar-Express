@@ -280,6 +280,18 @@ final class AppModel {
         }
     }
 
+    struct ItemTranslationMethodPrompt: Identifiable {
+        enum Reason: Equatable {
+            case languageSelection
+            case appUpdate
+        }
+
+        let id = UUID()
+        let language: HangarItemLanguage
+        let currentMode: HangarItemTranslationMissMode
+        let reason: Reason
+    }
+
     struct ItemTranslationPreprocessPrompt: Identifiable {
         enum Reason {
             case missingCache
@@ -668,6 +680,7 @@ final class AppModel {
     var authenticationFlowID = UUID()
     var reauthenticationPrompt: ReauthenticationPrompt?
     var versionRefreshPrompt: VersionRefreshPrompt?
+    var itemTranslationMethodPrompt: ItemTranslationMethodPrompt?
     var itemTranslationPreprocessPrompt: ItemTranslationPreprocessPrompt?
     var itemTranslationPreloadProgress: ItemTranslationPreloadProgress?
     var cloudItemTranslationUploadProgress: CloudItemTranslationUploadProgress?
@@ -695,12 +708,18 @@ final class AppModel {
     private var pendingAuthenticationDraft: AuthenticationDraft?
     private var silentHangarActionReconciliationTask: Task<Void, Never>?
     private var silentHangarActionReconciliationGeneration = 0
+    private var completedRefreshPresentationDismissalTask: Task<Void, Never>?
+    private var suppressesRefreshProgressUntilNextRefresh = false
     private var itemTranslationPreloadTask: Task<Void, Never>?
     private var itemTranslationPreloadProgressDismissalTask: Task<Void, Never>?
     private var itemTranslationPreloadStallTask: Task<Void, Never>?
     private var itemTranslationPreloadGeneration = 0
+    private var silentItemTranslationDictionaryRefreshTask: Task<Void, Never>?
+    private var silentItemTranslationDictionaryRefreshGeneration = 0
+    private var lastSilentItemTranslationDictionaryRefreshStartedAt: Date?
     private var suspendedItemTranslationAutoPreloadLanguages: Set<HangarItemLanguage> = []
     private var dismissedItemTranslationPreprocessLanguages: Set<HangarItemLanguage> = []
+    private var pendingUpgradeItemTranslationMethodPrompt: ItemTranslationMethodPrompt?
 
     private enum ItemTranslationPreloadPresentation {
         case visible
@@ -708,6 +727,7 @@ final class AppModel {
     }
 
     private static let lastLaunchedVersionDefaultsKey = "app.lastLaunchedVersion"
+    private static let itemTranslationMethodAcknowledgedVersionDefaultsKey = "hangar.itemTranslation.methodAcknowledgedVersion"
     private static let meltRequestTimeoutSeconds = 20
     private static let giftRequestTimeoutSeconds = 20
     private static let upgradeRequestTimeoutSeconds = 20
@@ -722,6 +742,7 @@ final class AppModel {
     private static let itemTranslationPreloadPreparingTimeoutNanoseconds: UInt64 = 35_000_000_000
     private static let itemTranslationPreloadTranslatingTimeoutNanoseconds: UInt64 = 60_000_000_000
     private static let itemTranslationDictionaryLoadTimeoutNanoseconds: UInt64 = 12_000_000_000
+    private static let silentItemTranslationDictionaryRefreshCoalescingInterval: TimeInterval = 5
     private static let itemTranslationPreloadMaximumLogEntries = 80
     private static let itemTranslationPendingPreloadLanguageDefaultsKey = "hangar.itemTranslation.pendingPreloadLanguage"
     private static let versionUpdateNoteKeysByShortVersion: [String: [String]] = [
@@ -858,7 +879,15 @@ final class AppModel {
     }
 
     func selectItemTranslationMissMode(_ mode: HangarItemTranslationMissMode) {
+        itemTranslationMethodPrompt = nil
+        pendingUpgradeItemTranslationMethodPrompt = nil
         userDefaults.set(mode.rawValue, forKey: HangarItemTranslationMissMode.storageKey)
+        if let currentVersion = currentAppVersionIdentifier() {
+            userDefaults.set(
+                currentVersion,
+                forKey: Self.itemTranslationMethodAcknowledgedVersionDefaultsKey
+            )
+        }
         itemTranslationPreprocessPrompt = nil
 
         guard let snapshot else {
@@ -1005,6 +1034,7 @@ final class AppModel {
         defer { startupActivity = nil }
         applyStoredSessions(await sessionStore.loadSnapshot(), resetContent: true)
         detectAppUpdateIfNeeded()
+        scheduleSilentItemTranslationDictionaryRefreshIfNeeded()
         await reconcileLaunchState()
     }
 
@@ -1199,6 +1229,7 @@ final class AppModel {
         lastRefreshErrorScope = nil
 
         activeRefreshScope = resolvedScope
+        prepareRefreshPresentationForNewRefresh()
         refreshIndicatorStyle = .standardCard
         concurrentRefreshEntries = initialConcurrentRefreshEntries(for: session, scope: resolvedScope)
         refreshProgress = concurrentRefreshEntries.isEmpty ? initialProgress(for: session, scope: resolvedScope) : nil
@@ -1242,6 +1273,7 @@ final class AppModel {
             )
             requestItemTranslationPreload(for: snapshot, promptsWhenCacheIsMissing: true)
             persistSnapshotInBackground(snapshot, for: session)
+            await persistResolvedAccountIdentityIfNeeded(from: snapshot, baseSession: session)
             schedulePostRefreshImageInvalidation(
                 for: resolvedScope,
                 previousSnapshot: existingSnapshot,
@@ -1328,6 +1360,9 @@ final class AppModel {
     }
 
     private func clearRefreshPresentation() {
+        completedRefreshPresentationDismissalTask?.cancel()
+        completedRefreshPresentationDismissalTask = nil
+        suppressesRefreshProgressUntilNextRefresh = true
         refreshProgress = nil
         concurrentRefreshEntries = []
         activeRefreshScope = nil
@@ -1908,9 +1943,11 @@ final class AppModel {
 
     func dismissVersionRefreshPrompt() {
         versionRefreshPrompt = nil
+        presentPendingUpgradeItemTranslationMethodPrompt()
     }
 
     func handleAppDidBecomeActive() async {
+        scheduleSilentItemTranslationDictionaryRefreshIfNeeded()
         await subscriptionStore.refreshPurchasedProducts()
 
         guard hasBootstrapped else {
@@ -1924,6 +1961,13 @@ final class AppModel {
         )
         defer { startupActivity = nil }
         await reconcileLaunchState()
+    }
+
+    func handleAppDidLeaveActiveState() {
+        lastSilentItemTranslationDictionaryRefreshStartedAt = nil
+        silentItemTranslationDictionaryRefreshTask?.cancel()
+        silentItemTranslationDictionaryRefreshTask = nil
+        silentItemTranslationDictionaryRefreshGeneration &+= 1
     }
 
     func beginReauthentication() async {
@@ -1957,6 +2001,7 @@ final class AppModel {
         }
 
         await snapshotStore.clear()
+        await ProfileBackgroundOptionsCache.shared.clear()
         URLCache.shared.removeAllCachedResponses()
         await imageCache.clear()
         await HostedShipCatalogStore.shared.clear()
@@ -3382,8 +3427,12 @@ final class AppModel {
         existingSnapshot: HangarSnapshot?,
         progressRelay: RefreshProgressDisplayRelay
     ) async throws -> HangarSnapshot {
-        let refreshedSnapshot = try await hangarRepository.fetchSnapshot(for: session) { progress in
+        var refreshedSnapshot = try await hangarRepository.fetchSnapshot(for: session) { progress in
             progressRelay.submit(progress)
+        }
+
+        if let existingSnapshot {
+            refreshedSnapshot = refreshedSnapshot.preservingUnavailableProfile(from: existingSnapshot)
         }
 
         guard refreshedSnapshot.hangarLogs.isEmpty,
@@ -3397,6 +3446,29 @@ final class AppModel {
         )
     }
 
+    private func persistResolvedAccountIdentityIfNeeded(
+        from snapshot: HangarSnapshot,
+        baseSession: UserSession
+    ) async {
+        guard let resolvedHandle = RSIProfileHandleResolver.normalizedHandle(snapshot.accountHandle),
+              resolvedHandle.caseInsensitiveCompare(baseSession.handle) != .orderedSame else {
+            return
+        }
+
+        let currentDisplayName = baseSession.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let loginIdentifier = baseSession.credentials?.loginIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shouldReplaceDisplayName = currentDisplayName.isEmpty
+            || currentDisplayName.contains("@")
+            || currentDisplayName.caseInsensitiveCompare(baseSession.email) == .orderedSame
+            || loginIdentifier.map { currentDisplayName.caseInsensitiveCompare($0) == .orderedSame } == true
+        let updatedSession = baseSession.updatingProfile(
+            handle: resolvedHandle,
+            displayName: shouldReplaceDisplayName ? resolvedHandle : currentDisplayName,
+            avatarURL: snapshot.avatarURL
+        )
+        applyStoredSessions(await sessionStore.save(updatedSession, makeActive: true), resetContent: false)
+    }
+
     func loadMoreHangarLogEntries() async {
         guard let session,
               let existingSnapshot = snapshot,
@@ -3406,6 +3478,7 @@ final class AppModel {
         }
 
         activeRefreshScope = .hangarLog
+        prepareRefreshPresentationForNewRefresh()
         refreshIndicatorStyle = .standardCard
         refreshProgress = RefreshProgress(
             stage: .hangarLog,
@@ -3466,10 +3539,17 @@ final class AppModel {
     }
 
     private func applyIncomingRefreshProgress(_ progress: RefreshProgress) {
+        guard !suppressesRefreshProgressUntilNextRefresh else {
+            return
+        }
+
         guard let trackerID = progress.trackerID,
               let area = ConcurrentRefreshEntry.Area(rawValue: trackerID) else {
             concurrentRefreshEntries = []
             refreshProgress = progress
+            if progress.isFinalStepComplete {
+                scheduleCompletedRefreshPresentationDismissal()
+            }
             return
         }
 
@@ -3501,6 +3581,31 @@ final class AppModel {
                 completedUnitCount: 0,
                 totalUnitCount: nil
             )
+            scheduleCompletedRefreshPresentationDismissal()
+        }
+    }
+
+    private func prepareRefreshPresentationForNewRefresh() {
+        completedRefreshPresentationDismissalTask?.cancel()
+        completedRefreshPresentationDismissalTask = nil
+        suppressesRefreshProgressUntilNextRefresh = false
+    }
+
+    private func scheduleCompletedRefreshPresentationDismissal() {
+        guard completedRefreshPresentationDismissalTask == nil else {
+            return
+        }
+
+        completedRefreshPresentationDismissalTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled, let self else {
+                return
+            }
+
+            self.suppressesRefreshProgressUntilNextRefresh = true
+            self.refreshProgress = nil
+            self.concurrentRefreshEntries = []
+            self.completedRefreshPresentationDismissalTask = nil
         }
     }
 
@@ -3688,9 +3793,34 @@ final class AppModel {
         let previousVersion = userDefaults.string(forKey: Self.lastLaunchedVersionDefaultsKey)
         userDefaults.set(currentVersion, forKey: Self.lastLaunchedVersionDefaultsKey)
 
-        guard let previousVersion,
-              previousVersion != currentVersion,
-              session != nil else {
+        guard let previousVersion else {
+            userDefaults.set(
+                currentVersion,
+                forKey: Self.itemTranslationMethodAcknowledgedVersionDefaultsKey
+            )
+            return
+        }
+
+        let shouldPresentVersionRefresh = previousVersion != currentVersion && session != nil
+        let acknowledgedMethodVersion = userDefaults.string(
+            forKey: Self.itemTranslationMethodAcknowledgedVersionDefaultsKey
+        )
+
+        if acknowledgedMethodVersion != currentVersion,
+           HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade() {
+            let prompt = ItemTranslationMethodPrompt(
+                language: currentHangarItemLanguage,
+                currentMode: currentHangarItemTranslationMissMode,
+                reason: .appUpdate
+            )
+            if shouldPresentVersionRefresh {
+                pendingUpgradeItemTranslationMethodPrompt = prompt
+            } else {
+                itemTranslationMethodPrompt = prompt
+            }
+        }
+
+        guard shouldPresentVersionRefresh else {
             return
         }
 
@@ -3699,6 +3829,92 @@ final class AppModel {
             currentVersion: currentVersion,
             updateNoteKeys: updateNoteKeys(for: currentVersion)
         )
+    }
+
+    private func scheduleSilentItemTranslationDictionaryRefreshIfNeeded(
+        now: Date = .now
+    ) {
+        let language = currentHangarItemLanguage
+        guard HangarItemTranslationBackgroundRefreshPolicy.shouldRefresh(
+            for: language
+        ) else {
+            silentItemTranslationDictionaryRefreshTask?.cancel()
+            silentItemTranslationDictionaryRefreshTask = nil
+            silentItemTranslationDictionaryRefreshGeneration &+= 1
+            return
+        }
+
+        guard silentItemTranslationDictionaryRefreshTask == nil else {
+            return
+        }
+
+        if let lastStartedAt = lastSilentItemTranslationDictionaryRefreshStartedAt,
+           now.timeIntervalSince(lastStartedAt)
+            < Self.silentItemTranslationDictionaryRefreshCoalescingInterval {
+            return
+        }
+
+        lastSilentItemTranslationDictionaryRefreshStartedAt = now
+        silentItemTranslationDictionaryRefreshGeneration &+= 1
+        let generation = silentItemTranslationDictionaryRefreshGeneration
+        silentItemTranslationDictionaryRefreshTask = Task.detached(priority: .utility) { [weak self] in
+            do {
+                _ = try await HostedHangarItemTranslationStore.shared.refreshDictionary(
+                    for: language,
+                    using: HostedHangarItemTranslationClient(language: language)
+                )
+                await self?.completeSilentItemTranslationDictionaryRefresh(
+                    for: language,
+                    generation: generation,
+                    errorDescription: nil
+                )
+            } catch {
+                await self?.completeSilentItemTranslationDictionaryRefresh(
+                    for: language,
+                    generation: generation,
+                    errorDescription: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private func completeSilentItemTranslationDictionaryRefresh(
+        for language: HangarItemLanguage,
+        generation: Int,
+        errorDescription: String?
+    ) {
+        guard generation == silentItemTranslationDictionaryRefreshGeneration else {
+            return
+        }
+
+        silentItemTranslationDictionaryRefreshTask = nil
+        guard errorDescription == nil else {
+#if DEBUG
+            let message = errorDescription ?? "Unknown error"
+            print("Silent item translation dictionary refresh failed: \(message)")
+#endif
+            return
+        }
+
+        guard currentHangarItemLanguage == language else {
+            return
+        }
+        itemTranslationDictionaryRefreshGeneration &+= 1
+    }
+
+    private func presentPendingUpgradeItemTranslationMethodPrompt() {
+        guard let prompt = pendingUpgradeItemTranslationMethodPrompt else {
+            return
+        }
+
+        pendingUpgradeItemTranslationMethodPrompt = nil
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard self?.versionRefreshPrompt == nil else {
+                return
+            }
+            self?.itemTranslationMethodPrompt = prompt
+        }
     }
 
     private func updateNoteKeys(for versionIdentifier: String) -> [String] {
