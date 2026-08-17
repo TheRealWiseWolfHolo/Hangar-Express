@@ -4,8 +4,8 @@ set -eu
 
 MODE="${1:-repo}"
 
-forbidden_path_pattern='(^|/)(Packaging\.log|DistributionSummary\.plist|ExportOptions\.plist|embedded\.mobileprovision|.*\.ipa|.*\.mobileprovision|.*\.xcarchive(/.*)?)$'
-forbidden_content_pattern='X-Apple-GS-Token|DSESSIONID|-----BEGIN (RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----|BEGIN OPENSSH PRIVATE KEY|AuthKey_[A-Za-z0-9._-]+\.p8'
+forbidden_path_pattern='(^|/)(Packaging\.log|DistributionSummary\.plist|ExportOptions\.plist|embedded\.mobileprovision|\.env(\..*)?|\.dev\.vars(\..*)?|\.limited-ship-access-keys(/.*)?|limited_ship_(24h_)?access_keys?\.sh|.*\.ipa|.*\.mobileprovision|.*\.xcarchive(/.*)?|.*\.(p8|p12|pfx|pem|key))$'
+forbidden_content_pattern='X-Apple-GS-Token|DSESSIONID|-----BEGIN (RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----|BEGIN OPENSSH PRIVATE KEY|AuthKey_[A-Za-z0-9._-]+\.p8|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|(AKIA|ASIA)[A-Z0-9]{16}|AIza[0-9A-Za-z_-]{35}|(sk|rk)_(live|test)_[0-9A-Za-z]{16,}|xox[baprs]-[0-9A-Za-z-]{10,}|sk-(proj-|svcacct-)?[A-Za-z0-9_-]{20,}'
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM

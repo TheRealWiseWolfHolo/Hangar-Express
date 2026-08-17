@@ -27,6 +27,13 @@ embedded.mobileprovision
 *.key
 *.cer
 *.crt
+.env
+.env.*
+!.env.example
+.dev.vars.*
+.limited-ship-access-keys/
+limited_ship_access_keys.sh
+limited_ship_24h_access_key.sh
 
 # Swift Package Manager
 .swiftpm/
