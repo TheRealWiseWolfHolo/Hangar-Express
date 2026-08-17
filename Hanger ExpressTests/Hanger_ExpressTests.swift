@@ -2516,12 +2516,11 @@ struct Hanger_ExpressTests {
 
     @Test func remoteIPRegionParserIdentifiesMainlandChina() {
         let countryCode = RemoteAuthenticationIPRegionChecker.countryCode(
-            fromRemoteTrace: """
+            fromResponse: Data("""
             fl=123
-            h=www.remote.com
             loc=cn
             tls=TLSv1.3
-            """
+            """.utf8)
         )
 
         #expect(countryCode == "CN")
@@ -3223,27 +3222,41 @@ struct Hanger_ExpressTests {
         #expect(match.manufacturerLogoURL == URL(string: "https://cdn.example.com/greycat-white.svg"))
     }
 
-    @Test func hostedShipFeedEndpointsPreferPagesDevAndFallbackToGitHubPages() async throws {
+    @Test func hostedShipFeedEndpointsUseConfiguredRemoteServers() async throws {
+        let configuration = RemoteServiceConfiguration(
+            primaryBaseURL: URL(string: "https://primary.example.com")!,
+            fallbackBaseURL: URL(string: "https://fallback.example.com")!,
+            translationBaseURL: URL(string: "https://translation.example.com")!,
+            ipRegionURL: URL(string: "https://region.example.com")!
+        )
         #expect(
-            HostedShipFeedEndpoints.catalogURLs == [
-                URL(string: "https://starcitizen-info.remote.example.invalid/ships.json")!,
-                URL(string: "https://fallback.example.invalid/ships.json")!
+            HostedShipFeedEndpoints.catalogURLs(configuration: configuration) == [
+                URL(string: "https://primary.example.com/ships.json")!,
+                URL(string: "https://fallback.example.com/ships.json")!
             ]
         )
         #expect(
-            HostedShipFeedEndpoints.detailCatalogURLs == [
-                URL(string: "https://starcitizen-info.remote.example.invalid/ship-details.json")!,
-                URL(string: "https://fallback.example.invalid/ship-details.json")!
+            HostedShipFeedEndpoints.detailCatalogURLs(configuration: configuration) == [
+                URL(string: "https://primary.example.com/ship-details.json")!,
+                URL(string: "https://fallback.example.com/ship-details.json")!
             ]
         )
         #expect(
-            HostedShipFeedEndpoints.itemTranslationURLs(for: .simplifiedChinese) == [
-                URL(string: "https://hangar-express-translations.liuchen2004.remote.example.invalid/item-translations/zh-Hans.json")!,
-                URL(string: "https://starcitizen-info.remote.example.invalid/item-translations/zh-Hans.json")!,
-                URL(string: "https://fallback.example.invalid/item-translations/zh-Hans.json")!
+            HostedShipFeedEndpoints.itemTranslationURLs(
+                for: .simplifiedChinese,
+                configuration: configuration
+            ) == [
+                URL(string: "https://translation.example.com/item-translations/zh-Hans.json")!,
+                URL(string: "https://primary.example.com/item-translations/zh-Hans.json")!,
+                URL(string: "https://fallback.example.com/item-translations/zh-Hans.json")!
             ]
         )
-        #expect(HostedShipFeedEndpoints.itemTranslationURLs(for: .original).isEmpty)
+        #expect(
+            HostedShipFeedEndpoints.itemTranslationURLs(
+                for: .original,
+                configuration: configuration
+            ).isEmpty
+        )
     }
 
     @Test func hostedHangarItemTranslationFeedDecodesStrictDictionary() throws {
@@ -3268,7 +3281,7 @@ struct Hanger_ExpressTests {
             .map { String(format: "%02x", $0) }
             .joined()
         let url = try #require(
-            URL(string: "https://hangar-express-translations.example.com/zh-Hans.json")
+            URL(string: "https://translation.example.com/zh-Hans.json")
         )
         let validResponse = try #require(
             HTTPURLResponse(
@@ -3318,8 +3331,8 @@ struct Hanger_ExpressTests {
         #expect(rejectedInvalidMetadata)
     }
 
-    @Test func cloudTranslationClassifierIncludesOnlyStructuredCatalogFields() throws {
-        #expect(CloudHangarItemTranslationRollout.isEnabled)
+    @Test func remoteTranslationClassifierIncludesOnlyStructuredCatalogFields() throws {
+        #expect(RemoteHangarItemTranslationRollout.isEnabled)
 
         let sourceSnapshot = PreviewHangarRepository.sampleSnapshot
         let snapshot = HangarSnapshot(
@@ -3355,7 +3368,7 @@ struct Hanger_ExpressTests {
             ]
         )
 
-        let candidates = CloudHangarItemTranslationSuggestionClassifier.candidates(
+        let candidates = RemoteHangarItemTranslationSuggestionClassifier.candidates(
             from: snapshot
         )
         let sources = Set(candidates.map(\.source))
@@ -3373,7 +3386,7 @@ struct Hanger_ExpressTests {
         #expect(!sources.contains("Private raw hangar log text"))
     }
 
-    @Test func cloudTranslationClassifierExcludesCurrentDictionaryHits() throws {
+    @Test func remoteTranslationClassifierExcludesCurrentDictionaryHits() throws {
         let snapshot = PreviewHangarRepository.sampleSnapshot
         let packageTitle = try #require(snapshot.packages.first?.title)
         let dictionary = try HangarItemTranslationDictionary(
@@ -3391,7 +3404,7 @@ struct Hanger_ExpressTests {
             expectedLocale: "zh-Hans"
         )
 
-        let candidates = CloudHangarItemTranslationSuggestionClassifier.candidates(
+        let candidates = RemoteHangarItemTranslationSuggestionClassifier.candidates(
             from: snapshot,
             excluding: dictionary
         )
@@ -3399,7 +3412,7 @@ struct Hanger_ExpressTests {
         #expect(!candidates.map(\.source).contains(packageTitle))
     }
 
-    @Test func cloudTranslationMissModeHonorsRolloutAndDefaultsLocal() {
+    @Test func remoteTranslationMissModeHonorsRolloutAndDefaultsLocal() {
         #expect(
             HangarItemTranslationMissMode.resolved(
                 from: HangarItemTranslationMissMode.cloudReview.rawValue
@@ -3459,42 +3472,42 @@ struct Hanger_ExpressTests {
         )
     }
 
-    @Test func cloudTranslationCandidatesRejectPrivateContentShapes() {
+    @Test func remoteTranslationCandidatesRejectPrivateContentShapes() {
         #expect(
-            CloudHangarItemTranslationCandidate(
+            RemoteHangarItemTranslationCandidate(
                 source: "friend@example.com",
                 kind: .item
             ) == nil
         )
         #expect(
-            CloudHangarItemTranslationCandidate(
+            RemoteHangarItemTranslationCandidate(
                 source: "https://example.com/private",
                 kind: .item
             ) == nil
         )
         #expect(
-            CloudHangarItemTranslationCandidate(
+            RemoteHangarItemTranslationCandidate(
                 source: "First line\nSecond line",
                 kind: .item
             ) == nil
         )
     }
 
-    @Test func cloudTranslationCandidatesRemoveCouponCodesBeforeSubmission() throws {
+    @Test func remoteTranslationCandidatesRemoveCouponCodesBeforeSubmission() throws {
         let candidate = try #require(
-            CloudHangarItemTranslationCandidate(
+            RemoteHangarItemTranslationCandidate(
                 source: "6 Months Imperator Reward - 20% Coupon: SRGKCLLUFL",
                 kind: .package
             )
         )
         let safeCandidate = try #require(
-            CloudHangarItemTranslationCandidate(
+            RemoteHangarItemTranslationCandidate(
                 source: "6 Months Imperator Reward - 20% Coupon",
                 kind: .package
             )
         )
         let spacedCandidate = try #require(
-            CloudHangarItemTranslationCandidate(
+            RemoteHangarItemTranslationCandidate(
                 source: "Reward - 10 % coupon ： PRIVATE-CODE",
                 kind: .package
             )
@@ -3504,22 +3517,22 @@ struct Hanger_ExpressTests {
         #expect(candidate.clientID == safeCandidate.clientID)
         #expect(spacedCandidate.source == "Reward - 10 % coupon")
         #expect(
-            CloudHangarItemTranslationCandidate(
+            RemoteHangarItemTranslationCandidate(
                 source: "Upgrade: Terrapin to Corsair",
                 kind: .upgrade
             )?.source == "Upgrade: Terrapin to Corsair"
         )
     }
 
-    @Test func cloudTranslationRequestNeverContainsCouponCode() throws {
+    @Test func remoteTranslationRequestNeverContainsCouponCode() throws {
         let privateCode = "SRGKCLLUFL"
         let candidate = try #require(
-            CloudHangarItemTranslationCandidate(
+            RemoteHangarItemTranslationCandidate(
                 source: "6 Months Imperator Reward - 20% Coupon: \(privateCode)",
                 kind: .package
             )
         )
-        let client = CloudHangarItemTranslationClient(
+        let client = RemoteHangarItemTranslationClient(
             baseURL: URL(string: "https://cloud-translation.example.com")!
         )
         let request = try client.resolveRequest(
@@ -3538,7 +3551,7 @@ struct Hanger_ExpressTests {
         #expect(item["source"] as? String == "6 Months Imperator Reward - 20% Coupon")
     }
 
-    @Test func cloudTranslationClientBatchesDeduplicatesAndDiscardsPendingText() async throws {
+    @Test func remoteTranslationClientBatchesDeduplicatesAndDiscardsPendingText() async throws {
         let observationBox = CloudTranslationRequestObservationBox()
         let progressBox = CloudTranslationUploadProgressBox()
         let session = makeCloudTranslationMockURLSession { request in
@@ -3574,13 +3587,13 @@ struct Hanger_ExpressTests {
                 try JSONSerialization.data(withJSONObject: ["translations": translations])
             )
         }
-        let client = CloudHangarItemTranslationClient(
+        let client = RemoteHangarItemTranslationClient(
             baseURL: URL(string: "https://cloud-translation.example.com")!,
             urlSession: session
         )
         let uniqueCandidates = try (0 ..< 30).map {
             try #require(
-                CloudHangarItemTranslationCandidate(
+                RemoteHangarItemTranslationCandidate(
                     source: "Catalog Item \($0)",
                     kind: .item
                 )
@@ -3607,13 +3620,13 @@ struct Hanger_ExpressTests {
             )
         ])
         #expect(progressBox.values == [
-            CloudHangarItemTranslationUploadProgress(completedCount: 30, totalCount: 30),
+            RemoteHangarItemTranslationUploadProgress(completedCount: 30, totalCount: 30),
         ])
     }
 
-    @Test func cloudTranslationSubmissionStoreRequiresOptInAndPersistsTerminalState() async throws {
+    @Test func remoteTranslationSubmissionStoreRequiresOptInAndPersistsTerminalState() async throws {
         let snapshot = PreviewHangarRepository.sampleSnapshot
-        let allCandidates = CloudHangarItemTranslationSuggestionClassifier.candidates(
+        let allCandidates = RemoteHangarItemTranslationSuggestionClassifier.candidates(
             from: snapshot
         )
         let candidatesBySource = Dictionary(
@@ -3684,11 +3697,11 @@ struct Hanger_ExpressTests {
                 )
             )
         }
-        let client = CloudHangarItemTranslationClient(
+        let client = RemoteHangarItemTranslationClient(
             baseURL: URL(string: "https://cloud-translation.example.com")!,
             urlSession: session
         )
-        let disabledStore = CloudHangarItemTranslationSubmissionStore(
+        let disabledStore = RemoteHangarItemTranslationSubmissionStore(
             directoryURL: tempDirectory
         )
 
@@ -3713,7 +3726,7 @@ struct Hanger_ExpressTests {
         )
         #expect(observationBox.values.isEmpty)
 
-        let enabledStore = CloudHangarItemTranslationSubmissionStore(
+        let enabledStore = RemoteHangarItemTranslationSubmissionStore(
             directoryURL: tempDirectory
         )
         #expect(
@@ -3737,7 +3750,7 @@ struct Hanger_ExpressTests {
             ]
         )
 
-        let reloadedStore = CloudHangarItemTranslationSubmissionStore(
+        let reloadedStore = RemoteHangarItemTranslationSubmissionStore(
             directoryURL: tempDirectory
         )
         #expect(
@@ -3759,19 +3772,19 @@ struct Hanger_ExpressTests {
         #expect(!persistedState.contains(submittedCandidate.source))
     }
 
-    @Test func cloudTranslationSubmissionStateUsesBoundedVersionedRetries() throws {
+    @Test func remoteTranslationSubmissionStateUsesBoundedVersionedRetries() throws {
         let candidate = try #require(
-            CloudHangarItemTranslationCandidate(
+            RemoteHangarItemTranslationCandidate(
                 source: "Retryable Catalog Item",
                 kind: .item
             )
         )
-        let unavailable = CloudHangarItemTranslationResult(
+        let unavailable = RemoteHangarItemTranslationResult(
             candidate: candidate,
             status: .unavailable,
             reason: nil
         )
-        let pending = CloudHangarItemTranslationResult(
+        let pending = RemoteHangarItemTranslationResult(
             candidate: candidate,
             status: .pending,
             reason: nil
@@ -3779,7 +3792,7 @@ struct Hanger_ExpressTests {
         let start = try #require(
             ISO8601DateFormatter().date(from: "2026-07-26T20:00:00Z")
         )
-        var state = CloudHangarItemTranslationSubmissionState()
+        var state = RemoteHangarItemTranslationSubmissionState()
 
         #expect(state.shouldSubmit(candidate, dictionaryVersion: 3, now: start))
         state.record(unavailable, dictionaryVersion: 3, now: start)
@@ -3820,7 +3833,7 @@ struct Hanger_ExpressTests {
         ))
 
         let roundTrip = try JSONDecoder().decode(
-            CloudHangarItemTranslationSubmissionState.self,
+            RemoteHangarItemTranslationSubmissionState.self,
             from: JSONEncoder().encode(state)
         )
         #expect(roundTrip == state)
@@ -6569,13 +6582,13 @@ private final class CloudTranslationRequestObservationBox: @unchecked Sendable {
 
 private final class CloudTranslationUploadProgressBox: @unchecked Sendable {
     private let lock = NSLock()
-    private var storedValues: [CloudHangarItemTranslationUploadProgress] = []
+    private var storedValues: [RemoteHangarItemTranslationUploadProgress] = []
 
-    var values: [CloudHangarItemTranslationUploadProgress] {
+    var values: [RemoteHangarItemTranslationUploadProgress] {
         lock.withLock { storedValues }
     }
 
-    func append(_ value: CloudHangarItemTranslationUploadProgress) {
+    func append(_ value: RemoteHangarItemTranslationUploadProgress) {
         lock.withLock {
             storedValues.append(value)
         }

@@ -31,7 +31,9 @@ embedded.mobileprovision
 # Swift Package Manager
 .swiftpm/
 
-# Node / Remote Workers
-node_modules/
-.server-tool/
-.dev.vars
+# Local configuration and private server implementation
+.env
+.env.*
+!.env.example
+Config/Local.xcconfig
+server-local/

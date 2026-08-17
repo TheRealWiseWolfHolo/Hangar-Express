@@ -32,6 +32,7 @@
 		D11D01E92F932528006EC273 /* Hanger ExpressTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Hanger ExpressTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		D11D01F32F932528006EC273 /* Hanger ExpressUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Hanger ExpressUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		D11D05FE2FA13AF3006EC273 /* StoreKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = StoreKit.framework; path = System/Library/Frameworks/StoreKit.framework; sourceTree = SDKROOT; };
+		D11D06012FB00000006EC273 /* Config/AppConfiguration.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/AppConfiguration.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -81,6 +82,7 @@
 		D11D01D12F932526006EC273 = {
 			isa = PBXGroup;
 			children = (
+				D11D06012FB00000006EC273 /* Config/AppConfiguration.xcconfig */,
 				D11D01DC2F932526006EC273 /* Hanger Express */,
 				D11D01EC2F932528006EC273 /* Hanger ExpressTests */,
 				D11D01F62F932528006EC273 /* Hanger ExpressUITests */,
@@ -415,6 +417,7 @@
 		};
 		D11D01FE2F932528006EC273 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = D11D06012FB00000006EC273 /* Config/AppConfiguration.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -459,6 +462,7 @@
 		};
 		D11D01FF2F932528006EC273 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = D11D06012FB00000006EC273 /* Config/AppConfiguration.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;

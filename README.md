@@ -6,7 +6,7 @@ SwiftUI iOS app for retrieving, organizing, and acting on a Star Citizen hangar.
 
 - Browser-backed RSI sign-in with saved sessions, local snapshot restore, and developer preview support for Xcode previews.
 - Live sync for hangar pledges, fleet ships, buy-back entries, hangar logs, and account details into app-owned models.
-- Hosted ship catalog and ship-detail enrichment from `https://starcitizen-info.remote.example.invalid/`, with GitHub Pages as fallback.
+- Hosted ship catalog and ship-detail enrichment from locally configured remote sources.
 - Fleet detail screens enriched with hosted ship specs such as crew, size, components, weapons, and utility entries.
 - Fleet card long-press to jump from a ship to the pledges that contain it, reusing the hangar pledge detail flow.
 - Melt, gift, and apply-upgrade flows, protected by local device-owner authentication before the RSI action is sent.
@@ -46,7 +46,7 @@ The shipped app boots with `AppEnvironment.live`. The preview environment still 
 1. Sign in through a browser-backed session flow.
 2. Capture and reuse authenticated RSI cookies for refreshes and other read operations.
 3. Sync hangar pages, fleet projections, buy-back pages, logs, account metadata, and hosted ship detail data into normalized local models.
-4. Use the hosted ship feeds from `starcitizen-info.remote.example.invalid` by default, with GitHub Pages as backup, to enrich fleet and ship-detail UI.
+4. Use locally configured hosted feeds to enrich fleet and ship-detail UI. The provider-neutral response format is documented in [REMOTE_SERVER_CONTRACT.md](REMOTE_SERVER_CONTRACT.md).
 5. For sensitive pledge actions like melt, gift, and apply upgrade, require both local device-owner authentication and the current RSI password because RSI still gates those actions with password-confirmed requests.
 
 More detail is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

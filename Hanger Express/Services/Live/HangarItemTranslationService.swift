@@ -49,8 +49,9 @@ nonisolated struct HostedHangarItemTranslationClient: Sendable {
                     data: data,
                     response: httpResponse,
                     dictionary: dictionary,
-                    requiresMetadata: url.host
-                        == HostedShipFeedEndpoints.cloudTranslationBaseURL.host
+                    requiresMetadata: RemoteServiceConfiguration.live.translationBaseURL.map {
+                        url.host == $0.host
+                    } ?? false
                 )
                 return FetchedDictionary(
                     dictionary: dictionary,
@@ -114,7 +115,7 @@ nonisolated struct HostedHangarItemTranslationClient: Sendable {
         if requiresMetadata,
            checksum == nil || version == nil || count == nil || entityTag == nil {
             throw HostedShipCatalogError.invalidItemTranslationFeed(
-                "The Remote translation feed is missing integrity metadata."
+                "The remote translation feed is missing integrity metadata."
             )
         }
 

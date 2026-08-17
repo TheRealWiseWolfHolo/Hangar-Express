@@ -1152,48 +1152,73 @@ nonisolated struct HostedLimitedShipSaleClient: Sendable {
 }
 
 public nonisolated enum HostedShipFeedEndpoints {
-    public static let primaryBaseURL = URL(string: "https://starcitizen-info.remote.example.invalid")!
-    public static let fallbackBaseURL = URL(string: "https://fallback.example.invalid")!
-    static let cloudTranslationBaseURL = URL(
-        string: "https://hangar-express-translations.liuchen2004.remote.example.invalid"
-    )!
+    public static var catalogURLs: [URL] {
+        catalogURLs(configuration: .live)
+    }
 
-    public static let catalogURLs: [URL] = [
-        primaryBaseURL.appendingPathComponent("ships.json"),
-        fallbackBaseURL.appendingPathComponent("ships.json")
-    ]
+    public static var detailCatalogURLs: [URL] {
+        detailCatalogURLs(configuration: .live)
+    }
 
-    public static let detailCatalogURLs: [URL] = [
-        primaryBaseURL.appendingPathComponent("ship-details.json"),
-        fallbackBaseURL.appendingPathComponent("ship-details.json")
-    ]
+    public static var limitedShipSaleURLs: [URL] {
+        limitedShipSaleURLs(configuration: .live)
+    }
 
-    public static let limitedShipSaleURLs: [URL] = [
-        primaryBaseURL.appendingPathComponent("limited-ships.json"),
-        fallbackBaseURL.appendingPathComponent("limited-ships.json")
-    ]
+    public static var eventCalendarURLs: [URL] {
+        eventCalendarURLs(configuration: .live)
+    }
 
-    public static let eventCalendarURLs: [URL] = [
-        fallbackBaseURL.appendingPathComponent("events.json"),
-        primaryBaseURL.appendingPathComponent("events.json")
-    ]
+    static func catalogURLs(configuration: RemoteServiceConfiguration) -> [URL] {
+        baseURLs(configuration: configuration).map {
+            $0.appendingPathComponent("ships.json")
+        }
+    }
+
+    static func detailCatalogURLs(configuration: RemoteServiceConfiguration) -> [URL] {
+        baseURLs(configuration: configuration).map {
+            $0.appendingPathComponent("ship-details.json")
+        }
+    }
+
+    static func limitedShipSaleURLs(configuration: RemoteServiceConfiguration) -> [URL] {
+        baseURLs(configuration: configuration).map {
+            $0.appendingPathComponent("limited-ships.json")
+        }
+    }
+
+    static func eventCalendarURLs(configuration: RemoteServiceConfiguration) -> [URL] {
+        baseURLs(configuration: configuration).reversed().map {
+            $0.appendingPathComponent("events.json")
+        }
+    }
 
     static func itemTranslationURLs(for language: HangarItemLanguage) -> [URL] {
+        itemTranslationURLs(for: language, configuration: .live)
+    }
+
+    static func itemTranslationURLs(
+        for language: HangarItemLanguage,
+        configuration: RemoteServiceConfiguration
+    ) -> [URL] {
         guard let locale = language.translationLocaleIdentifier else {
             return []
         }
 
-        return [
-            cloudTranslationBaseURL
-                .appendingPathComponent("item-translations")
-                .appendingPathComponent("\(locale).json"),
-            primaryBaseURL
-                .appendingPathComponent("item-translations")
-                .appendingPathComponent("\(locale).json"),
-            fallbackBaseURL
-                .appendingPathComponent("item-translations")
+        let translationURLs = [configuration.translationBaseURL].compactMap { $0 }.map {
+            $0.appendingPathComponent("item-translations")
                 .appendingPathComponent("\(locale).json")
-        ]
+        }
+        let mirrorURLs = baseURLs(configuration: configuration).map {
+            $0.appendingPathComponent("item-translations")
+                .appendingPathComponent("\(locale).json")
+        }
+        return translationURLs + mirrorURLs
+    }
+
+    private static func baseURLs(
+        configuration: RemoteServiceConfiguration
+    ) -> [URL] {
+        [configuration.primaryBaseURL, configuration.fallbackBaseURL].compactMap { $0 }
     }
 }
 

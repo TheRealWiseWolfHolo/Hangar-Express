@@ -14,19 +14,30 @@ protocol AuthenticationIPRegionChecking: Sendable {
 }
 
 struct RemoteAuthenticationIPRegionChecker: AuthenticationIPRegionChecking {
-    private let traceURL: URL
+    private struct RegionPayload: Decodable {
+        let countryCode: String?
+    }
+
+    private let endpointURL: URL?
     private let urlSession: URLSession
 
     init(
-        traceURL: URL = URL(string: "https://region.example.invalid/location")!,
+        endpointURL: URL? = RemoteServiceConfiguration.live.ipRegionURL,
         urlSession: URLSession = .shared
     ) {
-        self.traceURL = traceURL
+        self.endpointURL = endpointURL
         self.urlSession = urlSession
     }
 
     func currentRegion() async -> AuthenticationIPRegionCheckResult {
-        var request = URLRequest(url: traceURL)
+        guard let endpointURL else {
+            return AuthenticationIPRegionCheckResult(
+                countryCode: nil,
+                errorDescription: "IP region check is not configured."
+            )
+        }
+
+        var request = URLRequest(url: endpointURL)
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.timeoutInterval = 1.5
 
@@ -41,9 +52,8 @@ struct RemoteAuthenticationIPRegionChecker: AuthenticationIPRegionChecking {
                 )
             }
 
-            let trace = String(decoding: data, as: UTF8.self)
             return AuthenticationIPRegionCheckResult(
-                countryCode: Self.countryCode(fromRemoteTrace: trace),
+                countryCode: Self.countryCode(fromResponse: data),
                 errorDescription: nil
             )
         } catch {
@@ -54,18 +64,32 @@ struct RemoteAuthenticationIPRegionChecker: AuthenticationIPRegionChecking {
         }
     }
 
-    static func countryCode(fromRemoteTrace trace: String) -> String? {
-        for line in trace.split(whereSeparator: \.isNewline) {
+    static func countryCode(fromResponse data: Data) -> String? {
+        if let payload = try? JSONDecoder().decode(RegionPayload.self, from: data),
+           let code = normalizedCountryCode(payload.countryCode) {
+            return code
+        }
+
+        let response = String(decoding: data, as: UTF8.self)
+        for line in response.split(whereSeparator: \.isNewline) {
             let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
             guard parts.count == 2, parts[0] == "loc" else {
                 continue
             }
-
-            let code = parts[1].trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-            return code.isEmpty ? nil : code
+            return normalizedCountryCode(String(parts[1]))
         }
 
         return nil
+    }
+
+    private static func normalizedCountryCode(_ value: String?) -> String? {
+        let code = value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+        guard let code, code.count == 2, code.allSatisfy(\.isLetter) else {
+            return nil
+        }
+        return code
     }
 }
 

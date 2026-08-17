@@ -1578,7 +1578,7 @@ final class AppModel {
                 dictionary: dictionaryResult.dictionary
             )
             if missMode == .cloudReview {
-                let outcome = await CloudHangarItemTranslationSubmissionStore.shared
+                let outcome = await RemoteHangarItemTranslationSubmissionStore.shared
                     .submitSuggestions(
                         for: snapshot,
                         excluding: dictionaryResult.dictionary,
@@ -1632,7 +1632,7 @@ final class AppModel {
     }
 
     private func applyCloudItemTranslationSubmissionOutcome(
-        _ outcome: CloudHangarItemTranslationSubmissionOutcome,
+        _ outcome: RemoteHangarItemTranslationSubmissionOutcome,
         language: HangarItemLanguage,
         generation: Int
     ) {
@@ -1673,7 +1673,7 @@ final class AppModel {
     }
 
     private func applyCloudItemTranslationUploadProgress(
-        _ progress: CloudHangarItemTranslationUploadProgress,
+        _ progress: RemoteHangarItemTranslationUploadProgress,
         generation: Int
     ) {
         guard generation == itemTranslationPreloadGeneration else {

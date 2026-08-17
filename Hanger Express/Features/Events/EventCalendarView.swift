@@ -519,12 +519,15 @@ private struct EventCalendarDetailView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(isSavingToCalendar)
 
-                        ShareLink(item: event.sourceURL ?? URL(string: "https://starcitizen-info.remote.example.invalid/events.json")!) {
-                            Image(systemName: "square.and.arrow.up")
-                                .frame(width: 44, height: 44)
+                        if let shareURL = event.sourceURL
+                            ?? HostedShipFeedEndpoints.eventCalendarURLs.first {
+                            ShareLink(item: shareURL) {
+                                Image(systemName: "square.and.arrow.up")
+                                    .frame(width: 44, height: 44)
+                            }
+                            .buttonStyle(.bordered)
+                            .accessibilityLabel("Share event")
                         }
-                        .buttonStyle(.bordered)
-                        .accessibilityLabel("Share event")
                     }
 
                     if let sourceURL = event.sourceURL {

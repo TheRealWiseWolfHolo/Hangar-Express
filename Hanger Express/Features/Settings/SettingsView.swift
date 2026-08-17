@@ -22,7 +22,7 @@ private struct CloudTranslationCoverage {
         snapshot: HangarSnapshot,
         dictionary: HangarItemTranslationDictionary?
     ) {
-        let candidates = CloudHangarItemTranslationSuggestionClassifier.candidates(
+        let candidates = RemoteHangarItemTranslationSuggestionClassifier.candidates(
             from: snapshot
         )
         totalCount = candidates.count
@@ -118,7 +118,7 @@ struct SettingsView: View {
                     Text("Display")
                 }
 
-                if CloudHangarItemTranslationRollout.isEnabled,
+                if RemoteHangarItemTranslationRollout.isEnabled,
                    HangarItemLanguage.resolved(
                        from: hangarItemLanguageRawValue
                    ) == .simplifiedChinese {

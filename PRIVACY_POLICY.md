@@ -45,7 +45,7 @@ Hangar Express communicates with third-party services as needed for app function
 
 - Roberts Space Industries and Cloud Imperium services are used for RSI sign-in, hangar data, account data, pledge actions, cookies, and related web content.
 - Apple services are used for App Store purchases, subscription management, payment processing, and purchase entitlement verification.
-- Hosted Star Citizen ship metadata may be loaded from `https://starcitizen-info.remote.example.invalid/` and the GitHub Pages fallback used by the app.
+- Hosted Star Citizen ship metadata may be loaded from remote services configured by the developer.
 - Remote image hosts may be contacted when the app loads ship artwork or other referenced images.
 
 These third-party services may process information according to their own privacy policies and terms. Hangar Express does not control their data practices.
@@ -60,7 +60,7 @@ Hangar Express is not directed to children. The app is intended for users who ar
 
 ## Data Retention
 
-Information stored locally remains on your device until you remove it using app controls, sign out or clear saved data where available, or delete the app. Information handled by Apple, RSI, Cloud Imperium, GitHub, Remote Pages, or other remote services is retained according to those services' policies.
+Information stored locally remains on your device until you remove it using app controls, sign out or clear saved data where available, or delete the app. Information handled by Apple, RSI, Cloud Imperium, GitHub, or other remote services is retained according to those services' policies.
 
 ## Your Choices
 
@@ -72,7 +72,7 @@ You can:
 - manage or cancel App Store subscriptions from your Apple Account settings; and
 - delete the app to remove app-container data from the device.
 
-For information stored by RSI, Cloud Imperium, Apple, GitHub, Remote Pages, or other third-party services, use the privacy controls provided by those services.
+For information stored by RSI, Cloud Imperium, Apple, GitHub, or other third-party services, use the privacy controls provided by those services.
 
 ## Changes to This Policy
 
