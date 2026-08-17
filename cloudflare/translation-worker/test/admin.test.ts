@@ -6,8 +6,10 @@ import {
 } from "../src/access.ts";
 import {
   approvedSimilaritySearchQuery,
+  normalizeAIQueueCounts,
   sourceContainsGlossaryPhrase,
   validateGlossaryEntryBody,
+  validatePriorityBody,
   validateRestoreRevisionBody,
   validateReviewBody,
 } from "../src/admin.ts";
@@ -106,6 +108,50 @@ test("validates optimistic locking for revision restoration", () => {
     validateRestoreRevisionBody({ expectedUpdatedAt: "not-a-date" }),
     "expectedUpdatedAt must be an ISO-8601 timestamp or null.",
   );
+});
+
+test("accepts only high and low translation priorities", () => {
+  assert.deepEqual(validatePriorityBody({ priority: "high" }), {
+    priority: "high",
+  });
+  assert.deepEqual(validatePriorityBody({ priority: "low" }), {
+    priority: "low",
+  });
+  assert.equal(
+    validatePriorityBody({ priority: "urgent" }),
+    "priority must be high or low.",
+  );
+});
+
+test("normalizes global AI queue counts", () => {
+  assert.deepEqual(
+    normalizeAIQueueCounts({
+      high_priority_entries: 12,
+      low_priority_entries: 7,
+      high_pending_review_entries: 112,
+      low_pending_review_entries: 9,
+      pending_processing_entries: 15,
+      active_processing_entries: 4,
+    }),
+    {
+      highPriority: 12,
+      lowPriority: 7,
+      highPendingReview: 112,
+      lowPendingReview: 9,
+      pendingProcessing: 15,
+      processing: 4,
+      total: 19,
+    },
+  );
+  assert.deepEqual(normalizeAIQueueCounts(null), {
+    highPriority: 0,
+    lowPriority: 0,
+    highPendingReview: 0,
+    lowPendingReview: 0,
+    pendingProcessing: 0,
+    processing: 0,
+    total: 0,
+  });
 });
 
 test("builds a bounded FTS query for approved translation references", () => {

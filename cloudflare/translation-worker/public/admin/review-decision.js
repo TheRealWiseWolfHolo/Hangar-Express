@@ -33,18 +33,40 @@ export function applyReviewedEntryToQueue(entries, reviewedEntry, statusFilter) 
     if (entry.id !== reviewedEntry.id) {
       return [entry];
     }
-    if (statusFilter && reviewedEntry.status !== statusFilter) {
+    if (!entryMatchesStatus(reviewedEntry, statusFilter)) {
       return [];
     }
     return [reviewedEntry];
   });
 }
 
-export function reviewReloadURL(currentID, build) {
+export function entryMatchesStatus(entry, statusFilter) {
+  if (!statusFilter) {
+    return true;
+  }
+  if (statusFilter === "auto-approved") {
+    return entry.status === "approved" && entry.approval_method === "automatic";
+  }
+  return entry.status === statusFilter;
+}
+
+export function reviewReloadURL(currentID, build, filters = {}) {
   const params = new URLSearchParams({
     reviewed: String(currentID),
     ui: String(build),
   });
+  if (filters.priority) {
+    params.set("priority", filters.priority);
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  if (filters.kind) {
+    params.set("kind", filters.kind);
+  }
+  if (filters.query) {
+    params.set("q", filters.query);
+  }
   return `/admin/?${params.toString()}#review-workspace`;
 }
 
@@ -53,11 +75,13 @@ export function reconcileQueueEntry(
   refreshedEntry,
   statusFilter,
   kindFilter,
+  priorityFilter,
 ) {
   const currentIndex = entries.findIndex((entry) => entry.id === refreshedEntry.id);
   const matches =
-    (!statusFilter || refreshedEntry.status === statusFilter) &&
-    (!kindFilter || refreshedEntry.kind === kindFilter);
+    entryMatchesStatus(refreshedEntry, statusFilter) &&
+    (!kindFilter || refreshedEntry.kind === kindFilter) &&
+    (!priorityFilter || refreshedEntry.priority === priorityFilter);
 
   if (currentIndex < 0) {
     return { entries, nextID: entries[0]?.id ?? null, matches };

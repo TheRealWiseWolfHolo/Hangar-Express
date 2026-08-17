@@ -97,6 +97,17 @@ nonisolated struct RefreshProgress: Hashable, Sendable {
         return (Double(boundedStep - 1) + boundedStepFraction) / Double(stepCount)
     }
 
+    var isFinalStepComplete: Bool {
+        guard stepCount > 0,
+              stepNumber >= stepCount,
+              let totalUnitCount,
+              totalUnitCount > 0 else {
+            return false
+        }
+
+        return completedUnitCount >= totalUnitCount
+    }
+
     var stepLabel: String {
         AppLocalizer.format("Step %lld of %lld", stepNumber, stepCount)
     }

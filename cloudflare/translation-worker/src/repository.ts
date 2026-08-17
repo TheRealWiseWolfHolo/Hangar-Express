@@ -1,4 +1,5 @@
 import { normalizedSource, sha256 } from "./normalization.ts";
+import type { TranslationKind } from "./contracts.ts";
 import type { ValidatedItem } from "./validation.ts";
 
 export type StoredStatus =
@@ -36,6 +37,14 @@ export interface ApprovedGlossaryTerm {
 export interface RetryTranslationClaim {
   id: number;
   source: string;
+  kind: TranslationKind;
+}
+
+export interface PendingAutoApprovalClaim {
+  id: number;
+  source: string;
+  kind: TranslationKind;
+  checkedAt: string;
 }
 
 export interface TranslationQueueClaim {
@@ -275,7 +284,7 @@ export async function claimQueuedTranslationByID(
          AND retry_job_id IS NOT NULL
          AND status = 'failed'
          AND (retry_after IS NULL OR retry_after <= ?1)
-       RETURNING id, source`,
+       RETURNING id, source, kind`,
     )
     .bind(timestamp, id, locale)
     .first<RetryTranslationClaim>();
@@ -295,13 +304,13 @@ export async function claimNextRetryableTranslation(
   for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
     const failedCandidate = await db
       .prepare(
-        `SELECT id, source, status
+        `SELECT id, source, kind, status
          FROM translation_entries
          WHERE locale = ?1
            AND retry_job_id IS NOT NULL
            AND status = 'failed'
            AND (retry_after IS NULL OR retry_after <= ?2)
-         ORDER BY retry_after, id
+         ORDER BY priority, retry_after, id
          LIMIT 1`,
       )
       .bind(locale, timestamp)
@@ -310,13 +319,13 @@ export async function claimNextRetryableTranslation(
       failedCandidate ??
       await db
         .prepare(
-          `SELECT id, source, status
+          `SELECT id, source, kind, status
            FROM translation_entries
            WHERE locale = ?1
              AND retry_job_id IS NOT NULL
              AND status = 'generating'
              AND (updated_at IS NULL OR updated_at <= ?2)
-           ORDER BY updated_at, id
+           ORDER BY priority, updated_at, id
            LIMIT 1`,
         )
         .bind(locale, staleGenerationTimestamp)
@@ -362,7 +371,11 @@ export async function claimNextRetryableTranslation(
       .first<{ id: number }>();
 
     if (claimed?.id === candidate.id) {
-      return { id: candidate.id, source: candidate.source };
+      return {
+        id: candidate.id,
+        source: candidate.source,
+        kind: candidate.kind,
+      };
     }
   }
 
@@ -393,6 +406,55 @@ export async function reserveDailyBudget(
   return (result.meta?.changes ?? 0) > 0;
 }
 
+export async function claimNextPendingAutoApproval(
+  db: D1Database,
+  locale: string,
+  checkedAt = new Date(),
+): Promise<PendingAutoApprovalClaim | null> {
+  const timestamp = checkedAt.toISOString();
+  const claimed = await db
+    .prepare(
+      `UPDATE translation_entries
+       SET auto_approval_checked_at = ?1
+       WHERE id = (
+         SELECT id
+         FROM translation_entries
+         WHERE locale = ?2
+           AND status = 'pending'
+           AND kind = 'upgrade'
+           AND auto_approval_checked_at IS NULL
+         ORDER BY priority, id
+         LIMIT 1
+       )
+         AND status = 'pending'
+         AND auto_approval_checked_at IS NULL
+       RETURNING id, source, kind`,
+    )
+    .bind(timestamp, locale)
+    .first<RetryTranslationClaim>();
+
+  return claimed
+    ? { ...claimed, checkedAt: timestamp }
+    : null;
+}
+
+export async function releasePendingAutoApprovalClaim(
+  db: D1Database,
+  id: number,
+  checkedAt: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE translation_entries
+       SET auto_approval_checked_at = NULL
+       WHERE id = ?1
+         AND status = 'pending'
+         AND auto_approval_checked_at = ?2`,
+    )
+    .bind(id, checkedAt)
+    .run();
+}
+
 export async function completeTranslation(
   db: D1Database,
   id: number,
@@ -404,7 +466,8 @@ export async function completeTranslation(
     .prepare(
       `UPDATE translation_entries
        SET machine_translation = ?1, status = 'pending', model = ?2,
-           failure_reason = NULL, retry_after = NULL, updated_at = ?3
+           failure_reason = NULL, retry_after = NULL,
+           auto_approval_checked_at = ?3, updated_at = ?3
        WHERE id = ?4 AND status = 'generating'
        RETURNING id`,
     )
@@ -412,6 +475,71 @@ export async function completeTranslation(
     .first<{ id: number }>();
   if (updated?.id !== id) {
     throw new Error("The translation generation lease is no longer active.");
+  }
+}
+
+export async function completeAutoApprovedTranslation(
+  db: D1Database,
+  id: number,
+  translation: string,
+  completedAt = new Date(),
+  expectedStatus: "generating" | "pending" = "generating",
+): Promise<void> {
+  const timestamp = completedAt.toISOString();
+  const actor = "system-auto-approval";
+  const results = await db.batch<{ id: number }>([
+    db
+      .prepare(
+        `UPDATE translation_entries
+         SET machine_translation = ?1,
+             approved_translation = ?1,
+             status = 'approved',
+             model = 'approved-glossary',
+             approved_at = ?2,
+             approved_by = ?3,
+             approval_method = 'automatic',
+             failure_reason = NULL,
+             retry_after = NULL,
+             deferred_until = NULL,
+             auto_approval_checked_at = ?2,
+             updated_at = ?2
+         WHERE status = ?4 AND id = ?5
+         RETURNING id`,
+      )
+      .bind(translation, timestamp, actor, expectedStatus, id),
+    db
+      .prepare(
+        `INSERT INTO translation_revisions (
+           translation_entry_id, previous_status, new_status,
+           previous_translation, new_translation, actor, created_at
+         )
+         SELECT id, ?1, 'approved', NULL,
+                approved_translation, ?3, ?2
+         FROM translation_entries
+         WHERE id = ?4
+           AND status = 'approved'
+           AND approval_method = 'automatic'
+           AND updated_at = ?2`,
+      )
+      .bind(expectedStatus, timestamp, actor, id),
+    db
+      .prepare(
+        `UPDATE dictionary_state
+         SET is_dirty = 1, changed_at = ?1, changed_by = ?2
+         WHERE locale = (
+           SELECT locale
+           FROM translation_entries
+           WHERE id = ?3
+             AND status = 'approved'
+             AND approval_method = 'automatic'
+             AND updated_at = ?1
+         )`,
+      )
+      .bind(timestamp, actor, id),
+  ]);
+
+  if (results[0]?.results[0]?.id !== id) {
+    throw new Error("The translation auto-approval lease is no longer active.");
   }
 }
 

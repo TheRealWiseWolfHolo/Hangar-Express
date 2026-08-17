@@ -89,11 +89,25 @@ struct HangarTranslatedText: View {
     }
 
     var body: some View {
-        Text(displayText)
-            .id(translationService.cacheGeneration)
+        // Reading the generation keeps this view current without replacing its identity.
+        // The stable reveal view can then animate English into the translated result.
+        let _ = translationService.cacheGeneration
+
+        HangarTranslationRevealText(
+            text: displayText,
+            animatesChanges: itemTranslator.language != .original
+        )
+            .id(revealIdentity)
             .task(id: onDemandTaskID) {
                 await loadOnDemandTranslationIfNeeded()
             }
+    }
+
+    private var revealIdentity: String {
+        [
+            translationSources.joined(separator: "\u{1F}"),
+            itemTranslator.language.rawValue
+        ].joined(separator: "|")
     }
 
     private var onDemandTaskID: String {
@@ -130,6 +144,153 @@ struct HangarTranslatedText: View {
 
         onDemandTranslation = translatedText
         onDemandTranslationIdentity = currentIdentity
+    }
+}
+
+private struct HangarTranslationRevealText: View {
+    let text: String
+    let animatesChanges: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var displayedText: String
+    @State private var previousText: String?
+    @State private var revealProgress: CGFloat = 1
+    @State private var cleanupTask: Task<Void, Never>?
+
+    init(text: String, animatesChanges: Bool) {
+        self.text = text
+        self.animatesChanges = animatesChanges
+        _displayedText = State(initialValue: text)
+    }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if let previousText {
+                Text(previousText)
+                    .mask {
+                        HangarTranslationWipeMask(
+                            progress: revealProgress,
+                            revealsLeadingEdge: false
+                        )
+                    }
+                    .accessibilityHidden(true)
+            }
+
+            Text(displayedText)
+                .mask {
+                    HangarTranslationWipeMask(
+                        progress: previousText == nil ? 1 : revealProgress,
+                        revealsLeadingEdge: true
+                    )
+                }
+                .accessibilityHidden(true)
+
+            if previousText != nil {
+                Text(displayedText)
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.16, green: 0.65, blue: 1.00),
+                                Color(red: 0.48, green: 0.34, blue: 1.00),
+                                Color(red: 0.94, green: 0.34, blue: 0.76),
+                                Color(red: 1.00, green: 0.58, blue: 0.24)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .mask {
+                        HangarTranslationGlowMask(progress: revealProgress)
+                    }
+                    .shadow(color: Color.blue.opacity(0.42), radius: 3)
+                    .shadow(color: Color.purple.opacity(0.32), radius: 5)
+                    .accessibilityHidden(true)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(displayedText))
+        .onChange(of: text) { _, newText in
+            transition(to: newText)
+        }
+        .onChange(of: reduceMotion) { _, shouldReduceMotion in
+            guard shouldReduceMotion else { return }
+            finishTransition()
+        }
+        .onDisappear {
+            cleanupTask?.cancel()
+        }
+    }
+
+    private func transition(to newText: String) {
+        guard newText != displayedText else { return }
+
+        cleanupTask?.cancel()
+        guard animatesChanges, !reduceMotion else {
+            displayedText = newText
+            previousText = nil
+            revealProgress = 1
+            return
+        }
+
+        previousText = displayedText
+        displayedText = newText
+        revealProgress = 0
+
+        withAnimation(.easeInOut(duration: 0.72)) {
+            revealProgress = 1
+        }
+
+        cleanupTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(780))
+            guard !Task.isCancelled else { return }
+            finishTransition()
+        }
+    }
+
+    private func finishTransition() {
+        cleanupTask?.cancel()
+        cleanupTask = nil
+        previousText = nil
+        revealProgress = 1
+    }
+}
+
+private struct HangarTranslationWipeMask: View {
+    let progress: CGFloat
+    let revealsLeadingEdge: Bool
+
+    var body: some View {
+        GeometryReader { proxy in
+            let clampedProgress = min(max(progress, 0), 1)
+            let revealedWidth = proxy.size.width * clampedProgress
+
+            Rectangle()
+                .frame(
+                    width: revealsLeadingEdge
+                        ? revealedWidth
+                        : max(proxy.size.width - revealedWidth, 0)
+                )
+                .offset(x: revealsLeadingEdge ? 0 : revealedWidth)
+        }
+    }
+}
+
+private struct HangarTranslationGlowMask: View {
+    let progress: CGFloat
+
+    var body: some View {
+        GeometryReader { proxy in
+            let clampedProgress = min(max(progress, 0), 1)
+            let bandWidth = min(max(proxy.size.width * 0.16, 18), 42)
+
+            LinearGradient(
+                colors: [.clear, .white, .white, .clear],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: bandWidth)
+            .offset(x: proxy.size.width * clampedProgress - bandWidth * 0.55)
+        }
     }
 }
 

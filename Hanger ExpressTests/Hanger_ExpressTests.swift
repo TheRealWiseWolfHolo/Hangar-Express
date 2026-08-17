@@ -230,6 +230,89 @@ struct Hanger_ExpressTests {
         #expect(rebuiltCookie.isHTTPOnly)
     }
 
+    @Test func refreshedRSICookiesReplaceSavedValuesAndDiscardExpiredCookies() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let savedToken = SessionCookie(
+            name: "Rsi-Token",
+            value: "saved-token",
+            domain: ".robertsspaceindustries.com",
+            path: "/",
+            expiresAt: now.addingTimeInterval(3_600),
+            isSecure: true,
+            isHTTPOnly: true,
+            version: 0
+        )
+        let refreshedToken = SessionCookie(
+            name: "rsi-token",
+            value: "refreshed-token",
+            domain: "robertsspaceindustries.com",
+            path: "/",
+            expiresAt: now.addingTimeInterval(7_200),
+            isSecure: true,
+            isHTTPOnly: true,
+            version: 0
+        )
+        let expiredDevice = SessionCookie(
+            name: "_rsi_device",
+            value: "expired-device",
+            domain: ".robertsspaceindustries.com",
+            path: "/",
+            expiresAt: now.addingTimeInterval(-1),
+            isSecure: true,
+            isHTTPOnly: true,
+            version: 0
+        )
+
+        let mergedCookies = RSISessionCookieSet.merging(
+            savedCookies: [savedToken, expiredDevice],
+            refreshedCookies: [refreshedToken],
+            now: now
+        )
+
+        #expect(mergedCookies.count == 1)
+        #expect(mergedCookies.first?.value == "refreshed-token")
+    }
+
+    @Test func profileHandleResolverRejectsLoginIdentifiersAndUsesCitizenHandle() {
+        let resolvedHandle = RSIProfileHandleResolver.resolve(
+            from: ["liuchen2004@outlook.com", "  Wise-Wolf-Holo  ", "Fallback"]
+        )
+
+        #expect(resolvedHandle == "Wise-Wolf-Holo")
+        #expect(RSIProfileHandleResolver.normalizedHandle("RSI Account") == nil)
+        #expect(RSIProfileHandleResolver.normalizedHandle("not a handle") == nil)
+    }
+
+    @Test func unavailableProfileRefreshPreservesKnownOrganizationAndHandle() throws {
+        let knownOrganization = AccountOrganization(name: "Skewers Gentlemen's Club", rank: "President")
+        let previousSnapshot = PreviewHangarRepository.sampleSnapshot.updatingAccount(
+            accountHandle: "Wise-Wolf-Holo",
+            avatarURL: nil,
+            primaryOrganization: knownOrganization,
+            didRefreshPrimaryOrganization: true,
+            storeCreditUSD: 100,
+            totalSpendUSD: 200,
+            referralStats: .unavailable
+        )
+        let failedRefresh = PreviewHangarRepository.sampleSnapshot.updatingAccount(
+            accountHandle: "liuchen2004@outlook.com",
+            avatarURL: nil,
+            primaryOrganization: nil,
+            didRefreshPrimaryOrganization: false,
+            storeCreditUSD: 125,
+            totalSpendUSD: 225,
+            referralStats: .unavailable
+        )
+
+        let mergedSnapshot = failedRefresh.preservingUnavailableProfile(from: previousSnapshot)
+
+        #expect(mergedSnapshot.accountHandle == "Wise-Wolf-Holo")
+        #expect(mergedSnapshot.primaryOrganization == knownOrganization)
+        #expect(mergedSnapshot.didRefreshPrimaryOrganization)
+        #expect(mergedSnapshot.storeCreditUSD == 125)
+        #expect(mergedSnapshot.totalSpendUSD == 225)
+    }
+
     @Test func legacySessionsDecodeWithFullAccess() throws {
         let original = makeUserSession(
             handle: "legacy",
@@ -1141,6 +1224,29 @@ struct Hanger_ExpressTests {
 
         #expect(progress.stepLabel == "Step 2 of 4")
         #expect(progress.fractionCompleted == 0.4)
+        #expect(!progress.isFinalStepComplete)
+    }
+
+    @Test func refreshProgressOnlyCompletesOnTheFinalFinishedStep() async throws {
+        let completedProgress = RefreshProgress(
+            stage: .account,
+            stepNumber: 2,
+            stepCount: 2,
+            detail: "Account overview sync complete.",
+            completedUnitCount: 1,
+            totalUnitCount: 1
+        )
+        let earlierStep = RefreshProgress(
+            stage: .account,
+            stepNumber: 1,
+            stepCount: 2,
+            detail: "First account step complete.",
+            completedUnitCount: 1,
+            totalUnitCount: 1
+        )
+
+        #expect(completedProgress.isFinalStepComplete)
+        #expect(!earlierStep.isFinalStepComplete)
     }
 
     @Test func storeCreditParserTreatsStructuredValuesAsMinorUnits() async throws {
@@ -3313,6 +3419,46 @@ struct Hanger_ExpressTests {
         )
     }
 
+    @Test func translationMethodPromptPolicyCoversSelectionsAndUpgrades() {
+        #expect(
+            !HangarItemTranslationMethodPromptPolicy.shouldPrompt(
+                for: .original
+            )
+        )
+        #expect(
+            HangarItemTranslationMethodPromptPolicy.shouldPrompt(
+                for: .simplifiedChinese
+            )
+        )
+        #expect(
+            !HangarItemTranslationMethodPromptPolicy.shouldPrompt(
+                for: .simplifiedChinese,
+                rolloutEnabled: false
+            )
+        )
+        #expect(
+            HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade()
+        )
+        #expect(
+            !HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade(
+                rolloutEnabled: false
+            )
+        )
+    }
+
+    @Test func translationDictionaryBackgroundRefreshSkipsEnglish() {
+        #expect(
+            !HangarItemTranslationBackgroundRefreshPolicy.shouldRefresh(
+                for: .original
+            )
+        )
+        #expect(
+            HangarItemTranslationBackgroundRefreshPolicy.shouldRefresh(
+                for: .simplifiedChinese
+            )
+        )
+    }
+
     @Test func cloudTranslationCandidatesRejectPrivateContentShapes() {
         #expect(
             CloudHangarItemTranslationCandidate(
@@ -4924,6 +5070,79 @@ struct Hanger_ExpressTests {
         #expect(grouped.first?.sourcePackageSummary == "2 packages")
         #expect(grouped.last?.quantity == 1)
         #expect(grouped.last?.representative.insurance == "120 months")
+    }
+
+    @Test func profileBackgroundOptionsCacheReusesAndInvalidatesFleetState() async throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: directoryURL)
+        }
+
+        let firstShip = FleetShip(
+            id: 1,
+            displayName: "Polaris",
+            manufacturer: "RSI",
+            role: "Capital combat",
+            msrpUSD: 975,
+            insurance: "LTI",
+            sourcePackageID: 101,
+            sourcePackageName: "Polaris Pack",
+            meltValueUSD: 750,
+            canGift: true,
+            canReclaim: true
+        )
+        let duplicateShip = FleetShip(
+            id: 2,
+            displayName: "Polaris",
+            manufacturer: "RSI",
+            role: "Capital combat",
+            msrpUSD: 975,
+            insurance: "LTI",
+            sourcePackageID: 102,
+            sourcePackageName: "Fleet Pack",
+            meltValueUSD: 750,
+            canGift: false,
+            canReclaim: false,
+            imageURL: URL(string: "https://example.com/polaris.webp")
+        )
+        let cache = ProfileBackgroundOptionsCache(directoryURL: directoryURL)
+        let initialOptions = await cache.options(
+            for: [firstShip, duplicateShip],
+            accountKey: "test-account"
+        )
+
+        #expect(initialOptions.count == 1)
+        #expect(initialOptions.first?.quantity == 2)
+        #expect(initialOptions.first?.imageURL == duplicateShip.imageURL)
+
+        let reloadedCache = ProfileBackgroundOptionsCache(directoryURL: directoryURL)
+        let diskOptions = await reloadedCache.cachedOptions(for: "test-account")
+        #expect(diskOptions == initialOptions)
+
+        let changedFleet = [
+            firstShip,
+            FleetShip(
+                id: 3,
+                displayName: "Zeus Mk II CL",
+                manufacturer: "RSI",
+                role: "Cargo",
+                msrpUSD: 175,
+                insurance: "120 months",
+                sourcePackageID: 103,
+                sourcePackageName: "Zeus Pack",
+                meltValueUSD: 150,
+                canGift: true,
+                canReclaim: true
+            )
+        ]
+        let refreshedOptions = await reloadedCache.options(
+            for: changedFleet,
+            accountKey: "test-account"
+        )
+
+        #expect(refreshedOptions.count == 2)
+        #expect(refreshedOptions.map(\.displayName).contains("Zeus Mk II CL"))
     }
 
     @Test func fleetProjectorPrefersHostedShipImageForMatchedShips() async throws {

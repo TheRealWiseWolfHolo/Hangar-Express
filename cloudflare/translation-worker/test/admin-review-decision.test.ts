@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   applyReviewedEntryToQueue,
+  entryMatchesStatus,
   nextReviewEntryID,
   normalizeReviewTranslation,
   reconcileQueueEntry,
@@ -118,6 +119,18 @@ test("builds a cache-busted review workspace reload URL", () => {
   );
 });
 
+test("preserves the selected priority queue after review", () => {
+  assert.equal(
+    reviewReloadURL(1268, "2026.08.07.1", {
+      priority: "low",
+      status: "pending",
+      kind: "package",
+      query: "upgrade",
+    }),
+    "/admin/?reviewed=1268&ui=2026.08.07.1&priority=low&status=pending&kind=package&q=upgrade#review-workspace",
+  );
+});
+
 test("removes a stale edited detail from the pending queue and selects the next row", () => {
   const entries = [
     { id: 1266, status: "pending", kind: "package" },
@@ -154,6 +167,47 @@ test("updates a queue row when its refreshed detail still matches the filters", 
       nextID: 1266,
       matches: true,
     },
+  );
+});
+
+test("removes an entry moved out of the selected priority queue", () => {
+  const entries = [
+    { id: 30, status: "pending", kind: "item", priority: "high" },
+    { id: 20, status: "pending", kind: "item", priority: "high" },
+  ];
+  const moved = { ...entries[0], priority: "low" };
+
+  assert.deepEqual(
+    reconcileQueueEntry(entries, moved, "pending", "item", "high"),
+    {
+      entries: [entries[1]],
+      nextID: 20,
+      matches: false,
+    },
+  );
+});
+
+test("matches the synthetic auto-approved review category", () => {
+  assert.equal(
+    entryMatchesStatus(
+      { status: "approved", approval_method: "automatic" },
+      "auto-approved",
+    ),
+    true,
+  );
+  assert.equal(
+    entryMatchesStatus(
+      { status: "approved", approval_method: "human" },
+      "auto-approved",
+    ),
+    false,
+  );
+  assert.equal(
+    entryMatchesStatus(
+      { status: "pending", approval_method: null },
+      "pending",
+    ),
+    true,
   );
 });
 

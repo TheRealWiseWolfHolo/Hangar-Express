@@ -18,9 +18,12 @@ const allowedStatuses = new Set([
   "edited",
   "rejected",
   "failed",
+  "auto-approved",
 ]);
+const allowedPriorities = new Set(["high", "low"]);
 
 type ReviewAction = "approve" | "edit" | "reject" | "defer";
+type TranslationPriority = "high" | "low";
 const maximumGlossaryMatches = 10_000;
 const glossaryMatchBatchSize = 50;
 
@@ -33,6 +36,10 @@ interface ReviewBody {
 
 interface RestoreRevisionBody {
   expectedUpdatedAt: string | null;
+}
+
+interface PriorityBody {
+  priority: TranslationPriority;
 }
 
 interface GlossaryEntryBody {
@@ -64,6 +71,10 @@ interface AdminTranslationRow {
   approved_by: string | null;
   deferred_until: string | null;
   updated_at: string | null;
+  priority: TranslationPriority;
+  priority_updated_at: string | null;
+  priority_updated_by: string | null;
+  approval_method: "automatic" | "human" | null;
 }
 
 interface AdminRevisionRow {
@@ -79,14 +90,20 @@ interface AdminRevisionRow {
 
 type ReviewBatchRow = AdminTranslationRow | AdminRevisionRow;
 
-interface AIRetryJobRow {
-  id: number;
-  requested_by: string;
-  total_entries: number;
-  remaining_entries: number;
-  processing_entries: number;
-  completed_entries: number;
-  created_at: string;
+interface AIRetryStatusRow {
+  id: number | null;
+  requested_by: string | null;
+  total_entries: number | null;
+  remaining_entries: number | null;
+  processing_entries: number | null;
+  completed_entries: number | null;
+  created_at: string | null;
+  high_priority_entries: number | null;
+  low_priority_entries: number | null;
+  high_pending_review_entries: number | null;
+  low_pending_review_entries: number | null;
+  pending_processing_entries: number | null;
+  active_processing_entries: number | null;
 }
 
 interface DailyAIUsageRow {
@@ -127,6 +144,44 @@ function nextUTCUsageReset(now: Date): string {
   nextReset.setUTCDate(nextReset.getUTCDate() + 1);
   nextReset.setUTCHours(0, 0, 0, 0);
   return nextReset.toISOString();
+}
+
+function nonNegativeInteger(value: number | null | undefined): number {
+  return Number.isFinite(value)
+    ? Math.max(0, Math.trunc(value ?? 0))
+    : 0;
+}
+
+export function normalizeAIQueueCounts(
+  row: Pick<
+    AIRetryStatusRow,
+    | "high_priority_entries"
+    | "low_priority_entries"
+    | "high_pending_review_entries"
+    | "low_pending_review_entries"
+    | "pending_processing_entries"
+    | "active_processing_entries"
+  > | null,
+): {
+  highPriority: number;
+  lowPriority: number;
+  highPendingReview: number;
+  lowPendingReview: number;
+  pendingProcessing: number;
+  processing: number;
+  total: number;
+} {
+  const highPriority = nonNegativeInteger(row?.high_priority_entries);
+  const lowPriority = nonNegativeInteger(row?.low_priority_entries);
+  return {
+    highPriority,
+    lowPriority,
+    highPendingReview: nonNegativeInteger(row?.high_pending_review_entries),
+    lowPendingReview: nonNegativeInteger(row?.low_pending_review_entries),
+    pendingProcessing: nonNegativeInteger(row?.pending_processing_entries),
+    processing: nonNegativeInteger(row?.active_processing_entries),
+    total: highPriority + lowPriority,
+  };
 }
 
 export function approvedSimilaritySearchQuery(source: string): string | null {
@@ -175,6 +230,16 @@ export function sourceContainsGlossaryPhrase(
   return buildMachineTranslationPlan(source, [
     { source: phrase, translation: "__glossary_match__" },
   ]).some((segment) => segment.approvedTranslation !== undefined);
+}
+
+export function validatePriorityBody(value: unknown): PriorityBody | string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "Request body must be an object.";
+  }
+  const priority = (value as Record<string, unknown>).priority;
+  return priority === "high" || priority === "low"
+    ? { priority }
+    : "priority must be high or low.";
 }
 
 async function readDailyAIUsage(
@@ -381,36 +446,119 @@ async function adminSummary(env: AdminEnv): Promise<Response> {
 }
 
 async function aiRetryStatus(env: AdminEnv): Promise<Response> {
-  const job = await env.DB
+  const status = await env.DB
     .prepare(
-      `SELECT id, requested_by, total_entries, remaining_entries,
-              processing_entries, completed_entries, created_at
-       FROM ai_retry_jobs
-       WHERE locale = ?1
-       ORDER BY id DESC
-       LIMIT 1`,
+      `WITH queue_counts AS (
+         SELECT
+           (
+             SELECT COUNT(*)
+             FROM translation_entries
+               INDEXED BY translation_entries_retry_failed_ready
+             WHERE locale = ?1
+               AND priority = 'high'
+               AND retry_job_id IS NOT NULL
+               AND status = 'failed'
+           ) + (
+             SELECT COUNT(*)
+             FROM translation_entries
+               INDEXED BY translation_entries_retry_generating_stale
+             WHERE locale = ?1
+               AND priority = 'high'
+               AND retry_job_id IS NOT NULL
+               AND status = 'generating'
+           ) AS high_priority_entries,
+           (
+             SELECT COUNT(*)
+             FROM translation_entries
+               INDEXED BY translation_entries_retry_failed_ready
+             WHERE locale = ?1
+               AND priority = 'low'
+               AND retry_job_id IS NOT NULL
+               AND status = 'failed'
+           ) + (
+             SELECT COUNT(*)
+             FROM translation_entries
+               INDEXED BY translation_entries_retry_generating_stale
+             WHERE locale = ?1
+               AND priority = 'low'
+               AND retry_job_id IS NOT NULL
+               AND status = 'generating'
+           ) AS low_priority_entries,
+           COALESCE((
+             SELECT entry_count
+             FROM translation_priority_status_counts
+             WHERE locale = ?1
+               AND priority = 'high'
+               AND status = 'pending'
+           ), 0) AS high_pending_review_entries,
+           COALESCE((
+             SELECT entry_count
+             FROM translation_priority_status_counts
+             WHERE locale = ?1
+               AND priority = 'low'
+               AND status = 'pending'
+           ), 0) AS low_pending_review_entries,
+           (
+             SELECT COUNT(*)
+             FROM translation_entries
+               INDEXED BY translation_entries_retry_failed_ready
+             WHERE locale = ?1
+               AND retry_job_id IS NOT NULL
+               AND status = 'failed'
+           ) AS pending_processing_entries,
+           (
+             SELECT COUNT(*)
+             FROM translation_entries
+               INDEXED BY translation_entries_retry_generating_stale
+             WHERE locale = ?1
+               AND retry_job_id IS NOT NULL
+               AND status = 'generating'
+           ) AS active_processing_entries
+       ),
+       latest_job AS (
+         SELECT id, requested_by, total_entries, remaining_entries,
+                processing_entries, completed_entries, created_at
+         FROM ai_retry_jobs
+         WHERE locale = ?1
+         ORDER BY id DESC
+         LIMIT 1
+       )
+       SELECT latest_job.id, latest_job.requested_by,
+              latest_job.total_entries, latest_job.remaining_entries,
+              latest_job.processing_entries, latest_job.completed_entries,
+              latest_job.created_at, queue_counts.high_priority_entries,
+              queue_counts.low_priority_entries,
+              queue_counts.high_pending_review_entries,
+              queue_counts.low_pending_review_entries,
+              queue_counts.pending_processing_entries,
+              queue_counts.active_processing_entries
+       FROM queue_counts
+       LEFT JOIN latest_job ON 1 = 1`,
     )
     .bind(supportedTargetLocale)
-    .first<AIRetryJobRow>();
+    .first<AIRetryStatusRow>();
 
-  if (!job) {
-    return json({ job: null });
+  const queue = normalizeAIQueueCounts(status);
+
+  if (!status?.id) {
+    return json({ job: null, queue });
   }
 
-  const remaining = Math.max(0, job.remaining_entries);
-  const processing = Math.max(0, job.processing_entries);
+  const remaining = nonNegativeInteger(status.remaining_entries);
+  const processing = nonNegativeInteger(status.processing_entries);
 
   return json({
     job: {
-      id: job.id,
-      requestedBy: job.requested_by,
-      createdAt: job.created_at,
-      total: job.total_entries,
-      completed: Math.max(0, job.completed_entries),
+      id: status.id,
+      requestedBy: status.requested_by,
+      createdAt: status.created_at,
+      total: nonNegativeInteger(status.total_entries),
+      completed: nonNegativeInteger(status.completed_entries),
       remaining,
       processing,
       pending: Math.max(0, remaining - processing),
     },
+    queue,
   });
 }
 
@@ -575,11 +723,11 @@ async function saveGlossaryEntry(
         `INSERT INTO translation_entries (
            locale, normalized_source, source_hash, source, kind,
            approved_translation, status, first_seen_at, last_seen_at,
-           approved_at, approved_by, origin, updated_at
+           approved_at, approved_by, origin, updated_at, approval_method
          ) VALUES (
            ?1, ?2, ?3, ?4, 'keyword',
            ?5, 'edited', ?6, ?6,
-           ?6, ?7, 'human', ?6
+           ?6, ?7, 'human', ?6, 'human'
          )
          ON CONFLICT(locale, normalized_source) DO UPDATE SET
            source = excluded.source,
@@ -588,6 +736,7 @@ async function saveGlossaryEntry(
            approved_at = excluded.approved_at,
            approved_by = excluded.approved_by,
            origin = 'human',
+           approval_method = 'human',
            deferred_until = NULL,
            failure_reason = NULL,
            retry_after = NULL,
@@ -816,7 +965,10 @@ async function addGlossaryEntry(
 async function listTranslations(request: Request, env: AdminEnv): Promise<Response> {
   const url = new URL(request.url);
   const status = url.searchParams.get("status");
+  const databaseStatus = status === "auto-approved" ? "approved" : status;
+  const automaticApprovalOnly = status === "auto-approved";
   const kind = url.searchParams.get("kind")?.trim() || null;
+  const priority = url.searchParams.get("priority")?.trim() || null;
   const query = url.searchParams.get("q")?.trim() || null;
   const cursor = positiveInteger(url.searchParams.get("cursor"), Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
   const limit = positiveInteger(url.searchParams.get("limit"), 50, 100);
@@ -827,6 +979,9 @@ async function listTranslations(request: Request, env: AdminEnv): Promise<Respon
   if (kind && kind.length > 64) {
     return json({ error: "kind must contain at most 64 characters." }, 400);
   }
+  if (priority && !allowedPriorities.has(priority)) {
+    return json({ error: "Unsupported priority filter." }, 400);
+  }
   if (query && query.length > 100) {
     return json({ error: "q must contain at most 100 characters." }, 400);
   }
@@ -835,22 +990,35 @@ async function listTranslations(request: Request, env: AdminEnv): Promise<Respon
     .prepare(
       `SELECT id, locale, source, normalized_source, kind, machine_translation,
               approved_translation, status, origin, seen_count, first_seen_at,
-              last_seen_at, approved_at, approved_by, deferred_until, updated_at
+              last_seen_at, approved_at, approved_by, deferred_until, updated_at,
+              priority, priority_updated_at, priority_updated_by,
+              approval_method
        FROM translation_entries
        WHERE locale = ?1
          AND id < ?2
          AND (?3 IS NULL OR status = ?3)
-         AND (?4 IS NULL OR kind = ?4)
+         AND (?4 = 0 OR approval_method = 'automatic')
+         AND (?5 IS NULL OR kind = ?5)
+         AND (?6 IS NULL OR priority = ?6)
          AND (
-           ?5 IS NULL
-           OR source LIKE '%' || ?5 || '%' COLLATE NOCASE
-           OR machine_translation LIKE '%' || ?5 || '%'
-           OR approved_translation LIKE '%' || ?5 || '%'
+           ?7 IS NULL
+           OR source LIKE '%' || ?7 || '%' COLLATE NOCASE
+           OR machine_translation LIKE '%' || ?7 || '%'
+           OR approved_translation LIKE '%' || ?7 || '%'
          )
        ORDER BY id DESC
-       LIMIT ?6`,
+       LIMIT ?8`,
     )
-    .bind(supportedTargetLocale, cursor, status, kind, query, limit + 1)
+    .bind(
+      supportedTargetLocale,
+      cursor,
+      databaseStatus,
+      automaticApprovalOnly ? 1 : 0,
+      kind,
+      priority,
+      query,
+      limit + 1,
+    )
     .all<AdminTranslationRow>();
 
   const values = rows.results ?? [];
@@ -867,7 +1035,9 @@ async function translationDetail(id: number, env: AdminEnv): Promise<Response> {
     .prepare(
       `SELECT id, locale, source, normalized_source, kind, machine_translation,
               approved_translation, status, origin, seen_count, first_seen_at,
-              last_seen_at, approved_at, approved_by, deferred_until, updated_at
+              last_seen_at, approved_at, approved_by, deferred_until, updated_at,
+              priority, priority_updated_at, priority_updated_by,
+              approval_method
        FROM translation_entries
        WHERE id = ?1 AND locale = ?2`,
     )
@@ -955,6 +1125,69 @@ async function translationDetail(id: number, env: AdminEnv): Promise<Response> {
     revisions: revisions.results ?? [],
     similar,
   });
+}
+
+async function updateTranslationPriority(
+  request: Request,
+  id: number,
+  identity: AdminIdentity,
+  env: AdminEnv,
+): Promise<Response> {
+  const requestURL = new URL(request.url);
+  if (request.headers.get("origin") !== requestURL.origin) {
+    return json({ error: "A same-origin request is required." }, 403);
+  }
+  const contentType = request.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!contentType.startsWith("application/json")) {
+    return json({ error: "Content-Type must be application/json." }, 415);
+  }
+
+  let rawBody: unknown;
+  try {
+    rawBody = await request.json();
+  } catch {
+    return json({ error: "Request body must be valid JSON." }, 400);
+  }
+  const body = validatePriorityBody(rawBody);
+  if (typeof body === "string") {
+    return json({ error: body }, 400);
+  }
+
+  const timestamp = new Date().toISOString();
+  const translation = await env.DB
+    .prepare(
+      `UPDATE translation_entries
+       SET priority = ?1,
+           priority_updated_at = ?2,
+           priority_updated_by = ?3
+       WHERE id = ?4 AND locale = ?5
+       RETURNING id, locale, source, normalized_source, kind,
+                 machine_translation, approved_translation, status, origin,
+                 seen_count, first_seen_at, last_seen_at, approved_at,
+                 approved_by, deferred_until, updated_at, priority,
+                 priority_updated_at, priority_updated_by, approval_method`,
+    )
+    .bind(
+      body.priority,
+      timestamp,
+      identity.email,
+      id,
+      supportedTargetLocale,
+    )
+    .first<AdminTranslationRow>();
+
+  if (!translation) {
+    return json({ error: "Translation entry not found." }, 404);
+  }
+  console.log(
+    JSON.stringify({
+      message: "Translation priority changed.",
+      entryID: id,
+      priority: body.priority,
+      actor: identity.email,
+    }),
+  );
+  return json({ translation });
 }
 
 function validateReviewBody(value: unknown, now: Date): ReviewBody | string {
@@ -1121,6 +1354,7 @@ async function restoreRevision(
              approved_at = ?2,
              approved_by = ?3,
              origin = 'human',
+             approval_method = 'human',
              deferred_until = NULL,
              updated_at = ?2
          WHERE id = ?4
@@ -1132,7 +1366,8 @@ async function restoreRevision(
          RETURNING id, locale, source, normalized_source, kind,
                    machine_translation, approved_translation, status, origin,
                    seen_count, first_seen_at, last_seen_at, approved_at,
-                   approved_by, deferred_until, updated_at`,
+                   approved_by, deferred_until, updated_at, priority,
+                   priority_updated_at, priority_updated_by, approval_method`,
       )
       .bind(
         restoredTranslation,
@@ -1299,6 +1534,10 @@ async function reviewTranslation(
              approved_at = CASE WHEN ?1 IN ('approved', 'edited') THEN ?3 ELSE NULL END,
              approved_by = CASE WHEN ?1 IN ('approved', 'edited') THEN ?4 ELSE NULL END,
              origin = CASE WHEN ?1 = 'edited' THEN 'human' ELSE origin END,
+             approval_method = CASE
+               WHEN ?1 IN ('approved', 'edited') THEN 'human'
+               ELSE NULL
+             END,
              deferred_until = ?5,
              updated_at = ?3
          WHERE id = ?6
@@ -1310,7 +1549,8 @@ async function reviewTranslation(
          RETURNING id, locale, source, normalized_source, kind,
                    machine_translation, approved_translation, status, origin,
                    seen_count, first_seen_at, last_seen_at, approved_at,
-                   approved_by, deferred_until, updated_at`,
+                   approved_by, deferred_until, updated_at, priority,
+                   priority_updated_at, priority_updated_by, approval_method`,
       )
       .bind(
         newStatus,
@@ -1493,6 +1733,21 @@ export async function handleAdminRequest(
   }
 
   if (url.pathname.startsWith("/admin/api/")) {
+    const priorityMatch = url.pathname.match(
+      /^\/admin\/api\/translations\/(\d+)\/priority$/u,
+    );
+    if (priorityMatch) {
+      if (request.method !== "POST") {
+        return json({ error: "Method not allowed." }, 405);
+      }
+      return updateTranslationPriority(
+        request,
+        Number.parseInt(priorityMatch[1], 10),
+        identity,
+        env,
+      );
+    }
+
     const restoreMatch = url.pathname.match(
       /^\/admin\/api\/translations\/(\d+)\/revisions\/(\d+)\/restore$/u,
     );

@@ -274,7 +274,10 @@ struct BuybackView: View {
 
         do {
             let preparation = try await appModel.prepareBuybackCheckout(for: itemGroup.checkoutPledge)
-            let cookies = appModel.session?.cookies ?? preparation.updatedCookies
+            let cookies = RSISessionCookieSet.merging(
+                savedCookies: appModel.session?.cookies ?? [],
+                refreshedCookies: preparation.updatedCookies
+            )
             checkoutContext = RSICheckoutContext(
                 itemTitle: itemGroup.representative.title,
                 checkoutURL: preparation.checkoutURL,

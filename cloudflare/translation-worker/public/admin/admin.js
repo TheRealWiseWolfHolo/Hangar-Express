@@ -6,7 +6,7 @@ import {
   selectionAfterReviewedEntry,
 } from "./review-decision.js";
 
-const ADMIN_UI_BUILD = "2026.07.29.2";
+const ADMIN_UI_BUILD = "2026.08.07.4";
 
 const elements = {
   sessionEmail: document.querySelector("#session-email"),
@@ -29,6 +29,11 @@ const elements = {
   aiProgress: document.querySelector("#ai-progress"),
   aiProgressCount: document.querySelector("#ai-progress-count"),
   aiProgressDetail: document.querySelector("#ai-progress-detail"),
+  aiHighPriorityCount: document.querySelector("#ai-high-priority-count"),
+  aiLowPriorityCount: document.querySelector("#ai-low-priority-count"),
+  aiHighPendingReviewCount: document.querySelector("#ai-high-pending-review-count"),
+  aiLowPendingReviewCount: document.querySelector("#ai-low-pending-review-count"),
+  aiPendingProcessingCount: document.querySelector("#ai-pending-processing-count"),
   aiAllowanceProgress: document.querySelector("#ai-allowance-progress"),
   aiAllowanceCount: document.querySelector("#ai-allowance-count"),
   aiAllowanceDetail: document.querySelector("#ai-allowance-detail"),
@@ -45,6 +50,7 @@ const elements = {
   refresh: document.querySelector("#refresh-button"),
   filterForm: document.querySelector("#filter-form"),
   search: document.querySelector("#search-input"),
+  priority: document.querySelector("#priority-filter"),
   status: document.querySelector("#status-filter"),
   kind: document.querySelector("#kind-filter"),
   queueStatus: document.querySelector("#queue-status"),
@@ -52,6 +58,7 @@ const elements = {
   loadMore: document.querySelector("#load-more-button"),
   emptyDetail: document.querySelector("#empty-detail"),
   detailContent: document.querySelector("#detail-content"),
+  detailPriority: document.querySelector("#detail-priority"),
   detailStatus: document.querySelector("#detail-status"),
   detailKind: document.querySelector("#detail-kind"),
   detailOrigin: document.querySelector("#detail-origin"),
@@ -61,6 +68,7 @@ const elements = {
   detailApproved: document.querySelector("#detail-approved"),
   similar: document.querySelector("#similar-list"),
   copySource: document.querySelector("#copy-source-button"),
+  priorityAction: document.querySelector("#priority-button"),
   reviewSource: document.querySelector("#review-source"),
   translationInput: document.querySelector("#translation-input"),
   translationLength: document.querySelector("#translation-length"),
@@ -95,6 +103,7 @@ const state = {
   glossaryPreviewGeneration: 0,
   loading: false,
   saving: false,
+  prioritySaving: false,
   searchTimer: null,
   aiPollTimer: null,
   aiRetryRemaining: null,
@@ -395,11 +404,31 @@ function failedEntryCount() {
     : 0;
 }
 
+function renderAIQueueCounts(queue) {
+  const number = new Intl.NumberFormat();
+  elements.aiHighPriorityCount.textContent = number.format(
+    Math.max(0, queue?.highPriority ?? 0),
+  );
+  elements.aiLowPriorityCount.textContent = number.format(
+    Math.max(0, queue?.lowPriority ?? 0),
+  );
+  elements.aiHighPendingReviewCount.textContent = number.format(
+    Math.max(0, queue?.highPendingReview ?? 0),
+  );
+  elements.aiLowPendingReviewCount.textContent = number.format(
+    Math.max(0, queue?.lowPendingReview ?? 0),
+  );
+  elements.aiPendingProcessingCount.textContent = number.format(
+    Math.max(0, queue?.pendingProcessing ?? 0),
+  );
+}
+
 function renderAIRetryStatus(status) {
   const previousRemaining = state.aiRetryRemaining;
   state.aiRetryStatus = status;
   const job = status.job;
   const failedEntries = failedEntryCount();
+  renderAIQueueCounts(status.queue);
 
   if (!job || job.total === 0) {
     state.aiRetryRemaining = 0;
@@ -727,6 +756,9 @@ async function compareReleases(fromVersion, toVersion) {
 
 function listQuery(cursor = null) {
   const params = new URLSearchParams();
+  if (elements.priority.value) {
+    params.set("priority", elements.priority.value);
+  }
   if (elements.status.value) {
     params.set("status", elements.status.value);
   }
@@ -748,6 +780,18 @@ function translationDisplay(entry) {
   return entry.approved_translation ?? entry.machine_translation ?? "No translation";
 }
 
+function reviewCategory(entry) {
+  return entry.status === "approved" && entry.approval_method === "automatic"
+    ? "auto-approved"
+    : entry.status;
+}
+
+function reviewCategoryLabel(entry) {
+  return reviewCategory(entry) === "auto-approved"
+    ? "Auto-approved"
+    : entry.status;
+}
+
 function makeTranslationRow(entry) {
   const button = document.createElement("button");
   button.type = "button";
@@ -764,8 +808,8 @@ function makeTranslationRow(entry) {
   source.textContent = entry.source;
   const status = document.createElement("span");
   status.className = "status-pill";
-  status.dataset.status = entry.status;
-  status.textContent = entry.status;
+  status.dataset.status = reviewCategory(entry);
+  status.textContent = reviewCategoryLabel(entry);
   top.append(source, status);
 
   const translation = document.createElement("p");
@@ -779,7 +823,9 @@ function makeTranslationRow(entry) {
   kind.textContent = entry.kind;
   const seen = document.createElement("span");
   seen.textContent = `seen ${entry.seen_count}×`;
-  meta.append(kind, seen);
+  const priority = document.createElement("span");
+  priority.textContent = `${entry.priority} priority`;
+  meta.append(kind, priority, seen);
 
   button.append(top, translation, meta);
   button.addEventListener("click", () => {
@@ -985,6 +1031,11 @@ function setBadge(element, value, status = null) {
   }
 }
 
+function setPriorityBadge(priority) {
+  elements.detailPriority.textContent = `${priority} priority`;
+  elements.detailPriority.dataset.priority = priority;
+}
+
 function renderEmptyDetail() {
   elements.emptyDetail.hidden = false;
   elements.detailContent.hidden = true;
@@ -1002,6 +1053,14 @@ function updateReviewAction() {
     action === "edit" ? "Save edited translation" : "Approve translation";
 }
 
+function updatePriorityAction() {
+  const priority = state.detail?.translation.priority;
+  elements.priorityAction.disabled =
+    state.saving || state.prioritySaving || !priority;
+  elements.priorityAction.textContent =
+    priority === "low" ? "Move to high priority" : "Move to low priority";
+}
+
 function renderDetail() {
   if (!state.detail) {
     renderEmptyDetail();
@@ -1011,7 +1070,12 @@ function renderDetail() {
   elements.emptyDetail.hidden = true;
   elements.detailContent.hidden = false;
 
-  setBadge(elements.detailStatus, translation.status, translation.status);
+  setPriorityBadge(translation.priority);
+  setBadge(
+    elements.detailStatus,
+    reviewCategoryLabel(translation),
+    reviewCategory(translation),
+  );
   setBadge(elements.detailKind, translation.kind);
   setBadge(elements.detailOrigin, translation.origin);
   setText(elements.detailSource, translation.source);
@@ -1024,6 +1088,7 @@ function renderDetail() {
   elements.translationInput.value = editable;
   elements.translationLength.textContent = String(editable.length);
   updateReviewAction();
+  updatePriorityAction();
 
   elements.metadata.replaceChildren(
     ...[
@@ -1031,6 +1096,13 @@ function renderDetail() {
       ...metadataItem("First seen", formatDate(translation.first_seen_at)),
       ...metadataItem("Last seen", formatDate(translation.last_seen_at)),
       ...metadataItem("Seen count", String(translation.seen_count)),
+      ...metadataItem("Priority", translation.priority),
+      ...metadataItem("Priority changed by", translation.priority_updated_by ?? "—"),
+      ...metadataItem("Priority changed at", formatDate(translation.priority_updated_at)),
+      ...metadataItem(
+        "Approval method",
+        translation.approval_method === "automatic" ? "Automatic" : "Human review",
+      ),
       ...metadataItem("Approved by", translation.approved_by ?? "—"),
       ...metadataItem("Approved at", formatDate(translation.approved_at)),
       ...metadataItem("Deferred until", formatDate(translation.deferred_until)),
@@ -1055,6 +1127,7 @@ async function selectTranslation(id) {
       detail.translation,
       elements.status.value,
       elements.kind.value,
+      elements.priority.value,
     );
     state.translations = reconciled.entries;
 
@@ -1085,12 +1158,70 @@ function setSaving(saving) {
   updateReviewAction();
   elements.reject.disabled = saving;
   elements.defer.disabled = saving;
+  updatePriorityAction();
   elements.saveState.textContent = saving ? "Saving decision…" : "";
 }
 
 function loadNextReview(currentID) {
   elements.saveState.textContent = "Saved. Loading next entry…";
-  window.location.replace(reviewReloadURL(currentID, ADMIN_UI_BUILD));
+  window.location.replace(
+    reviewReloadURL(currentID, ADMIN_UI_BUILD, {
+      priority: elements.priority.value,
+      status: elements.status.value,
+      kind: elements.kind.value,
+      query: elements.search.value.trim(),
+    }),
+  );
+}
+
+async function moveTranslationPriority() {
+  if (!state.detail || state.saving || state.prioritySaving) {
+    return;
+  }
+  const currentID = state.detail.translation.id;
+  const priority = state.detail.translation.priority === "low" ? "high" : "low";
+  state.prioritySaving = true;
+  clearError();
+  updatePriorityAction();
+  elements.saveState.textContent = "Moving entry…";
+  try {
+    const result = await api(
+      `/admin/api/translations/${currentID}/priority`,
+      {
+        method: "POST",
+        body: JSON.stringify({ priority }),
+      },
+    );
+    const reconciled = reconcileQueueEntry(
+      state.translations,
+      result.translation,
+      elements.status.value,
+      elements.kind.value,
+      elements.priority.value,
+    );
+    state.translations = reconciled.entries;
+    if (!reconciled.matches) {
+      state.detail = null;
+      state.selectedID = reconciled.nextID;
+      renderList();
+      renderDetail();
+      if (reconciled.nextID !== null) {
+        await selectTranslation(reconciled.nextID);
+      }
+    } else {
+      state.detail = { ...state.detail, translation: result.translation };
+      state.selectedID = result.translation.id;
+      renderList();
+      renderDetail();
+    }
+    showToast(`Moved to ${priority} priority.`);
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    state.prioritySaving = false;
+    elements.saveState.textContent = "";
+    updatePriorityAction();
+  }
 }
 
 async function review(action, extra = {}) {
@@ -1279,6 +1410,10 @@ elements.status.addEventListener("change", () => {
   void loadList();
 });
 
+elements.priority.addEventListener("change", () => {
+  void loadList();
+});
+
 elements.kind.addEventListener("change", () => {
   void loadList();
 });
@@ -1342,6 +1477,10 @@ elements.copySource.addEventListener("click", async () => {
   showToast("Source copied.");
 });
 
+elements.priorityAction.addEventListener("click", () => {
+  void moveTranslationPriority();
+});
+
 elements.approve.addEventListener("click", () => {
   if (!state.detail) {
     return;
@@ -1370,6 +1509,24 @@ elements.defer.addEventListener("click", () => {
 });
 
 async function initialize() {
+  const initialFilters = new URLSearchParams(window.location.search);
+  const initialPriority = initialFilters.get("priority");
+  const initialStatus = initialFilters.get("status");
+  const initialKind = initialFilters.get("kind");
+  if ([...elements.priority.options].some((option) => option.value === initialPriority)) {
+    elements.priority.value = initialPriority;
+  }
+  if ([...elements.status.options].some((option) => option.value === initialStatus)) {
+    elements.status.value = initialStatus;
+  }
+  if (initialKind) {
+    const option = document.createElement("option");
+    option.value = initialKind;
+    option.textContent = initialKind;
+    elements.kind.append(option);
+    elements.kind.value = initialKind;
+  }
+  elements.search.value = initialFilters.get("q") ?? "";
   try {
     const [session] = await Promise.all([
       api("/admin/api/session"),

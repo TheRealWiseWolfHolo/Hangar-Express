@@ -7,6 +7,7 @@ struct AccountView: View {
 
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage(DisplayPreferences.earlyAccessBadgeKey) private var showsEarlyAccessBadge = DisplayPreferences.earlyAccessBadgeEnabledByDefault
+    @AppStorage("wbccuDeals.betaDisclaimerAcknowledged") private var hasAcknowledgedWBCCUDisclaimer = false
     @State private var isShowingSettings = false
     @State private var isShowingBackgroundPicker = false
     @State private var isShowingAccountTotalValueExplanation = false
@@ -15,10 +16,12 @@ struct AccountView: View {
     @State private var isOverviewEmailVisible = false
     @State private var isOverviewSavedLoginVisible = false
     @State private var presentedTool: FleetTool?
+    @State private var isShowingWBCCUDisclaimer = false
     @State private var isToolReordering = false
     @State private var isLoadingReferralInviteCode = false
     @State private var copiedReferralInviteCode = false
     @State private var referralInviteCopyErrorMessage: String?
+    @State private var profileBackgroundOptions: [ProfileBackgroundShipOption] = []
 
     var body: some View {
         NavigationStack {
@@ -217,14 +220,28 @@ struct AccountView: View {
             } message: {
                 Text(referralInviteCopyErrorMessage ?? "")
             }
-            .task(id: backgroundSelectionLoadID) {
-                loadSavedProfileBackgroundSelection()
+            .alert("WBCCU Deals Beta", isPresented: $isShowingWBCCUDisclaimer) {
+                Button("Cancel", role: .cancel) {}
+                Button("Continue") {
+                    hasAcknowledgedWBCCUDisclaimer = true
+                    presentedTool = .wbccuDeals
+                }
+            } message: {
+                Text("WBCCU Deals is an experimental feature. It depends on live data and automated interactions with the RSI website, which may change or fail without notice. Verify every item, price, and cart before checkout. Use this feature at your own risk.")
+            }
+            .task(id: profileBackgroundOptionsLoadID) {
+                await loadProfileBackgroundOptions()
             }
         }
     }
 
     private func handleToolSelection(_ tool: FleetTool) {
         guard tool.isAvailable else {
+            return
+        }
+
+        if tool == .wbccuDeals, !hasAcknowledgedWBCCUDisclaimer {
+            isShowingWBCCUDisclaimer = true
             return
         }
 
@@ -341,6 +358,7 @@ struct AccountView: View {
 
     private var profileDisplayName: String {
         let candidates = [
+            RSIProfileHandleResolver.normalizedHandle(snapshot.accountHandle),
             appModel.session?.displayName,
             appModel.session?.credentials?.loginIdentifier,
             appModel.session?.email
@@ -418,67 +436,6 @@ struct AccountView: View {
         snapshot.avatarURL ?? appModel.session?.avatarURL
     }
 
-    private var profileBackgroundOptions: [ProfileBackgroundShipOption] {
-        var orderedKeys: [String] = []
-        var groupedShips: [String: [FleetShip]] = [:]
-
-        for ship in snapshot.fleet {
-            let selectionKey = ProfileBackgroundShipOption.selectionKey(for: ship)
-            if groupedShips[selectionKey] == nil {
-                orderedKeys.append(selectionKey)
-            }
-
-            groupedShips[selectionKey, default: []].append(ship)
-        }
-
-        let options = orderedKeys.compactMap { selectionKey -> ProfileBackgroundShipOption? in
-            guard let ships = groupedShips[selectionKey], !ships.isEmpty else {
-                return nil
-            }
-
-            let representative = ships.max { lhs, rhs in
-                profileBackgroundRepresentativePriority(lhs) < profileBackgroundRepresentativePriority(rhs)
-            } ?? ships[0]
-
-            let msrpUSD = ships.compactMap(\.msrpUSD).max { lhs, rhs in
-                NSDecimalNumber(decimal: lhs).compare(NSDecimalNumber(decimal: rhs)) == .orderedAscending
-            }
-            let msrpLabel = msrpUSD == nil ? representative.msrpLabel : nil
-
-            return ProfileBackgroundShipOption(
-                selectionKey: selectionKey,
-                displayName: representative.displayName,
-                manufacturer: representative.manufacturer,
-                quantity: ships.count,
-                msrpUSD: msrpUSD,
-                msrpLabel: msrpLabel,
-                imageURL: representative.imageURL
-            )
-        }
-
-        return options.sorted { lhs, rhs in
-            switch (lhs.msrpUSD, rhs.msrpUSD) {
-            case let (lhsMSRP?, rhsMSRP?):
-                let comparison = NSDecimalNumber(decimal: lhsMSRP).compare(NSDecimalNumber(decimal: rhsMSRP))
-                if comparison != .orderedSame {
-                    return comparison == .orderedDescending
-                }
-            case (_?, nil):
-                return true
-            case (nil, _?):
-                return false
-            case (nil, nil):
-                break
-            }
-
-            if lhs.manufacturer != rhs.manufacturer {
-                return lhs.manufacturer.localizedCaseInsensitiveCompare(rhs.manufacturer) == .orderedAscending
-            }
-
-            return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
-        }
-    }
-
     private var resolvedSelectedBackgroundSelectionKey: String? {
         guard let selectedBackgroundSelectionKey,
               profileBackgroundOptions.contains(where: { $0.selectionKey == selectedBackgroundSelectionKey }) else {
@@ -517,15 +474,27 @@ struct AccountView: View {
         return ProfileBackgroundSelectionPersistence.storageKey(for: accountKey)
     }
 
-    private var backgroundSelectionLoadID: String {
-        let optionSignature = profileBackgroundOptions
-            .map(\.selectionKey)
-            .joined(separator: "|")
-
-        return "\(backgroundSelectionStorageKey)::\(optionSignature)"
+    private var profileBackgroundOptionsLoadID: String {
+        "\(backgroundSelectionStorageKey)::\(snapshot.lastSyncedAt.timeIntervalSinceReferenceDate)"
     }
 
-    private func loadSavedProfileBackgroundSelection() {
+    private func loadProfileBackgroundOptions() async {
+        let accountKey = appModel.session?.accountKey ?? snapshot.accountHandle
+        let resolvedOptions = await ProfileBackgroundOptionsCache.shared.options(
+            for: snapshot.fleet,
+            accountKey: accountKey
+        )
+        guard !Task.isCancelled else {
+            return
+        }
+
+        profileBackgroundOptions = resolvedOptions
+        loadSavedProfileBackgroundSelection(from: resolvedOptions)
+    }
+
+    private func loadSavedProfileBackgroundSelection(
+        from options: [ProfileBackgroundShipOption]
+    ) {
         let savedSelectionKey = ProfileBackgroundSelectionPersistence.loadSelectionKey(storageKey: backgroundSelectionStorageKey)
 
         guard let savedSelectionKey else {
@@ -533,7 +502,7 @@ struct AccountView: View {
             return
         }
 
-        if profileBackgroundOptions.contains(where: { $0.selectionKey == savedSelectionKey }) {
+        if options.contains(where: { $0.selectionKey == savedSelectionKey }) {
             selectedBackgroundSelectionKey = savedSelectionKey
             return
         }
@@ -547,28 +516,6 @@ struct AccountView: View {
         ProfileBackgroundSelectionPersistence.saveSelectionKey(selectionKey, storageKey: backgroundSelectionStorageKey)
     }
 
-    private func profileBackgroundRepresentativePriority(_ ship: FleetShip) -> Int {
-        var score = 0
-
-        if ship.imageURL != nil {
-            score += 8
-        }
-
-        if let msrpUSD = ship.msrpUSD,
-           NSDecimalNumber(decimal: msrpUSD).compare(NSDecimalNumber.zero) == .orderedDescending {
-            score += 4
-        }
-
-        if !ship.roleCategories.isEmpty {
-            score += 2
-        }
-
-        if ship.manufacturer.localizedCaseInsensitiveCompare("Unknown") != .orderedSame {
-            score += 1
-        }
-
-        return score
-    }
 }
 
 private struct CharacterRepairView: View {
@@ -1459,7 +1406,7 @@ private struct ProfileAvatarView: View {
     }
 }
 
-private struct ProfileBackgroundShipOption: Identifiable, Hashable {
+nonisolated struct ProfileBackgroundShipOption: Identifiable, Hashable, Codable, Sendable {
     let selectionKey: String
     let displayName: String
     let manufacturer: String
@@ -1472,7 +1419,7 @@ private struct ProfileBackgroundShipOption: Identifiable, Hashable {
         selectionKey
     }
 
-    var subtitle: String {
+    @MainActor var subtitle: String {
         if quantity > 1 {
             return AppLocalizer.format("%@ • Owned %lld", manufacturer, quantity)
         }
@@ -1480,7 +1427,7 @@ private struct ProfileBackgroundShipOption: Identifiable, Hashable {
         return manufacturer
     }
 
-    var pricingSummary: String {
+    @MainActor var pricingSummary: String {
         if let msrpUSD {
             return AppLocalizer.format("MSRP %@", msrpUSD.usdString)
         }
@@ -1499,6 +1446,235 @@ private struct ProfileBackgroundShipOption: Identifiable, Hashable {
             ship.displayName.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
         ]
         .joined(separator: "|")
+    }
+}
+
+actor ProfileBackgroundOptionsCache {
+    static let shared = ProfileBackgroundOptionsCache()
+
+    private struct CachePayload: Codable, Sendable {
+        let version: Int
+        let inventorySignature: String
+        let options: [ProfileBackgroundShipOption]
+    }
+
+    private let fileManager: FileManager
+    private let directoryURL: URL
+    private var memoryCache: [String: CachePayload] = [:]
+
+    private static let cacheVersion = 1
+
+    init(
+        fileManager: FileManager = .default,
+        directoryURL: URL? = nil
+    ) {
+        self.fileManager = fileManager
+        self.directoryURL = directoryURL ?? Self.defaultDirectoryURL(
+            fileManager: fileManager
+        )
+    }
+
+    func cachedOptions(for accountKey: String) -> [ProfileBackgroundShipOption]? {
+        if let payload = memoryCache[accountKey],
+           payload.version == Self.cacheVersion {
+            return payload.options
+        }
+
+        guard let data = try? Data(contentsOf: fileURL(for: accountKey)),
+              let payload = try? JSONDecoder().decode(CachePayload.self, from: data),
+              payload.version == Self.cacheVersion else {
+            return nil
+        }
+
+        memoryCache[accountKey] = payload
+        return payload.options
+    }
+
+    func options(
+        for fleet: [FleetShip],
+        accountKey: String
+    ) -> [ProfileBackgroundShipOption] {
+        let inventorySignature = Self.inventorySignature(for: fleet)
+        let cachedPayload = memoryCache[accountKey] ?? loadPayload(for: accountKey)
+        if let cachedPayload,
+           cachedPayload.version == Self.cacheVersion,
+           cachedPayload.inventorySignature == inventorySignature {
+            memoryCache[accountKey] = cachedPayload
+            return cachedPayload.options
+        }
+
+        let options = Self.makeOptions(from: fleet)
+        let payload = CachePayload(
+            version: Self.cacheVersion,
+            inventorySignature: inventorySignature,
+            options: options
+        )
+        memoryCache[accountKey] = payload
+        save(payload, for: accountKey)
+        return options
+    }
+
+    func clear() {
+        memoryCache.removeAll()
+        try? fileManager.removeItem(at: directoryURL)
+    }
+
+    private func loadPayload(for accountKey: String) -> CachePayload? {
+        guard let data = try? Data(contentsOf: fileURL(for: accountKey)),
+              let payload = try? JSONDecoder().decode(CachePayload.self, from: data),
+              payload.version == Self.cacheVersion else {
+            return nil
+        }
+        return payload
+    }
+
+    private func save(_ payload: CachePayload, for accountKey: String) {
+        do {
+            try fileManager.createDirectory(
+                at: directoryURL,
+                withIntermediateDirectories: true
+            )
+            let data = try JSONEncoder().encode(payload)
+            try data.write(to: fileURL(for: accountKey), options: [.atomic])
+        } catch {
+#if DEBUG
+            print("ProfileBackgroundOptionsCache failed to save: \(error)")
+#endif
+        }
+    }
+
+    private func fileURL(for accountKey: String) -> URL {
+        directoryURL.appendingPathComponent(
+            "\(Self.stableHash(of: accountKey)).json",
+            isDirectory: false
+        )
+    }
+
+    private static func defaultDirectoryURL(fileManager: FileManager) -> URL {
+        let appSupportURL = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? fileManager.temporaryDirectory
+
+        return appSupportURL
+            .appendingPathComponent("HangerExpress", isDirectory: true)
+            .appendingPathComponent("ProfileBackgroundOptions", isDirectory: true)
+    }
+
+    private static func inventorySignature(for fleet: [FleetShip]) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+
+        func combine(_ value: String) {
+            for byte in value.utf8 {
+                hash ^= UInt64(byte)
+                hash = hash &* 1_099_511_628_211
+            }
+            hash ^= 0xff
+            hash = hash &* 1_099_511_628_211
+        }
+
+        for ship in fleet {
+            combine(String(ship.id))
+            combine(ship.displayName)
+            combine(ship.manufacturer)
+            combine(ship.msrpUSD.map { NSDecimalNumber(decimal: $0).stringValue } ?? "")
+            combine(ship.msrpLabel ?? "")
+            combine(ship.imageURL?.absoluteString ?? "")
+            combine(String(ship.roleCategories.isEmpty))
+        }
+
+        return "\(fleet.count)-\(String(hash, radix: 16))"
+    }
+
+    private static func stableHash(of value: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in value.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
+    }
+
+    private static func makeOptions(
+        from fleet: [FleetShip]
+    ) -> [ProfileBackgroundShipOption] {
+        var orderedKeys: [String] = []
+        var groupedShips: [String: [FleetShip]] = [:]
+
+        for ship in fleet {
+            let selectionKey = ProfileBackgroundShipOption.selectionKey(for: ship)
+            if groupedShips[selectionKey] == nil {
+                orderedKeys.append(selectionKey)
+            }
+            groupedShips[selectionKey, default: []].append(ship)
+        }
+
+        let options = orderedKeys.compactMap { selectionKey -> ProfileBackgroundShipOption? in
+            guard let ships = groupedShips[selectionKey], !ships.isEmpty else {
+                return nil
+            }
+
+            let representative = ships.max { lhs, rhs in
+                representativePriority(lhs) < representativePriority(rhs)
+            } ?? ships[0]
+            let msrpUSD = ships.compactMap(\.msrpUSD).max { lhs, rhs in
+                NSDecimalNumber(decimal: lhs).compare(NSDecimalNumber(decimal: rhs))
+                    == .orderedAscending
+            }
+
+            return ProfileBackgroundShipOption(
+                selectionKey: selectionKey,
+                displayName: representative.displayName,
+                manufacturer: representative.manufacturer,
+                quantity: ships.count,
+                msrpUSD: msrpUSD,
+                msrpLabel: msrpUSD == nil ? representative.msrpLabel : nil,
+                imageURL: representative.imageURL
+            )
+        }
+
+        return options.sorted { lhs, rhs in
+            switch (lhs.msrpUSD, rhs.msrpUSD) {
+            case let (lhsMSRP?, rhsMSRP?):
+                let comparison = NSDecimalNumber(decimal: lhsMSRP).compare(
+                    NSDecimalNumber(decimal: rhsMSRP)
+                )
+                if comparison != .orderedSame {
+                    return comparison == .orderedDescending
+                }
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                break
+            }
+
+            if lhs.manufacturer != rhs.manufacturer {
+                return lhs.manufacturer.localizedCaseInsensitiveCompare(rhs.manufacturer)
+                    == .orderedAscending
+            }
+            return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName)
+                == .orderedAscending
+        }
+    }
+
+    private static func representativePriority(_ ship: FleetShip) -> Int {
+        var score = 0
+        if ship.imageURL != nil {
+            score += 8
+        }
+        if let msrpUSD = ship.msrpUSD,
+           NSDecimalNumber(decimal: msrpUSD).compare(NSDecimalNumber.zero) == .orderedDescending {
+            score += 4
+        }
+        if !ship.roleCategories.isEmpty {
+            score += 2
+        }
+        if ship.manufacturer.localizedCaseInsensitiveCompare("Unknown") != .orderedSame {
+            score += 1
+        }
+        return score
     }
 }
 
