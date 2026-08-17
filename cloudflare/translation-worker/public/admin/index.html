@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
     <title>Translation Review · Hanger Express</title>
-    <link rel="stylesheet" href="/admin/admin.css?v=20260729.3">
-    <script type="module" src="/admin/admin.js?v=20260729.2"></script>
+    <link rel="stylesheet" href="/admin/admin.css?v=20260807.4">
+    <script type="module" src="/admin/admin.js?v=20260807.4"></script>
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -69,6 +69,31 @@
         <p id="ai-progress-detail" class="ai-progress-detail">
           Loading AI processing status…
         </p>
+        <div class="ai-queue-metrics" aria-label="AI queue counts">
+          <div class="ai-queue-metric" data-priority="high">
+            <span>High priority queue</span>
+            <strong id="ai-high-priority-count">—</strong>
+            <small>AI queued or processing</small>
+            <div class="ai-queue-review-count">
+              <span>Pending review</span>
+              <strong id="ai-high-pending-review-count">—</strong>
+            </div>
+          </div>
+          <div class="ai-queue-metric" data-priority="low">
+            <span>Low priority queue</span>
+            <strong id="ai-low-priority-count">—</strong>
+            <small>AI queued or processing</small>
+            <div class="ai-queue-review-count">
+              <span>Pending review</span>
+              <strong id="ai-low-pending-review-count">—</strong>
+            </div>
+          </div>
+          <div class="ai-queue-metric">
+            <span>Pending processing</span>
+            <strong id="ai-pending-processing-count">—</strong>
+            <small>Waiting for Workers AI</small>
+          </div>
+        </div>
         <div class="ai-allowance">
           <div class="ai-allowance-copy">
             <span class="field-label">Today’s application allowance</span>
@@ -212,11 +237,20 @@
             </label>
             <div class="filter-row">
               <label>
+                <span class="sr-only">Priority queue</span>
+                <select id="priority-filter">
+                  <option value="high">High priority</option>
+                  <option value="low">Low priority</option>
+                  <option value="">All priorities</option>
+                </select>
+              </label>
+              <label>
                 <span class="sr-only">Status</span>
                 <select id="status-filter">
                   <option value="pending">Pending</option>
                   <option value="failed">Failed</option>
                   <option value="approved">Approved</option>
+                  <option value="auto-approved">Auto-approved</option>
                   <option value="edited">Edited</option>
                   <option value="rejected">Rejected</option>
                   <option value="">All statuses</option>
@@ -249,6 +283,7 @@
             <div class="detail-heading">
               <div>
                 <div class="detail-badges">
+                  <span id="detail-priority" class="priority-badge"></span>
                   <span id="detail-status" class="status-badge"></span>
                   <span id="detail-kind" class="kind-badge"></span>
                   <span id="detail-origin" class="origin-badge"></span>
@@ -256,9 +291,14 @@
                 <h2 id="detail-source"></h2>
                 <p id="detail-normalized" class="normalized-source"></p>
               </div>
-              <button id="copy-source-button" class="secondary-button compact" type="button">
-                Copy source
-              </button>
+              <div class="detail-heading-actions">
+                <button id="priority-button" class="quiet-button compact" type="button">
+                  Move to low priority
+                </button>
+                <button id="copy-source-button" class="secondary-button compact" type="button">
+                  Copy source
+                </button>
+              </div>
             </div>
 
             <div class="translation-comparison">

@@ -10,17 +10,21 @@ import {
 } from "./delivery.ts";
 import {
   claimNextRetryableTranslation,
+  claimNextPendingAutoApproval,
   claimQueuedTranslationByID,
+  completeAutoApprovedTranslation,
   completeTranslation,
   enqueueTranslations,
   failTranslation,
   findApprovedGlossaryTerms,
   findOrClaimTranslation,
   reserveDailyBudget,
+  releasePendingAutoApprovalClaim,
 } from "./repository.ts";
 import {
   buildMachineTranslationPlan,
   machineTranslationFragments,
+  renderFullyApprovedUpgrade,
   renderMachineTranslationPlan,
 } from "./machine-translation.ts";
 import {
@@ -33,6 +37,7 @@ const translationModel = "@cf/meta/m2m100-1.2b";
 const maximumResolveBatchSize = 50;
 const maximumResolveRequestBytes = 32 * 1024;
 const scheduledRetryBatchSize = 6;
+const scheduledAutoApprovalBatchSize = 6;
 
 interface LegacyTranslationQueueMessage {
   entryID: number;
@@ -147,6 +152,7 @@ async function resolveNewTranslation(
   env: Env,
   clientID: string,
   source: string,
+  kind: TranslationKind,
   entryID: number,
   now: Date,
 ): Promise<ResolveResult> {
@@ -162,6 +168,26 @@ async function resolveNewTranslation(
       source,
     );
     const translationPlan = buildMachineTranslationPlan(source, glossaryTerms);
+    const automaticTranslation = await renderFullyApprovedUpgrade(
+      kind,
+      source,
+      translationPlan,
+    );
+    if (automaticTranslation) {
+      await completeAutoApprovedTranslation(
+        env.DB,
+        entryID,
+        automaticTranslation,
+        new Date(),
+      );
+      return {
+        clientID,
+        source,
+        translation: automaticTranslation,
+        status: "approved",
+        provider: "dictionary",
+      };
+    }
     const aiFragments = machineTranslationFragments(translationPlan);
     const hasBudget =
       aiFragments.length === 0 ||
@@ -261,12 +287,67 @@ async function processRetryBatch(
       env,
       `retry-${claim.id}`,
       claim.source,
+      claim.kind,
       claim.id,
       now,
     );
     processed += 1;
   }
   return processed;
+}
+
+async function processPendingAutoApprovalBatch(
+  env: Env,
+  batchSize = scheduledAutoApprovalBatchSize,
+): Promise<{ checked: number; approved: number }> {
+  let checked = 0;
+  let approved = 0;
+
+  for (let index = 0; index < batchSize; index += 1) {
+    const claim = await claimNextPendingAutoApproval(
+      env.DB,
+      supportedTargetLocale,
+      new Date(),
+    );
+    if (!claim) {
+      break;
+    }
+    checked += 1;
+
+    try {
+      const glossaryTerms = await findApprovedGlossaryTerms(
+        env.DB,
+        supportedTargetLocale,
+        claim.source,
+      );
+      const translation = await renderFullyApprovedUpgrade(
+        claim.kind,
+        claim.source,
+        buildMachineTranslationPlan(claim.source, glossaryTerms),
+      );
+      if (!translation) {
+        continue;
+      }
+
+      await completeAutoApprovedTranslation(
+        env.DB,
+        claim.id,
+        translation,
+        new Date(),
+        "pending",
+      );
+      approved += 1;
+    } catch (error) {
+      await releasePendingAutoApprovalClaim(
+        env.DB,
+        claim.id,
+        claim.checkedAt,
+      );
+      throw error;
+    }
+  }
+
+  return { checked, approved };
 }
 
 async function handleResolve(
@@ -405,6 +486,17 @@ export default {
     env: Env,
   ): Promise<void> {
     try {
+      let autoApproval = { checked: 0, approved: 0 };
+      try {
+        autoApproval = await processPendingAutoApprovalBatch(env);
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            message: "Scheduled pending auto-approval failed.",
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
       const processed = await processRetryBatch(
         env,
         new Date(controller.scheduledTime),
@@ -413,6 +505,8 @@ export default {
         JSON.stringify({
           message: "Scheduled translation retry completed.",
           processed,
+          automaticApprovalChecked: autoApproval.checked,
+          automaticApprovalCompleted: autoApproval.approved,
         }),
       );
     } catch (error) {
@@ -443,6 +537,7 @@ export default {
               env,
               `queue-${claim.id}`,
               claim.source,
+              claim.kind,
               claim.id,
               new Date(),
             );
@@ -491,6 +586,7 @@ export default {
             env,
             `queue-${generationClaim.id}`,
             generationClaim.source,
+            generationClaim.kind,
             generationClaim.id,
             new Date(),
           );

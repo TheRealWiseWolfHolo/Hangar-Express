@@ -3,9 +3,11 @@ import test from "node:test";
 import {
   buildMachineTranslationPlan,
   ensureSimplifiedChinese,
+  isFullyApprovedUpgradePlan,
   machineTranslationFragments,
   preserveSourceQuotationMarks,
   renderMachineTranslationPlan,
+  renderFullyApprovedUpgrade,
 } from "../src/machine-translation.ts";
 
 test("normalizes machine output to Mainland Simplified Chinese", () => {
@@ -215,5 +217,53 @@ test("normalizes legacy Standard Edition output", () => {
   assert.equal(
     ensureSimplifiedChinese("升级 - 弩炮 到 剃刀 标准 版"),
     "升级 - 弩炮 到 剃刀 标准版",
+  );
+});
+
+test("auto-approves an exact upgrade assembled entirely from approved terms", async () => {
+  const source = "Upgrade - Carrack Expedition to Pisces Expedition Warbond Edition";
+  const plan = buildMachineTranslationPlan(source, [
+    { source: "Upgrade", translation: "升级" },
+    { source: "Carrack Expedition", translation: "克拉克远征" },
+    { source: "to", translation: "到" },
+    { source: "Pisces Expedition", translation: "双鱼远征" },
+    { source: "Warbond Edition", translation: "战争债券版" },
+  ]);
+
+  assert.equal(isFullyApprovedUpgradePlan("upgrade", source, plan), true);
+  assert.equal(
+    await renderFullyApprovedUpgrade("upgrade", source, plan),
+    "升级 - 克拉克远征 到 双鱼远征 战争债券版",
+  );
+});
+
+test("does not auto-approve an upgrade with an unresolved catalog name", async () => {
+  const source = "Upgrade - Carrack Expedition to Unknown Ship Standard Edition";
+  const plan = buildMachineTranslationPlan(source, [
+    { source: "Upgrade", translation: "升级" },
+    { source: "Carrack Expedition", translation: "克拉克远征" },
+    { source: "to", translation: "到" },
+    { source: "Standard Edition", translation: "标准版" },
+  ]);
+
+  assert.deepEqual(machineTranslationFragments(plan), ["Unknown Ship"]);
+  assert.equal(isFullyApprovedUpgradePlan("upgrade", source, plan), false);
+  assert.equal(await renderFullyApprovedUpgrade("upgrade", source, plan), null);
+});
+
+test("does not auto-approve non-upgrades or sources with extra suffixes", () => {
+  const exactSource = "Upgrade - A to B Standard Edition";
+  const exactPlan = buildMachineTranslationPlan(exactSource, [
+    { source: exactSource, translation: "升级 - 甲 到 乙 标准版" },
+  ]);
+  assert.equal(isFullyApprovedUpgradePlan("package", exactSource, exactPlan), false);
+
+  const suffixedSource = `${exactSource} Bonus`;
+  const suffixedPlan = buildMachineTranslationPlan(suffixedSource, [
+    { source: suffixedSource, translation: "升级 - 甲 到 乙 标准版 奖励" },
+  ]);
+  assert.equal(
+    isFullyApprovedUpgradePlan("upgrade", suffixedSource, suffixedPlan),
+    false,
   );
 });

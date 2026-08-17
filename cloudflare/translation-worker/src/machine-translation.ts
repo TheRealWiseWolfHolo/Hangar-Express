@@ -32,6 +32,9 @@ export interface MachineTranslationPlanSegment {
   approvedTranslation?: string;
 }
 
+const exactUpgradeEditionPattern =
+  /^Upgrade[\t ]*-[\t ]+.+?[\t ]+to[\t ]+.+?[\t ]+(?:Standard|Warbond)[\t ]+Edition$/iu;
+
 function sourceQuotationPairs(source: string): SourceQuotationPair[] {
   const candidates: SourceQuotationPair[] = [];
   const patterns = [
@@ -209,6 +212,36 @@ export function machineTranslationFragments(
         translatableCharacterPattern.test(source) &&
         !singleCatalogNamePattern.test(source),
     );
+}
+
+export function isFullyApprovedUpgradePlan(
+  kind: string,
+  source: string,
+  plan: MachineTranslationPlanSegment[],
+): boolean {
+  if (kind !== "upgrade" || !exactUpgradeEditionPattern.test(source)) {
+    return false;
+  }
+
+  return plan.every(
+    (segment) =>
+      segment.approvedTranslation !== undefined ||
+      !translatableCharacterPattern.test(segment.source),
+  );
+}
+
+export async function renderFullyApprovedUpgrade(
+  kind: string,
+  source: string,
+  plan: MachineTranslationPlanSegment[],
+): Promise<string | null> {
+  if (!isFullyApprovedUpgradePlan(kind, source, plan)) {
+    return null;
+  }
+
+  return renderMachineTranslationPlan(plan, async () => {
+    throw new Error("A fully approved upgrade must not invoke Workers AI.");
+  });
 }
 
 export async function renderMachineTranslationPlan(

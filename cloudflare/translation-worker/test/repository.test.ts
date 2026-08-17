@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   claimNextRetryableTranslation,
+  claimNextPendingAutoApproval,
   claimQueuedTranslationByID,
+  completeAutoApprovedTranslation,
   completeTranslation,
   enqueueTranslations,
   failTranslation,
@@ -122,6 +124,82 @@ test("completes a translation by its returned row even when triggers add writes"
   assert.equal(recording.statements[0].bindings.at(-1), 42);
 });
 
+test("auto-approves a deterministic upgrade and marks the dictionary dirty atomically", async () => {
+  const recording = recordingDatabase();
+  const completedAt = new Date("2026-08-07T23:00:00.000Z");
+
+  await completeAutoApprovedTranslation(
+    recording.db,
+    42,
+    "升级 - 克拉克远征 到 双鱼远征 标准版",
+    completedAt,
+  );
+
+  assert.equal(recording.batchCalls, 1);
+  assert.equal(recording.statements.length, 3);
+  assert.match(recording.statements[0].query, /approval_method = 'automatic'/);
+  assert.match(recording.statements[0].query, /model = 'approved-glossary'/);
+  assert.match(recording.statements[0].query, /status = \?4/);
+  assert.match(recording.statements[1].query, /new_status/);
+  assert.match(recording.statements[1].query, /'approved'/);
+  assert.match(recording.statements[2].query, /UPDATE dictionary_state/);
+  assert.deepEqual(recording.statements[2].bindings, [
+    completedAt.toISOString(),
+    "system-auto-approval",
+    42,
+  ]);
+});
+
+test("claims unchecked pending upgrades in priority order", async () => {
+  const checkedAt = new Date("2026-08-07T23:30:00.000Z");
+  let query = "";
+  let bindings: unknown[] = [];
+  const db = {
+    prepare(value: string) {
+      query = value;
+      return {
+        bind(...values: unknown[]) {
+          bindings = values;
+          return {
+            async first() {
+              return { id: 51, source: "Upgrade - A to B Standard Edition", kind: "upgrade" };
+            },
+          };
+        },
+      };
+    },
+  } as unknown as D1Database;
+
+  const claim = await claimNextPendingAutoApproval(db, "zh-Hans", checkedAt);
+
+  assert.deepEqual(claim, {
+    id: 51,
+    source: "Upgrade - A to B Standard Edition",
+    kind: "upgrade",
+    checkedAt: checkedAt.toISOString(),
+  });
+  assert.deepEqual(bindings, [checkedAt.toISOString(), "zh-Hans"]);
+  assert.match(query, /status = 'pending'/);
+  assert.match(query, /kind = 'upgrade'/);
+  assert.match(query, /auto_approval_checked_at IS NULL/);
+  assert.match(query, /ORDER BY priority, id/);
+});
+
+test("auto-approves an existing pending upgrade using the pending lease", async () => {
+  const recording = recordingDatabase();
+
+  await completeAutoApprovedTranslation(
+    recording.db,
+    42,
+    "升级 - 水龟 到 海盗船 标准版",
+    new Date("2026-08-07T23:45:00.000Z"),
+    "pending",
+  );
+
+  assert.deepEqual(recording.statements[0].bindings.slice(-2), ["pending", 42]);
+  assert.equal(recording.statements[1].bindings[0], "pending");
+});
+
 test("finds approved sources and aliases for glossary matching", async () => {
   let bindings: unknown[] = [];
   const db = {
@@ -209,6 +287,7 @@ test("claims an eligible failed entry for scheduled retry", async () => {
                 ? {
                     id: 42,
                     source: "Caterpillar - ArcCorp Paint",
+                    kind: "paint",
                     status: "failed",
                   }
                 : { id: 42 };
@@ -229,9 +308,11 @@ test("claims an eligible failed entry for scheduled retry", async () => {
   assert.deepEqual(claim, {
     id: 42,
     source: "Caterpillar - ArcCorp Paint",
+    kind: "paint",
   });
   assert.equal(statements.length, 2);
   assert.match(statements[0].query, /status = 'failed'/);
+  assert.match(statements[0].query, /ORDER BY priority, retry_after, id/);
   assert.match(statements[1].query, /SET status = 'generating'/);
   assert.match(statements[1].query, /RETURNING id/);
   assert.equal(statements[1].bindings[0], now.toISOString());
@@ -315,7 +396,7 @@ test("claims a specific queued translation idempotently", async () => {
           statement = { query, bindings };
           return {
             async first() {
-              return { id: 42, source: "Terrapin" };
+              return { id: 42, source: "Terrapin", kind: "ship" };
             },
           };
         },
@@ -331,8 +412,8 @@ test("claims a specific queued translation idempotently", async () => {
     now,
   );
 
-  assert.deepEqual(claim, { id: 42, source: "Terrapin" });
+  assert.deepEqual(claim, { id: 42, source: "Terrapin", kind: "ship" });
   assert.match(statement?.query ?? "", /AND status = 'failed'/);
-  assert.match(statement?.query ?? "", /RETURNING id, source/);
+  assert.match(statement?.query ?? "", /RETURNING id, source, kind/);
   assert.deepEqual(statement?.bindings, [now.toISOString(), 42, "zh-Hans"]);
 });
