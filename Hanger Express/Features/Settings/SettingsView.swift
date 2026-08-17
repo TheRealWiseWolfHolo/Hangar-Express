@@ -7,10 +7,49 @@ private enum LegalLinkDestinations {
     static let termsOfUseURL = URL(string: "https://github.com/TheRealWiseWolfHolo/Hangar-Express/blob/main/TERMS_OF_USE.md")!
 }
 
+private enum CloudTranslationDictionaryRefreshState: Equatable {
+    case idle
+    case refreshing
+    case succeeded(Date)
+    case failed(String)
+}
+
+private struct CloudTranslationCoverage {
+    let approvedCount: Int
+    let totalCount: Int
+
+    init(
+        snapshot: HangarSnapshot,
+        dictionary: HangarItemTranslationDictionary?
+    ) {
+        let candidates = CloudHangarItemTranslationSuggestionClassifier.candidates(
+            from: snapshot
+        )
+        totalCount = candidates.count
+        approvedCount = candidates.reduce(into: 0) { count, candidate in
+            if dictionary?.translation(for: candidate.source) != nil {
+                count += 1
+            }
+        }
+    }
+
+    var fractionComplete: Double {
+        guard totalCount > 0 else {
+            return 0
+        }
+        return Double(approvedCount) / Double(totalCount)
+    }
+
+    var missingCount: Int {
+        max(totalCount - approvedCount, 0)
+    }
+}
+
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
+    @AppStorage(HangarItemTranslationMissMode.storageKey) private var itemTranslationMissModeRawValue = HangarItemTranslationMissMode.onDevice.rawValue
     @AppStorage(AppAppearance.storageKey) private var appAppearanceRawValue = AppAppearance.system.rawValue
     @AppStorage(SyncPreferences.workerCountKey) private var syncWorkerCount = Double(SyncPreferences.defaultWorkerCount)
     @AppStorage(SyncPreferences.inventoryAutoRefreshIntervalKey) private var inventoryAutoRefreshIntervalRawValue = SyncPreferences.defaultInventoryAutoRefreshInterval.rawValue
@@ -24,11 +63,13 @@ struct SettingsView: View {
     @State private var isShowingClearCacheAlert = false
     @State private var isShowingClearTranslationCacheAlert = false
     @State private var isShowingProPlans = false
+    @State private var itemTranslationState = HangarItemTranslationViewState()
+    @State private var cloudDictionaryRefreshState = CloudTranslationDictionaryRefreshState.idle
+    @State private var itemTranslationMethodPrompt: AppModel.ItemTranslationMethodPrompt?
 
     let appModel: AppModel
     let snapshot: HangarSnapshot
 
-    private let officialRSIURL = URL(string: "https://robertsspaceindustries.com/en/")!
     private let repositoryURL = URL(string: "https://github.com/TheRealWiseWolfHolo/Hangar-Express")!
     private let spviewerURL = URL(string: "https://www.spviewer.eu/")!
     private let starCitizenWikiURL = URL(string: "https://starcitizen.tools/")!
@@ -39,7 +80,6 @@ struct SettingsView: View {
             List {
                 ProSubscriptionSection(
                     subscriptionStore: appModel.subscriptionStore,
-                    showsEarlyAccessBadge: $showsEarlyAccessBadge,
                     onShowPlans: {
                         isShowingProPlans = true
                     }
@@ -61,8 +101,10 @@ struct SettingsView: View {
                         }
                     }
                     .pickerStyle(.menu)
-                    .onChange(of: hangarItemLanguageRawValue) { _, _ in
-                        appModel.requestItemTranslationPreprocessingForCurrentSnapshot()
+                    .onChange(of: hangarItemLanguageRawValue) { _, newValue in
+                        handleItemLanguageChange(
+                            HangarItemLanguage.resolved(from: newValue)
+                        )
                     }
 
                     Picker("Appearance", selection: $appAppearanceRawValue) {
@@ -74,6 +116,71 @@ struct SettingsView: View {
                     .pickerStyle(.menu)
                 } header: {
                     Text("Display")
+                }
+
+                if CloudHangarItemTranslationRollout.isEnabled,
+                   HangarItemLanguage.resolved(
+                       from: hangarItemLanguageRawValue
+                   ) == .simplifiedChinese {
+                    Section {
+                        Picker(
+                            "Translation Mode",
+                            selection: $itemTranslationMissModeRawValue
+                        ) {
+                            Text("Local")
+                                .tag(HangarItemTranslationMissMode.onDevice.rawValue)
+                            Text("Cloud")
+                                .tag(HangarItemTranslationMissMode.cloudReview.rawValue)
+                        }
+                        .pickerStyle(.menu)
+                        .onChange(of: itemTranslationMissModeRawValue) { _, _ in
+                            let mode = HangarItemTranslationMissMode(
+                                rawValue: itemTranslationMissModeRawValue
+                            ) ?? .onDevice
+                            appModel.selectItemTranslationMissMode(mode)
+                        }
+
+                        if HangarItemTranslationMissMode.resolved(
+                            from: itemTranslationMissModeRawValue
+                        ) == .cloudReview {
+                            CloudTranslationDictionaryStatusView(
+                                coverage: CloudTranslationCoverage(
+                                    snapshot: snapshot,
+                                    dictionary: itemTranslationState.dictionary
+                                ),
+                                dictionary: itemTranslationState.dictionary,
+                                uploadProgress: appModel.cloudItemTranslationUploadProgress,
+                                refreshState: cloudDictionaryRefreshState,
+                                onRefresh: {
+                                    Task {
+                                        await refreshCloudTranslationDictionary()
+                                    }
+                                }
+                            )
+                            .task(
+                                id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
+                            ) {
+                                await itemTranslationState.loadDictionary(
+                                    for: hangarItemLanguageRawValue,
+                                    refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
+                                )
+                            }
+                        }
+                    } header: {
+                        Text("Item Translation")
+                    } footer: {
+                        if HangarItemTranslationMissMode.resolved(
+                            from: itemTranslationMissModeRawValue
+                        ) == .cloudReview {
+                            Text(
+                                "Only text that needs translation is uploaded. No personally identifiable information is uploaded. New terms remain in English until reviewed and published."
+                            )
+                        } else {
+                            Text(
+                                "Both modes download the approved hosted dictionary. Local mode uses Apple's on-device translation model for missing terms and does not send those terms to the Hangar Express translation service."
+                            )
+                        }
+                    }
                 }
 
                 Section {
@@ -247,12 +354,8 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Text("Hangar Express is an unofficial Star Citizen fan project and is not affiliated with the Cloud Imperium group of companies. Star Citizen, Squadron 42, Roberts Space Industries, and related game content shown by this app belong to the Cloud Imperium group of companies and their respective owners.")
+                    Text("Hangar Express is open-source software and an unofficial Star Citizen fan project. It is not affiliated with the Cloud Imperium group of companies. Star Citizen, Squadron 42, Roberts Space Industries, and related game content shown by this app belong to the Cloud Imperium group of companies and their respective owners.")
                         .font(.footnote)
-
-                    Link(destination: officialRSIURL) {
-                        Label("Official RSI Website", systemImage: "link")
-                    }
 
                     Link(destination: LegalLinkDestinations.privacyPolicyURL) {
                         Label("Privacy Policy", systemImage: "lock.shield")
@@ -310,10 +413,43 @@ struct SettingsView: View {
                 Text("Clearing translation cache removes the hosted item translation dictionary and saved on-device translations. Your hangar snapshots, images, accounts, cookies, and credentials are not affected.")
             }
             .sheet(isPresented: $isShowingProPlans) {
-                ProPlansSheet(subscriptionStore: appModel.subscriptionStore)
+                ProPlansSheet(
+                    subscriptionStore: appModel.subscriptionStore,
+                    showsEarlyAccessBadge: $showsEarlyAccessBadge
+                )
                     .presentationDetents([.medium, .large])
             }
+            .sheet(item: $itemTranslationMethodPrompt) { prompt in
+                ItemTranslationMethodChooserView(
+                    prompt: prompt,
+                    onSelect: { mode in
+                        itemTranslationMethodPrompt = nil
+                        appModel.selectItemTranslationMissMode(mode)
+                    }
+                )
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .interactiveDismissDisabled()
+            }
         }
+    }
+
+    private func handleItemLanguageChange(_ language: HangarItemLanguage) {
+        guard HangarItemTranslationMethodPromptPolicy.shouldPrompt(
+            for: language
+        ) else {
+            itemTranslationMethodPrompt = nil
+            appModel.requestItemTranslationPreprocessingForCurrentSnapshot()
+            return
+        }
+
+        itemTranslationMethodPrompt = AppModel.ItemTranslationMethodPrompt(
+            language: language,
+            currentMode: HangarItemTranslationMissMode.resolved(
+                from: itemTranslationMissModeRawValue
+            ),
+            reason: .languageSelection
+        )
     }
 
     private var translationLoadingBarPreviewBinding: Binding<Bool> {
@@ -356,97 +492,82 @@ struct SettingsView: View {
     private func clampStoredWorkerCount() {
         syncWorkerCount = Double(resolvedWorkerCount)
     }
+
+    private func refreshCloudTranslationDictionary() async {
+        guard cloudDictionaryRefreshState != .refreshing else {
+            return
+        }
+
+        cloudDictionaryRefreshState = .refreshing
+        do {
+            try await itemTranslationState.refreshDictionary(
+                for: hangarItemLanguageRawValue
+            )
+            appModel.didRefreshHostedItemTranslationDictionary()
+            cloudDictionaryRefreshState = .succeeded(.now)
+        } catch {
+            cloudDictionaryRefreshState = .failed(error.localizedDescription)
+        }
+    }
 }
 
 private struct ProSubscriptionSection: View {
     let subscriptionStore: SubscriptionStore
-    @Binding var showsEarlyAccessBadge: Bool
     let onShowPlans: () -> Void
 
     var body: some View {
         Section {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: subscriptionStore.isPro ? "checkmark.seal.fill" : "sparkles")
-                        .font(.title2)
-                        .foregroundStyle(subscriptionStore.isPro ? .green : Color.accentColor)
+            Button(action: onShowPlans) {
+                HStack(spacing: 14) {
+                    ZStack {
+                        Circle()
+                            .fill(statusColor.opacity(0.14))
+                            .frame(width: 46, height: 46)
+
+                        Image(systemName: subscriptionStore.isPro ? "checkmark.seal.fill" : "sparkles")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(statusColor)
+                    }
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(subscriptionStore.isPro ? AppLocalizer.string("Early Access Active") : AppLocalizer.string("Hangar Express Early Access"))
-                            .font(.headline)
+                        HStack(spacing: 8) {
+                            Text("Early Access")
+                                .font(.headline)
 
-                        Text(statusSummary)
+                            if subscriptionStore.isPro {
+                                Text("Active")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(.green)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3)
+                                    .background(.green.opacity(0.14), in: Capsule())
+                            }
+                        }
+
+                        Text(planSummary)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
-                    }
-                }
+                            .lineLimit(subscriptionStore.isPro ? 1 : 2)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    LabeledContent("Status") {
-                        Text(subscriptionStore.isPro ? AppLocalizer.string("Active") : AppLocalizer.string("Inactive"))
-                            .foregroundStyle(subscriptionStore.isPro ? .green : .secondary)
-                    }
-
-                    if subscriptionStore.isPro {
-                        LabeledContent("Plan") {
-                            Text(subscriptionStore.proSubscriptionDetails?.displayName ?? AppLocalizer.string("Hangar Express Early Access"))
-                                .foregroundStyle(.secondary)
-                        }
-
-                        if subscriptionStore.proSubscriptionDetails?.isLifetime == true {
-                            LabeledContent("Access") {
-                                Text("Lifetime")
-                                    .foregroundStyle(.secondary)
-                            }
-                        } else {
-                            LabeledContent("Next Renewal") {
-                                Text(nextRenewalLabel)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            LabeledContent("Auto Renewal") {
-                                Text(autoRenewalLabel)
-                                    .foregroundStyle(autoRenewalStyle)
-                            }
-
-                            if let accessUntilLabel {
-                                LabeledContent("Access Until") {
-                                    Text(accessUntilLabel)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
+                        if let accessSummary {
+                            Text(accessSummary)
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
                         }
                     }
-                }
-                .font(.subheadline)
 
-                if let message = statusMessage {
-                    Text(message)
-                        .font(.footnote)
-                        .foregroundStyle(statusIsError ? .red : .secondary)
-                } else if let productLoadErrorMessage = subscriptionStore.productLoadErrorMessage {
-                    Text(productLoadErrorMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                }
+                    Spacer(minLength: 8)
 
-                Button(action: onShowPlans) {
-                    Text(primaryButtonTitle)
-                        .frame(maxWidth: .infinity, alignment: .center)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-
-                if subscriptionStore.isPro {
-                    Toggle("Show Early Access Badge", isOn: $showsEarlyAccessBadge)
-                        .font(.subheadline)
-                }
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
             }
-            .padding(.vertical, 6)
-        } header: {
-            Text("Early Access Status")
-        } footer: {
-            Text("Developing Hangar Express takes time and money. Show your *optional* support here.")
+            .buttonStyle(.plain)
+            .accessibilityHint(Text(primaryButtonTitle))
         }
         .task {
             await subscriptionStore.start()
@@ -457,77 +578,63 @@ private struct ProSubscriptionSection: View {
         subscriptionStore.isPro ? AppLocalizer.string("Manage Plans") : AppLocalizer.string("See Plans")
     }
 
-    private var statusSummary: String {
-        subscriptionStore.isPro
-            ? AppLocalizer.string("Early access to experimental features are enabled.")
-            : AppLocalizer.string("Support development and get early access to experimental Labs features.")
+    private var statusColor: Color {
+        subscriptionStore.isPro ? .green : Color.accentColor
     }
 
-    private var nextRenewalLabel: String {
+    private var planSummary: String {
+        guard subscriptionStore.isPro else {
+            return AppLocalizer.string("Support development and get early access to experimental Labs features.")
+        }
+
+        if subscriptionStore.proSubscriptionDetails?.isLifetime == true {
+            return AppLocalizer.string("Lifetime Access")
+        }
+
+        return subscriptionStore.proSubscriptionDetails?.displayName
+            ?? AppLocalizer.string("Hangar Express Early Access")
+    }
+
+    private var accessSummary: String? {
+        guard subscriptionStore.isPro else {
+            return AppLocalizer.string("See Plans")
+        }
+
         guard let details = subscriptionStore.proSubscriptionDetails else {
-            return AppLocalizer.string("Checking...")
+            return AppLocalizer.string("Access verified")
         }
 
-        if details.willAutoRenew == false {
-            return AppLocalizer.string("Not scheduled")
-        }
-
-        guard let nextRenewalDate = details.nextRenewalDate else {
-            return AppLocalizer.string("Unavailable")
-        }
-
-        return formattedSubscriptionDate(nextRenewalDate)
-    }
-
-    private var autoRenewalLabel: String {
-        switch subscriptionStore.proSubscriptionDetails?.willAutoRenew {
-        case true:
-            return AppLocalizer.string("On")
-        case false:
-            return AppLocalizer.string("Off")
-        case nil:
-            return AppLocalizer.string("Checking...")
-        }
-    }
-
-    private var autoRenewalStyle: Color {
-        switch subscriptionStore.proSubscriptionDetails?.willAutoRenew {
-        case true:
-            return .green
-        case false:
-            return .orange
-        case nil:
-            return .secondary
-        }
-    }
-
-    private var accessUntilLabel: String? {
-        guard subscriptionStore.proSubscriptionDetails?.willAutoRenew == false,
-              let expirationDate = subscriptionStore.proSubscriptionDetails?.expirationDate else {
+        if details.isLifetime {
             return nil
         }
 
-        return formattedSubscriptionDate(expirationDate)
-    }
+        if details.willAutoRenew == false, let expirationDate = details.expirationDate {
+            return AppLocalizer.format("Access ends %@", formattedSubscriptionDate(expirationDate))
+        }
 
-    private var statusMessage: String? {
-        subscriptionStatusMessage(for: subscriptionStore.purchaseStatus)
-    }
+        if let nextRenewalDate = details.nextRenewalDate {
+            return AppLocalizer.format("Renews %@", formattedSubscriptionDate(nextRenewalDate))
+        }
 
-    private var statusIsError: Bool {
-        subscriptionStatusIsError(subscriptionStore.purchaseStatus)
+        return AppLocalizer.string("Access verified")
     }
 }
 
 private struct ProPlansSheet: View {
     @Environment(\.dismiss) private var dismiss
     let subscriptionStore: SubscriptionStore
+    @Binding var showsEarlyAccessBadge: Bool
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
                     ProBenefitsCard(isPro: subscriptionStore.isPro)
+                    if subscriptionStore.isPro {
+                        EarlyAccessPreferencesCard(
+                            showsEarlyAccessBadge: $showsEarlyAccessBadge
+                        )
+                    }
                     EarlyAccessDisclaimerCard()
                     ProFeatureComparisonCard()
                     ProPlanActionsCard(subscriptionStore: subscriptionStore)
@@ -550,6 +657,197 @@ private struct ProPlansSheet: View {
             }
         }
     }
+
+}
+
+private struct CloudTranslationDictionaryStatusView: View {
+    let coverage: CloudTranslationCoverage
+    let dictionary: HangarItemTranslationDictionary?
+    let uploadProgress: AppModel.CloudItemTranslationUploadProgress?
+    let refreshState: CloudTranslationDictionaryRefreshState
+    let onRefresh: () -> Void
+
+    private var isRefreshing: Bool {
+        refreshState == .refreshing
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Text("Approved catalog coverage")
+                        .font(.subheadline.weight(.semibold))
+
+                    Spacer()
+
+                    Text(
+                        AppLocalizer.format(
+                            "%lld of %lld",
+                            Int64(coverage.approvedCount),
+                            Int64(coverage.totalCount)
+                        )
+                    )
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                }
+
+                ProgressView(value: coverage.fractionComplete)
+                    .tint(.blue)
+
+                Text(
+                    AppLocalizer.format(
+                        "%lld catalog terms are still missing from the approved dictionary.",
+                        Int64(coverage.missingCount)
+                    )
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            if let uploadProgress {
+                Divider()
+
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        uploadProgressTitle(uploadProgress.phase)
+                            .font(.subheadline.weight(.semibold))
+
+                        Spacer()
+
+                        Text(
+                            AppLocalizer.format(
+                                "%lld of %lld",
+                                Int64(uploadProgress.completedCount),
+                                Int64(uploadProgress.totalCount)
+                            )
+                        )
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    }
+
+                    ProgressView(value: uploadProgress.fractionComplete)
+                        .tint(uploadProgress.phase == .interrupted ? .orange : .blue)
+
+                    uploadProgressDetail(uploadProgress)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    if let dictionary {
+                        Text(
+                            AppLocalizer.format(
+                                "Dictionary v%lld • %lld approved entries",
+                                Int64(dictionary.version),
+                                Int64(dictionary.entries.count)
+                            )
+                        )
+                        .font(.caption.weight(.medium))
+                    } else {
+                        Text("No verified cloud dictionary is available.")
+                            .font(.caption.weight(.medium))
+                    }
+
+                    refreshDetail
+                        .font(.caption)
+                        .foregroundStyle(refreshDetailColor)
+                }
+
+                Spacer(minLength: 8)
+
+                Button(action: onRefresh) {
+                    if isRefreshing {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(isRefreshing)
+                .accessibilityLabel("Refresh translations from cloud")
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private func uploadProgressTitle(
+        _ phase: AppModel.CloudItemTranslationUploadProgress.Phase
+    ) -> some View {
+        switch phase {
+        case .uploading:
+            Text("Uploading missing terms")
+        case .interrupted:
+            Text("Upload paused")
+        }
+    }
+
+    @ViewBuilder
+    private func uploadProgressDetail(
+        _ progress: AppModel.CloudItemTranslationUploadProgress
+    ) -> some View {
+        switch progress.phase {
+        case .uploading:
+            Text(
+                AppLocalizer.format(
+                    "%lld of %lld catalog terms uploaded.",
+                    Int64(progress.completedCount),
+                    Int64(progress.totalCount)
+                )
+            )
+        case .interrupted:
+            Text("Completed batches were saved. The remaining terms will retry later.")
+        }
+    }
+
+    @ViewBuilder
+    private var refreshDetail: some View {
+        switch refreshState {
+        case .idle:
+            Text("Refresh to check for newly approved translations.")
+        case .refreshing:
+            Text("Downloading and verifying the latest cloud dictionary…")
+        case let .succeeded(date):
+            Text(
+                AppLocalizer.format(
+                    "Updated %@",
+                    date.formatted(.relative(presentation: .numeric))
+                )
+            )
+        case let .failed(message):
+            Text(AppLocalizer.format("Refresh failed: %@", message))
+        }
+    }
+
+    private var refreshDetailColor: Color {
+        if case .failed = refreshState {
+            return .red
+        }
+        return .secondary
+    }
+}
+
+private struct EarlyAccessPreferencesCard: View {
+    @Binding var showsEarlyAccessBadge: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Preferences")
+                .font(.headline)
+
+            Toggle("Show Early Access Badge", isOn: $showsEarlyAccessBadge)
+
+            Text("Show or hide the Early Access badge beside your profile name.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .earlyAccessCardStyle()
+    }
 }
 
 private struct ProBenefitsCard: View {
@@ -566,7 +864,7 @@ private struct ProBenefitsCard: View {
                     Text(isPro ? AppLocalizer.string("Your Early Access is active") : AppLocalizer.string("Get Hangar Express Early Access"))
                         .font(.headline)
 
-                    Text("Early Access supports ongoing development and unlocks experimental Labs features before their public release.")
+                    Text("Hangar Express is free, but development takes time, money, and resources. Show your *optional* support here.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -574,7 +872,7 @@ private struct ProBenefitsCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .earlyAccessCardStyle()
     }
 }
 
@@ -585,17 +883,14 @@ private struct EarlyAccessDisclaimerCard: View {
                 .font(.headline)
                 .foregroundStyle(.orange)
 
-            Text("Early Access is optional support for Hangar Express development. You are not directly purchasing Star Citizen content, RSI items, gameplay access, or any Cloud Imperium Games or Roberts Space Industries entitlement through Hangar Express.")
+            Text("Supporting Hangar Express supports this app's independent development only. It does not buy any Star Citizen content, RSI items, gameplay access, products, or entitlements from Cloud Imperium Games or Roberts Space Industries.")
                 .font(.subheadline)
                 .foregroundStyle(.primary)
 
-            Text("As a supporter benefit, Hangar Express enables experimental Labs features for you to test. These app features may change, break, or become available to all users later.")
+            Text("Early Access may include experimental Labs features, but support does not guarantee any specific app feature, continued availability, or future functionality. Features may change, break, be removed, or become available to everyone.")
                 .font(.subheadline)
                 .foregroundStyle(.primary)
 
-            Text("Hangar Express is an unofficial fan-made companion app and is not affiliated with, endorsed by, or sponsored by Cloud Imperium Games, Roberts Space Industries, or Star Citizen.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
@@ -612,9 +907,9 @@ private struct EarlyAccessDisclaimerCard: View {
 
 private struct ProFeatureComparisonCard: View {
     private let rows = [
-        FeatureComparisonRow(feature: "Experimental faster sync", standard: "Up to 2 pages", pro: "Up to 10 pages in Labs"),
-        FeatureComparisonRow(feature: "Extended Hangar Log beta", standard: "Latest 5", pro: "Up to 500 in Labs"),
-        FeatureComparisonRow(feature: "Multiple account switching beta", standard: "1 account", pro: "Up to 10 accounts in Labs")
+        FeatureComparisonRow(feature: "Sync Speed", standard: "2x", pro: "Up to 10x"),
+        FeatureComparisonRow(feature: "Hangar Log", standard: "Up to 5 Entries", pro: "Up to 500 Entries"),
+        FeatureComparisonRow(feature: "Account Switching", standard: "1 Account", pro: "Up to 10 Accounts")
     ]
 
     var body: some View {
@@ -649,7 +944,7 @@ private struct ProFeatureComparisonCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .earlyAccessCardStyle()
     }
 }
 
@@ -694,7 +989,7 @@ private struct ProPlanActionsCard: View {
                         await subscriptionStore.restorePurchases()
                     }
                 } label: {
-                    Label("Restore Purchases", systemImage: "arrow.clockwise")
+                    Label("Restore Access", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
                 .disabled(statusIsBusy)
@@ -737,7 +1032,7 @@ private struct ProPlanActionsCard: View {
                         await subscriptionStore.restorePurchases()
                     }
                 } label: {
-                    Label("Restore Purchases", systemImage: "arrow.clockwise")
+                    Label("Restore Access", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
                 .disabled(statusIsBusy)
@@ -747,7 +1042,7 @@ private struct ProPlanActionsCard: View {
                 }
             }
 
-            Text("Purchases are managed by Apple. You can change, cancel, or restore subscriptions from your Apple Account at any time.")
+            Text("Your plan is managed by Apple. You can change, cancel, or restore access from your Apple Account at any time.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -755,7 +1050,7 @@ private struct ProPlanActionsCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .earlyAccessCardStyle()
     }
 
     private var statusMessage: String? {
@@ -773,7 +1068,7 @@ private struct ProPlanActionsCard: View {
     private var sectionTitle: String {
         if subscriptionStore.isPro {
             return subscriptionStore.hasLifetimePro && !subscriptionStore.hasActiveProSubscription
-                ? AppLocalizer.string("Purchase")
+                ? AppLocalizer.string("Plan Details")
                 : AppLocalizer.string("Subscription")
         }
 
@@ -794,12 +1089,30 @@ private struct ProPlanActionsCard: View {
     }
 }
 
+private struct EarlyAccessCardStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+
+        content
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: shape)
+            .overlay {
+                shape.stroke(Color.primary.opacity(0.10), lineWidth: 1)
+            }
+    }
+}
+
+private extension View {
+    func earlyAccessCardStyle() -> some View {
+        modifier(EarlyAccessCardStyle())
+    }
+}
+
 private struct SubscriptionLegalLinks: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Divider()
 
-            Text("Review before purchase")
+            Text("Legal & Privacy")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
 
@@ -947,9 +1260,9 @@ private func subscriptionStatusMessage(for purchaseStatus: SubscriptionStore.Pur
     case .idle:
         return nil
     case .purchasing:
-        return AppLocalizer.string("Opening App Store purchase sheet.")
+        return AppLocalizer.string("Opening App Store confirmation.")
     case .restoring:
-        return AppLocalizer.string("Restoring purchases.")
+        return AppLocalizer.string("Restoring access.")
     case .managing:
         return AppLocalizer.string("Opening Apple subscription management.")
     case .redeeming:

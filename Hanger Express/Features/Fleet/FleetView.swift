@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct FleetView: View {
     enum SortMode: String, CaseIterable, Identifiable {
@@ -119,7 +120,9 @@ struct FleetView: View {
                 }
             }
             .id(appLanguageRawValue)
-            .task(id: hangarItemLanguageRawValue) {
+            .task(
+                id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
+            ) {
                 await loadItemTranslationDictionary()
             }
             .task(id: fleetImagePrefetchID(for: displayedShipGroups)) {
@@ -527,7 +530,10 @@ struct FleetView: View {
     }
 
     private func loadItemTranslationDictionary() async {
-        await itemTranslationState.loadDictionary(for: hangarItemLanguageRawValue)
+        await itemTranslationState.loadDictionary(
+            for: hangarItemLanguageRawValue,
+            refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
+        )
     }
 
     private func cardSubtitle(for shipGroup: GroupedFleetShip) -> String? {
@@ -562,35 +568,28 @@ struct FleetView: View {
 
 enum FleetTool: String, CaseIterable, Identifiable, Hashable {
     case allShips
+    case wbccuDeals
     case authorizedDevices
     case ccuChainCalculator
     case resetCharacter
+    case eventCalendar
 
     var id: Self { self }
 
     var title: String {
         switch self {
         case .allShips:
-            return AppLocalizer.string("All Ships")
+            return AppLocalizer.string("Ship Catalogue")
+        case .wbccuDeals:
+            return AppLocalizer.string("WBCCU Deals")
         case .authorizedDevices:
-            return AppLocalizer.string("View Logged In Devices")
+            return AppLocalizer.string("Logged in Device Management")
         case .ccuChainCalculator:
-            return AppLocalizer.string("CCU Chain Calculator")
+            return AppLocalizer.string("CCU Calculator")
         case .resetCharacter:
-            return AppLocalizer.string("Reset Character")
-        }
-    }
-
-    var subtitle: String {
-        switch self {
-        case .allShips:
-            return AppLocalizer.string("Browse the Star Citizen ship catalog")
-        case .authorizedDevices:
-            return AppLocalizer.string("Review and remove logged-in RSI devices")
-        case .ccuChainCalculator:
-            return AppLocalizer.string("Find the lowest-cost upgrade chain")
-        case .resetCharacter:
-            return AppLocalizer.string("Request an RSI character repair")
+            return AppLocalizer.string("Character Repair")
+        case .eventCalendar:
+            return AppLocalizer.string("Event Calendar")
         }
     }
 
@@ -598,35 +597,58 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .allShips:
             return "airplane.circle"
+        case .wbccuDeals:
+            return "tag.circle"
         case .authorizedDevices:
             return "iphone"
         case .ccuChainCalculator:
             return "link.circle"
         case .resetCharacter:
             return "person.crop.circle.badge.exclamationmark"
+        case .eventCalendar:
+            return "calendar.badge.clock"
         }
+    }
+
+    var badgeText: String? {
+        self == .wbccuDeals ? "BETA" : nil
     }
 
     var isAvailable: Bool {
         self == .allShips
+            || self == .wbccuDeals
             || self == .authorizedDevices
             || self == .ccuChainCalculator
             || self == .resetCharacter
+            || self == .eventCalendar
     }
 }
 
 struct FleetToolsSection: View {
     let onSelect: (FleetTool) -> Void
+    let onReorderingChanged: (Bool) -> Void
     var showsHeader = true
     var disabledTools: Set<FleetTool> = []
+
+    @AppStorage("fleetToolsOrder") private var storedToolOrder = ""
+    @State private var heldTool: FleetTool?
+    @State private var draggedTool: FleetTool?
+    @State private var draggedToolLocation = CGPoint.zero
+    @State private var draggedToolSize = CGSize.zero
+    @State private var toolFrames: [FleetTool: CGRect] = [:]
+    @State private var lastReorderTarget: FleetTool?
+    @State private var dragActivationFeedbackTrigger = 0
+    @State private var reorderFeedbackTrigger = 0
 
     init(
         showsHeader: Bool = true,
         disabledTools: Set<FleetTool> = [],
+        onReorderingChanged: @escaping (Bool) -> Void = { _ in },
         onSelect: @escaping (FleetTool) -> Void
     ) {
         self.showsHeader = showsHeader
         self.disabledTools = disabledTools
+        self.onReorderingChanged = onReorderingChanged
         self.onSelect = onSelect
     }
 
@@ -639,67 +661,425 @@ struct FleetToolsSection: View {
                     .padding(.horizontal, 4)
             }
 
-            VStack(spacing: 10) {
-                ForEach(FleetTool.allCases) { tool in
-                    FleetToolRow(tool: tool, isEnabled: !disabledTools.contains(tool)) {
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 12),
+                    GridItem(.flexible(), spacing: 12)
+                ],
+                spacing: 12
+            ) {
+                ForEach(orderedTools) { tool in
+                    FleetToolTile(
+                        tool: tool,
+                        isEnabled: !disabledTools.contains(tool)
+                    ) {
                         onSelect(tool)
+                    }
+                    .overlay {
+                        ScrollFriendlyToolReorderSurface(
+                            minimumPressDuration: 1,
+                            allowableMovement: 12,
+                            onTap: {
+                                guard
+                                    tool.isAvailable,
+                                    !disabledTools.contains(tool)
+                                else {
+                                    return
+                                }
+                                onSelect(tool)
+                            },
+                            onPressingChanged: { isPressing in
+                                updateHoldProgress(isPressing: isPressing, for: tool)
+                            },
+                            onActivated: {
+                                beginDragging(tool)
+                            },
+                            onMoved: { location in
+                                updateDragging(tool, localLocation: location)
+                            },
+                            onEnded: {
+                                finishDragging()
+                            }
+                        )
+                    }
+                    .scaleEffect(heldTool == tool && draggedTool == nil ? 1.06 : 1)
+                    .opacity(draggedTool == tool ? 0 : 1)
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: FleetToolFramePreferenceKey.self,
+                                value: [tool: proxy.frame(in: .named("toolsGrid"))]
+                            )
+                        }
                     }
                 }
             }
+            .coordinateSpace(name: "toolsGrid")
+            .onPreferenceChange(FleetToolFramePreferenceKey.self) { frames in
+                toolFrames = frames
+            }
+            .overlay(alignment: .topLeading) {
+                if let draggedTool {
+                    FleetToolTile(
+                        tool: draggedTool,
+                        isEnabled: !disabledTools.contains(draggedTool),
+                        action: {}
+                    )
+                    .frame(width: draggedToolSize.width, height: draggedToolSize.height)
+                    .scaleEffect(1.06)
+                    .shadow(color: .black.opacity(0.28), radius: 14, y: 8)
+                    .position(draggedToolLocation)
+                    .allowsHitTesting(false)
+                    .transaction { transaction in
+                        transaction.animation = nil
+                    }
+                }
+            }
+            .sensoryFeedback(.impact(weight: .medium), trigger: dragActivationFeedbackTrigger)
+            .sensoryFeedback(.selection, trigger: reorderFeedbackTrigger)
+        }
+    }
+
+    private var orderedTools: [FleetTool] {
+        var seenTools = Set<FleetTool>()
+        let savedTools = storedToolOrder
+            .split(separator: ",")
+            .compactMap { FleetTool(rawValue: String($0)) }
+            .filter { seenTools.insert($0).inserted }
+        let newTools = FleetTool.allCases.filter { seenTools.insert($0).inserted }
+        return savedTools + newTools
+    }
+
+    private func updateHoldProgress(isPressing: Bool, for tool: FleetTool) {
+        if isPressing {
+            withAnimation(.linear(duration: 1)) {
+                heldTool = tool
+            }
+        } else if heldTool == tool {
+            withAnimation(.easeOut(duration: 0.15)) {
+                heldTool = nil
+            }
+        }
+    }
+
+    private func beginDragging(_ tool: FleetTool) {
+        guard draggedTool == nil else {
+            return
+        }
+
+        let frame = toolFrames[tool] ?? CGRect(origin: .zero, size: CGSize(width: 164, height: 124))
+        draggedToolLocation = CGPoint(x: frame.midX, y: frame.midY)
+        draggedToolSize = frame.size
+        draggedTool = tool
+        onReorderingChanged(true)
+        dragActivationFeedbackTrigger += 1
+    }
+
+    private func updateDragging(_ tool: FleetTool, localLocation: CGPoint) {
+        guard
+            draggedTool == tool,
+            let frame = toolFrames[tool]
+        else {
+            return
+        }
+
+        let gridLocation = CGPoint(
+            x: frame.minX + localLocation.x,
+            y: frame.minY + localLocation.y
+        )
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            draggedToolLocation = gridLocation
+        }
+        reorderDraggedTool(at: gridLocation)
+    }
+
+    private func finishDragging() {
+        guard draggedTool != nil else {
+            onReorderingChanged(false)
+            return
+        }
+
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            heldTool = nil
+            draggedTool = nil
+            draggedToolSize = .zero
+        }
+        lastReorderTarget = nil
+        onReorderingChanged(false)
+    }
+
+    private func reorderDraggedTool(at location: CGPoint) {
+        guard let draggedTool else {
+            return
+        }
+
+        let targetTool = toolFrames.first { tool, frame in
+            tool != draggedTool && frame.contains(location)
+        }?.key
+
+        guard let targetTool else {
+            lastReorderTarget = nil
+            return
+        }
+
+        guard targetTool != lastReorderTarget else {
+            return
+        }
+
+        lastReorderTarget = targetTool
+        if moveTool(draggedTool, relativeTo: targetTool) {
+            reorderFeedbackTrigger += 1
+        }
+    }
+
+    @discardableResult
+    private func moveTool(_ draggedTool: FleetTool, relativeTo targetTool: FleetTool) -> Bool {
+        var tools = orderedTools
+
+        guard
+            draggedTool != targetTool,
+            let sourceIndex = tools.firstIndex(of: draggedTool),
+            let targetIndex = tools.firstIndex(of: targetTool)
+        else {
+            return false
+        }
+
+        tools.remove(at: sourceIndex)
+        guard let adjustedTargetIndex = tools.firstIndex(of: targetTool) else {
+            return false
+        }
+
+        let destinationIndex = sourceIndex < targetIndex
+            ? adjustedTargetIndex + 1
+            : adjustedTargetIndex
+        tools.insert(draggedTool, at: destinationIndex)
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            storedToolOrder = tools.map(\.rawValue).joined(separator: ",")
+        }
+        return true
+    }
+}
+
+private struct ScrollFriendlyToolReorderSurface: UIViewRepresentable {
+    let minimumPressDuration: TimeInterval
+    let allowableMovement: CGFloat
+    let onTap: () -> Void
+    let onPressingChanged: (Bool) -> Void
+    let onActivated: () -> Void
+    let onMoved: (CGPoint) -> Void
+    let onEnded: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        view.isAccessibilityElement = false
+
+        let recognizer = ScrollFriendlyLongPressGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleGesture(_:))
+        )
+        recognizer.minimumPressDuration = minimumPressDuration
+        recognizer.allowableMovement = allowableMovement
+        recognizer.cancelsTouchesInView = false
+        recognizer.delaysTouchesBegan = false
+        recognizer.delaysTouchesEnded = false
+        recognizer.delegate = context.coordinator
+        recognizer.onTouchingChanged = { [weak coordinator = context.coordinator] isTouching in
+            coordinator?.handleTouchingChanged(isTouching)
+        }
+        view.addGestureRecognizer(recognizer)
+        context.coordinator.recognizer = recognizer
+
+        let tapRecognizer = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleTap)
+        )
+        tapRecognizer.cancelsTouchesInView = false
+        tapRecognizer.delegate = context.coordinator
+        tapRecognizer.require(toFail: recognizer)
+        view.addGestureRecognizer(tapRecognizer)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.parent = self
+        context.coordinator.recognizer?.minimumPressDuration = minimumPressDuration
+        context.coordinator.recognizer?.allowableMovement = allowableMovement
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var parent: ScrollFriendlyToolReorderSurface
+        weak var recognizer: ScrollFriendlyLongPressGestureRecognizer?
+        private var isReordering = false
+
+        init(parent: ScrollFriendlyToolReorderSurface) {
+            self.parent = parent
+        }
+
+        func handleTouchingChanged(_ isTouching: Bool) {
+            parent.onPressingChanged(isTouching)
+            if !isTouching {
+                finishReorderingIfNeeded()
+            }
+        }
+
+        @objc
+        func handleTap() {
+            parent.onTap()
+        }
+
+        @objc
+        func handleGesture(_ recognizer: UILongPressGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                isReordering = true
+                parent.onActivated()
+            case .changed:
+                guard isReordering else {
+                    return
+                }
+                parent.onMoved(recognizer.location(in: recognizer.view))
+            case .ended, .cancelled, .failed:
+                finishReorderingIfNeeded()
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            !isReordering
+        }
+
+        private func finishReorderingIfNeeded() {
+            guard isReordering else {
+                return
+            }
+            isReordering = false
+            parent.onEnded()
         }
     }
 }
 
-private struct FleetToolRow: View {
+private final class ScrollFriendlyLongPressGestureRecognizer: UILongPressGestureRecognizer {
+    var onTouchingChanged: ((Bool) -> Void)?
+    private var isTouching = false
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        updateTouching(true)
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesEnded(touches, with: event)
+        updateTouching(false)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesCancelled(touches, with: event)
+        updateTouching(false)
+    }
+
+    override func reset() {
+        updateTouching(false)
+        super.reset()
+    }
+
+    private func updateTouching(_ newValue: Bool) {
+        guard isTouching != newValue else {
+            return
+        }
+        isTouching = newValue
+        onTouchingChanged?(newValue)
+    }
+}
+
+private struct FleetToolFramePreferenceKey: PreferenceKey {
+    static let defaultValue: [FleetTool: CGRect] = [:]
+
+    static func reduce(
+        value: inout [FleetTool: CGRect],
+        nextValue: () -> [FleetTool: CGRect]
+    ) {
+        value.merge(nextValue(), uniquingKeysWith: { _, newValue in newValue })
+    }
+}
+
+private struct FleetToolTile: View {
     let tool: FleetTool
     let isEnabled: Bool
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: tool.systemImage)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(tool.isAvailable && isEnabled ? Color.accentColor : .secondary)
-                    .frame(width: 34, height: 34)
-                    .background(
-                        Circle()
-                            .fill((tool.isAvailable && isEnabled ? Color.accentColor : Color.secondary).opacity(0.12))
-                    )
+        VStack(spacing: 12) {
+            Image(systemName: tool.systemImage)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(tool.isAvailable && isEnabled ? Color.accentColor : .secondary)
+                .frame(width: 44, height: 44)
+                .background(
+                    Circle()
+                        .fill((tool.isAvailable && isEnabled ? Color.accentColor : Color.secondary).opacity(0.12))
+                )
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(tool.title)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
+            HStack(spacing: 6) {
+                Text(tool.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
 
-                    Text(tool.subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 8)
-
-                if tool.isAvailable {
-                    Image(systemName: "chevron.right")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.tertiary)
+                if let badgeText = tool.badgeText {
+                    Text(badgeText)
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color.accentColor.opacity(0.14))
+                        )
+                        .accessibilityLabel(Text("Beta"))
                 }
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(Color(.secondarySystemGroupedBackground))
-            )
         }
-        .buttonStyle(.plain)
-        .disabled(!tool.isAvailable || !isEnabled)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, minHeight: 124)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .opacity(tool.isAvailable && isEnabled ? 1 : 0.62)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(
+            tool.badgeText == nil
+                ? tool.title
+                : AppLocalizer.format("%@, Beta", tool.title)
+        )
+        .accessibilityAction {
+            guard tool.isAvailable && isEnabled else {
+                return
+            }
+            action()
+        }
     }
 }
 
 struct AllShipsBrowserView: View {
     let reloadToken: UUID?
+    let itemTranslationDictionaryRefreshGeneration: Int
 
     @Environment(\.dismiss) private var dismiss
     @State private var searchText = ""
@@ -811,7 +1191,7 @@ struct AllShipsBrowserView: View {
                 }
             }
             .id(appLanguageRawValue)
-            .navigationTitle(AppLocalizer.string("All Ships"))
+            .navigationTitle(AppLocalizer.string("Ship Catalogue"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -840,7 +1220,9 @@ struct AllShipsBrowserView: View {
             .task {
                 await loadCatalog(force: false)
             }
-            .task(id: hangarItemLanguageRawValue) {
+            .task(
+                id: "\(hangarItemLanguageRawValue)-\(itemTranslationDictionaryRefreshGeneration)"
+            ) {
                 await loadItemTranslationDictionary()
             }
         }
@@ -851,7 +1233,10 @@ struct AllShipsBrowserView: View {
     }
 
     private func loadItemTranslationDictionary() async {
-        await itemTranslationState.loadDictionary(for: hangarItemLanguageRawValue)
+        await itemTranslationState.loadDictionary(
+            for: hangarItemLanguageRawValue,
+            refreshGeneration: itemTranslationDictionaryRefreshGeneration
+        )
     }
 
     private func refreshCatalog() async {
@@ -1792,7 +2177,8 @@ private struct FleetShipHeroCard: View {
                         if let subtitle, !subtitle.isEmpty {
                             HangarTranslatedText(
                                 source: subtitle,
-                                itemTranslator: itemTranslator
+                                itemTranslator: itemTranslator,
+                                translatesColonSeparatedPhrasesIndividually: true
                             )
                                 .font(.subheadline.weight(.medium))
                                 .foregroundStyle(Color.white.opacity(0.8))
@@ -1942,7 +2328,8 @@ private struct FleetShipCompactCard: View {
                         if let subtitle, !subtitle.isEmpty {
                             HangarTranslatedText(
                                 source: subtitle,
-                                itemTranslator: itemTranslator
+                                itemTranslator: itemTranslator,
+                                translatesColonSeparatedPhrasesIndividually: true
                             )
                                 .font(.caption.weight(.medium))
                                 .foregroundStyle(Color.white.opacity(0.82))
@@ -2308,7 +2695,11 @@ private struct FleetShipDetailHeroCard: View {
                 HStack(alignment: .bottom, spacing: 12) {
                     VStack(alignment: .leading, spacing: 14) {
                         if let roleSummary, !roleSummary.isEmpty {
-                            Text(roleSummary)
+                            HangarTranslatedText(
+                                source: roleSummary,
+                                itemTranslator: itemTranslator,
+                                translatesColonSeparatedPhrasesIndividually: true
+                            )
                                 .font(.headline.weight(.medium))
                                 .foregroundStyle(Color.white.opacity(0.84))
                                 .lineLimit(2)

@@ -33,4 +33,5 @@ embedded.mobileprovision
 
 # Node / Remote Workers
 node_modules/
+.server-tool/
 .dev.vars

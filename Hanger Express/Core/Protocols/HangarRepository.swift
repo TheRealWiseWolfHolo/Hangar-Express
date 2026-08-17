@@ -97,6 +97,17 @@ nonisolated struct RefreshProgress: Hashable, Sendable {
         return (Double(boundedStep - 1) + boundedStepFraction) / Double(stepCount)
     }
 
+    var isFinalStepComplete: Bool {
+        guard stepCount > 0,
+              stepNumber >= stepCount,
+              let totalUnitCount,
+              totalUnitCount > 0 else {
+            return false
+        }
+
+        return completedUnitCount >= totalUnitCount
+    }
+
     var stepLabel: String {
         AppLocalizer.format("Step %lld of %lld", stepNumber, stepCount)
     }
@@ -264,6 +275,40 @@ nonisolated struct CharacterRepairResult: Hashable, Sendable {
 nonisolated struct BuybackCheckoutPreparation: Hashable, Sendable {
     let buybackPledgeID: Int
     let checkoutURL: URL
+    let updatedCookies: [SessionCookie]
+}
+
+nonisolated struct WBCCUCheckoutItem: Identifiable, Hashable, Sendable {
+    let offerID: String
+    let sourceShipID: Int
+    let sourceShipName: String
+    let sourceShipMSRPUSD: Decimal
+    let targetShipID: Int
+    let targetShipName: String
+    let targetSkuID: Int
+    let targetWarbondValueUSD: Decimal
+
+    var id: String { offerID }
+
+    var purchaseCostUSD: Decimal {
+        max(targetWarbondValueUSD - sourceShipMSRPUSD, 0)
+    }
+
+    var isValid: Bool {
+        !offerID.isEmpty
+            && sourceShipID > 0
+            && !sourceShipName.isEmpty
+            && sourceShipMSRPUSD >= 0
+            && targetShipID > 0
+            && !targetShipName.isEmpty
+            && targetSkuID > 0
+            && targetWarbondValueUSD > sourceShipMSRPUSD
+    }
+}
+
+nonisolated struct WBCCUCheckoutPreparation: Hashable, Sendable {
+    let checkoutURL: URL
+    let addedOfferIDs: [String]
     let updatedCookies: [SessionCookie]
 }
 
@@ -555,6 +600,11 @@ protocol HangarRepository: Sendable {
         pledge: BuybackPledge
     ) async throws -> BuybackCheckoutPreparation
 
+    func prepareWBCCUCheckout(
+        for session: UserSession,
+        items: [WBCCUCheckoutItem]
+    ) async throws -> WBCCUCheckoutPreparation
+
     func fetchLimitedShipSales() async throws -> [LimitedShipSale]
 
     func addLimitedShipToCart(
@@ -582,6 +632,15 @@ protocol HangarRepository: Sendable {
 }
 
 extension HangarRepository {
+    func prepareWBCCUCheckout(
+        for _: UserSession,
+        items _: [WBCCUCheckoutItem]
+    ) async throws -> WBCCUCheckoutPreparation {
+        throw HangarAccountActionError.wbccuCheckoutRejected(
+            message: AppLocalizer.string("WBCCU checkout is not available in this repository.")
+        )
+    }
+
     func refreshHangarLogData(
         for session: UserSession,
         from snapshot: HangarSnapshot,

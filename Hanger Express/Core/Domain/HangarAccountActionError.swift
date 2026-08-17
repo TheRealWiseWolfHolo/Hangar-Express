@@ -26,6 +26,9 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
     case characterRepairRejected(message: String)
     case invalidBuybackItem
     case buybackCheckoutRejected(message: String)
+    case invalidWBCCUCart
+    case wbccuCheckoutTimedOut(timeoutSeconds: Int)
+    case wbccuCheckoutRejected(message: String)
     case invalidLimitedShip
     case limitedShipCartInsertionTimedOut(timeoutSeconds: Int)
     case limitedShipCartInsertionRejected(message: String)
@@ -106,6 +109,15 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
             return AppLocalizer.string("Choose a valid buy-back pledge before Hangar Express can prepare checkout.")
         case let .buybackCheckoutRejected(message):
             return AppLocalizer.format("RSI did not add the selected buy-back pledge to the cart.\n\n%@", message)
+        case .invalidWBCCUCart:
+            return AppLocalizer.string("Add at least one valid Warbond upgrade to the cart before checking out.")
+        case let .wbccuCheckoutTimedOut(timeoutSeconds):
+            return AppLocalizer.format(
+                "RSI did not prepare the Warbond upgrade cart within %lld seconds. Open the RSI cart to verify its contents before trying again.",
+                timeoutSeconds
+            )
+        case let .wbccuCheckoutRejected(message):
+            return AppLocalizer.format("RSI did not prepare all selected Warbond upgrades for checkout. The RSI cart may contain upgrades added before the error.\n\n%@", message)
         case .invalidLimitedShip:
             return AppLocalizer.string("Choose a valid limited ship before Hangar Express can add it to the cart.")
         case let .limitedShipCartInsertionTimedOut(timeoutSeconds):

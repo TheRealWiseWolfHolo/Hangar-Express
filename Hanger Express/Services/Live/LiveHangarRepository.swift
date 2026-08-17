@@ -45,6 +45,7 @@ final class LiveHangarRepository: HangarRepository {
     }
 
     private struct FullAccountRefreshPayload {
+        let accountHandle: String?
         let avatarURL: URL?
         let primaryOrganization: AccountOrganization?
         let didRefreshPrimaryOrganization: Bool
@@ -88,7 +89,7 @@ final class LiveHangarRepository: HangarRepository {
         let resolvedAccountPayload = try await accountPayload
 
         return HangarSnapshot(
-            accountHandle: session.handle,
+            accountHandle: resolvedAccountPayload.accountHandle ?? session.handle,
             lastSyncedAt: .now,
             avatarURL: resolvedAccountPayload.avatarURL ?? session.avatarURL,
             primaryOrganization: resolvedAccountPayload.primaryOrganization,
@@ -350,7 +351,7 @@ final class LiveHangarRepository: HangarRepository {
         )
 
         return snapshot.updatingAccount(
-            accountHandle: session.handle,
+            accountHandle: accountContext.accountHandle ?? snapshot.accountHandle,
             avatarURL: accountContext.didRefreshAccountOverview ? accountContext.avatarURL : snapshot.avatarURL,
             primaryOrganization: accountContext.didRefreshPrimaryOrganization ? accountContext.primaryOrganization : snapshot.primaryOrganization,
             didRefreshPrimaryOrganization: accountContext.didRefreshPrimaryOrganization || snapshot.didRefreshPrimaryOrganization,
@@ -459,6 +460,7 @@ final class LiveHangarRepository: HangarRepository {
         )
 
         return FullAccountRefreshPayload(
+            accountHandle: accountContext.accountHandle,
             avatarURL: accountContext.avatarURL,
             primaryOrganization: accountContext.primaryOrganization,
             didRefreshPrimaryOrganization: accountContext.didRefreshPrimaryOrganization,
@@ -615,6 +617,25 @@ final class LiveHangarRepository: HangarRepository {
         return try await browser.prepareBuybackCheckout(
             using: session.cookies,
             pledge: pledge
+        )
+    }
+
+    func prepareWBCCUCheckout(
+        for session: UserSession,
+        items: [WBCCUCheckoutItem]
+    ) async throws -> WBCCUCheckoutPreparation {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.prepareWBCCUCheckout(
+                for: session,
+                items: items
+            )
+        }
+
+        try validate(session: session)
+        let checkoutBrowser = RSIAccountPageBrowser()
+        return try await checkoutBrowser.prepareWBCCUCheckout(
+            using: session.cookies,
+            items: items
         )
     }
 
@@ -2252,6 +2273,7 @@ final class LiveHangarRepository: HangarRepository {
         )
 
         return AccountRefreshContext(
+            accountHandle: accountOverview?.accountHandle,
             avatarURL: accountOverview?.avatarURL,
             primaryOrganization: accountOverview?.primaryOrganization,
             storeCreditUSD: accountOverview?.storeCreditUSD,
@@ -4597,6 +4619,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     private var lastNavigationEvents: [String] = []
     private var lastNavigationFailureDescription: String?
     private var lastNavigationResponseSummary: String?
+    private var preparedSessionCookies: [HTTPCookie] = []
+    private var preparedScriptAuthenticationArguments: [String: Any] = [:]
     private let loadTimeoutNanoseconds: UInt64 = 30_000_000_000
     private let maximumNavigationEventCount = 10
 
@@ -4923,6 +4947,53 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         )
     }
 
+    fileprivate func prepareWBCCUCheckout(
+        using cookies: [SessionCookie],
+        items: [WBCCUCheckoutItem]
+    ) async throws -> WBCCUCheckoutPreparation {
+        guard !items.isEmpty, items.allSatisfy(\.isValid) else {
+            throw LiveHangarRepositoryError.unexpectedMarkup("The virtual WBCCU cart is empty or invalid.")
+        }
+
+        let url = try storefrontURL(path: "/en/pledge/cart")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let checkoutItems: [[String: Any]] = items.map { item in
+            [
+                "offerID": item.offerID,
+                "sourceShipID": item.sourceShipID,
+                "targetShipID": item.targetShipID,
+                "targetSkuID": item.targetSkuID
+            ]
+        }
+        let result = try await evaluate(
+            script: Self.prepareWBCCUCheckoutScript,
+            arguments: ["checkoutItems": checkoutItems],
+            as: RemoteWBCCUCheckoutPreparation.self
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        guard result.status == "ok" else {
+            let failureMessage = [result.failureMessage, result.debugSummary]
+                .compactMap { value in
+                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                }
+                .joined(separator: "\n\n")
+                .nilIfEmpty ?? "RSI did not prepare the selected Warbond upgrades for checkout."
+            throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
+        }
+
+        return WBCCUCheckoutPreparation(
+            checkoutURL: result.checkoutURL.flatMap(URL.init(string:)) ?? url,
+            addedOfferIDs: result.addedOfferIDs,
+            updatedCookies: await currentRSICookies()
+        )
+    }
+
     fileprivate func addLimitedShipToCart(
         using cookies: [SessionCookie],
         ship: LimitedShipSale,
@@ -5173,7 +5244,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     fileprivate func currentRSICookies() async -> [SessionCookie] {
         let store = webView.configuration.websiteDataStore.httpCookieStore
-        let cookies = await allCookies(from: store)
+        let cookies = await RSIAuthenticatedWebSession.allCookies(from: store)
         return cookies
             .filter { $0.domain.contains("robertsspaceindustries.com") }
             .map(SessionCookie.init)
@@ -5299,11 +5370,15 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             throw LiveHangarRepositoryError.sessionExpired
         }
 
+        let resolvedAccountHandle = RSIProfileHandleResolver.resolve(
+            from: [payload.profileHandle, accountHandle, profileName]
+        )
         let primaryOrganizationOverview = try? await fetchPrimaryOrganization(
-            profileCandidates: [accountHandle, profileName]
+            profileCandidates: [resolvedAccountHandle, accountHandle, profileName].compactMap { $0 }
         )
 
         return AccountOverview(
+            accountHandle: resolvedAccountHandle,
             storeCreditUSD: storeCreditUSD,
             totalSpendUSD: billingPayload.totalSpendText.flatMap(RSIStoreCreditParser.parseCurrencyText),
             avatarURL: normalizedRSIURL(from: payload.avatarURL),
@@ -5449,40 +5524,12 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     private func prepareWebView(with cookies: [SessionCookie]) async throws {
-        try await replaceCookies(cookies)
-    }
-
-    private func replaceCookies(_ cookies: [SessionCookie]) async throws {
-        let store = webView.configuration.websiteDataStore.httpCookieStore
-
-        let existingCookies = await allCookies(from: store)
-        for cookie in existingCookies where cookie.domain.contains("robertsspaceindustries.com") {
-            await withCheckedContinuation { continuation in
-                store.delete(cookie) {
-                    continuation.resume()
-                }
-            }
-        }
-
-        for cookie in cookies {
-            guard let httpCookie = cookie.httpCookie else {
-                continue
-            }
-
-            await withCheckedContinuation { continuation in
-                store.setCookie(httpCookie) {
-                    continuation.resume()
-                }
-            }
-        }
-    }
-
-    private func allCookies(from store: WKHTTPCookieStore) async -> [HTTPCookie] {
-        await withCheckedContinuation { continuation in
-            store.getAllCookies { cookies in
-                continuation.resume(returning: cookies)
-            }
-        }
+        let preparedSession = await RSIAuthenticatedWebSession.prepare(
+            cookies: cookies,
+            in: webView
+        )
+        preparedSessionCookies = preparedSession.cookies
+        preparedScriptAuthenticationArguments = preparedSession.scriptArguments
     }
 
     private func extractPledgeChunk(
@@ -5595,7 +5642,12 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
                     try? await Task.sleep(nanoseconds: self?.loadTimeoutNanoseconds ?? 30_000_000_000)
                     await self?.finishLoadingAfterTimeout(requestedURL: url)
                 }
-                webView.load(URLRequest(url: url))
+                webView.load(
+                    RSIAuthenticatedWebSession.request(
+                        url: url,
+                        cookies: preparedSessionCookies
+                    )
+                )
             }
         } onCancel: {
             Task { @MainActor [weak self] in
@@ -5822,9 +5874,12 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         arguments: [String: Any],
         as type: Value.Type
     ) async throws -> Value {
+        let resolvedArguments = preparedScriptAuthenticationArguments.merging(arguments) { _, actionValue in
+            actionValue
+        }
         let result = try await webView.callAsyncJavaScript(
             script,
-            arguments: arguments,
+            arguments: resolvedArguments,
             in: nil,
             contentWorld: .page
         )
@@ -6724,6 +6779,36 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       }
     };
 
+    const extractProfileHandle = (sourceNode, triggerNode) => {
+      const roots = [sourceNode, triggerNode, document.querySelector('header'), document.querySelector('nav')]
+        .filter((root, index, values) => root && values.indexOf(root) === index);
+
+      for (const root of roots) {
+        const links = root.matches?.('a[href*="/citizens/"]')
+          ? [root]
+          : Array.from(root.querySelectorAll?.('a[href*="/citizens/"]') || []);
+
+        for (const link of links) {
+          try {
+            const url = new URL(link.getAttribute('href') || link.href, window.location.href);
+            const match = url.pathname.match(new RegExp('/citizens/([^/?#]+)', 'i'));
+            if (!match?.[1]) {
+              continue;
+            }
+
+            const handle = decodeURIComponent(match[1]).trim();
+            if (handle && !handle.includes('@')) {
+              return handle;
+            }
+          } catch {
+            continue;
+          }
+        }
+      }
+
+      return '';
+    };
+
     await new Promise(resolve => setTimeout(resolve, 200));
     const graphQLStoreCreditValue = await fetchStructuredStoreCreditValue();
     const avatarTrigger = findAvatarTrigger();
@@ -6733,12 +6818,14 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     const accountPanel = findVisibleAccountPanel();
     const storeCreditText = extractStoreCreditText(accountPanel);
     const avatarURL = extractAvatarURL(accountPanel, avatarTrigger);
+    const profileHandle = extractProfileHandle(accountPanel, avatarTrigger);
 
     return {
       accessDenied,
       graphQLStoreCreditValue: graphQLStoreCreditValue || null,
       storeCreditText: storeCreditText || null,
-      avatarURL: avatarURL || null
+      avatarURL: avatarURL || null,
+      profileHandle: profileHandle || null
     };
     """
 
@@ -7933,8 +8020,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     clickElement(hangarLogButton);
 
     const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -8142,6 +8229,265 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     };
     """
 
+    private static let prepareWBCCUCheckoutScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const requestedItems = Array.isArray(checkoutItems) ? checkoutItems : [];
+    const normalizedItems = requestedItems.map((item) => ({
+      offerID: normalizeText(item?.offerID),
+      sourceShipID: Number(item?.sourceShipID),
+      targetShipID: Number(item?.targetShipID),
+      targetSkuID: Number(item?.targetSkuID)
+    }));
+    const hasAccessDeniedMarkup =
+      document.title.toLowerCase().includes('access denied') ||
+      document.body.innerText.includes('Access denied');
+
+    if (hasAccessDeniedMarkup) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        checkoutURL: null,
+        addedOfferIDs: [],
+        failureMessage: 'The RSI cart reported access denied before checkout preparation started.',
+        debugSummary: null
+      };
+    }
+
+    const itemsAreValid = normalizedItems.length > 0 && normalizedItems.every((item) =>
+      item.offerID &&
+      Number.isFinite(item.sourceShipID) && item.sourceShipID > 0 &&
+      Number.isFinite(item.targetShipID) && item.targetShipID > 0 &&
+      Number.isFinite(item.targetSkuID) && item.targetSkuID > 0
+    );
+    if (!itemsAreValid) {
+      return {
+        accessDenied: false,
+        status: 'invalid-items',
+        checkoutURL: null,
+        addedOfferIDs: [],
+        failureMessage: 'Hangar Express could not determine the ship-upgrade metadata for every virtual-cart item.',
+        debugSummary: `requestedItems=${requestedItems.length}, normalizedItems=${normalizedItems.length}`
+      };
+    }
+
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
+    const requestHeaders = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Accept': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+    if (csrfToken) requestHeaders['x-csrf-token'] = csrfToken;
+    if (rsiToken) requestHeaders['x-rsi-token'] = rsiToken;
+    if (rsiDevice) requestHeaders['x-rsi-device'] = rsiDevice;
+
+    const clearExistingCart = async () => {
+      const clearCartQuery = `mutation ClearCartMutation($storeFront: String) {
+        store(name: $storeFront) {
+          cart {
+            mutations { clear }
+            lineItemsQties
+          }
+        }
+      }`;
+      const response = await fetch('/graphql', {
+        method: 'POST',
+        credentials: 'include',
+        headers: requestHeaders,
+        body: JSON.stringify({
+          operationName: 'ClearCartMutation',
+          query: clearCartQuery,
+          variables: { storeFront: 'pledge' }
+        })
+      });
+      const responseText = await response.text();
+      let payload = null;
+      try { payload = responseText ? JSON.parse(responseText) : null; } catch { payload = null; }
+
+      const errors = Array.isArray(payload?.errors)
+        ? payload.errors.map((entry) => normalizeText(entry?.message || JSON.stringify(entry))).filter(Boolean)
+        : [];
+      const remainingItemCount = Number(payload?.data?.store?.cart?.lineItemsQties);
+      const accessDenied = response.status === 401 || response.status === 403;
+      if (!response.ok || errors.length > 0 || !Number.isFinite(remainingItemCount) || remainingItemCount !== 0) {
+        return {
+          ok: false,
+          accessDenied,
+          failureMessage: normalizeText(
+            errors.join(' ')
+              || responseText
+              || 'RSI did not confirm that its cart was empty.'
+          ),
+          debugSummary: `cartClearMutation: httpStatus=${response.status}, remaining=${Number.isFinite(remainingItemCount) ? remainingItemCount : 'unknown'}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}`
+        };
+      }
+
+      return {
+        ok: true,
+        accessDenied: false,
+        debugSummary: `cartClearMutation: httpStatus=${response.status}, remaining=${remainingItemCount}`
+      };
+    };
+
+    const readJSONResponse = async (response) => {
+      const responseText = await response.text();
+      let payload = null;
+      try { payload = responseText ? JSON.parse(responseText) : null; } catch { payload = null; }
+      return { responseText, payload };
+    };
+    const postJSON = async (endpoint, body, label, requiresSuccessFlag = false) => {
+      const response = await fetch(endpoint, {
+        method: 'POST', credentials: 'include', headers: requestHeaders, body: JSON.stringify(body)
+      });
+      const responseBody = await readJSONResponse(response);
+      const payload = responseBody.payload;
+      if (response.status === 401 || response.status === 403) {
+        return {
+          ok: false, accessDenied: true,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseBody.responseText || `RSI rejected ${label}.`),
+          debugSummary: `${label}: httpStatus=${response.status}`
+        };
+      }
+      const hasSuccessFlag = payload && Object.prototype.hasOwnProperty.call(payload, 'success');
+      const successValue = Number(payload?.success ?? 1);
+      if (!response.ok || (requiresSuccessFlag && (!hasSuccessFlag || successValue !== 1)) || (hasSuccessFlag && successValue === 0)) {
+        return {
+          ok: false, accessDenied: false,
+          failureMessage: normalizeText(payload?.msg || payload?.code || responseBody.responseText || `RSI returned HTTP ${response.status} for ${label}.`),
+          debugSummary: `${label}: httpStatus=${response.status}, responsePreview=${normalizeText(responseBody.responseText).slice(0, 280) || 'n/a'}`
+        };
+      }
+      return { ok: true, accessDenied: false };
+    };
+
+    const cartClearResult = await clearExistingCart();
+    if (!cartClearResult.ok) {
+      return {
+        accessDenied: cartClearResult.accessDenied === true,
+        status: cartClearResult.accessDenied ? 'access-denied' : 'cart-clear-failed',
+        checkoutURL: null,
+        addedOfferIDs: [],
+        failureMessage: cartClearResult.failureMessage,
+        debugSummary: cartClearResult.debugSummary
+      };
+    }
+
+    const authTokenResponse = await postJSON('/api/account/v2/setAuthToken', {}, 'upgrade auth token setup');
+    if (!authTokenResponse.ok) {
+      return {
+        accessDenied: authTokenResponse.accessDenied,
+        status: authTokenResponse.accessDenied ? 'access-denied' : 'failed',
+        checkoutURL: null,
+        addedOfferIDs: [],
+        failureMessage: authTokenResponse.failureMessage,
+        debugSummary: authTokenResponse.debugSummary
+      };
+    }
+
+    const addToCartQuery = `mutation addToCart($from: Int!, $to: Int!) {
+      addToCart(from: $from, to: $to) { jwt }
+    }`;
+    const graphQLEndpoint = '/pledge-store/api/upgrade/v2/graphql';
+    const addedOfferIDs = [];
+
+    for (const item of normalizedItems) {
+      const contextResponse = await postJSON(
+        '/api/ship-upgrades/setContextToken',
+        {
+          fromShipId: item.sourceShipID,
+          pledgeId: null,
+          toShipId: item.targetShipID,
+          toSkuId: item.targetSkuID
+        },
+        `upgrade context setup (${item.offerID})`,
+        true
+      );
+      if (!contextResponse.ok) {
+        return {
+          accessDenied: contextResponse.accessDenied,
+          status: contextResponse.accessDenied ? 'access-denied' : 'failed',
+          checkoutURL: null,
+          addedOfferIDs,
+          failureMessage: contextResponse.failureMessage,
+          debugSummary: contextResponse.debugSummary
+        };
+      }
+
+      const targetCandidates = [item.targetSkuID, item.targetShipID]
+        .filter((id, index, values) => Number.isFinite(id) && id > 0 && values.indexOf(id) === index);
+      let upgradeToken = '';
+      let graphQLFailure = '';
+      let graphQLAccessDenied = false;
+      const attemptSummaries = [];
+
+      for (const targetID of targetCandidates) {
+        const response = await fetch(graphQLEndpoint, {
+          method: 'POST',
+          credentials: 'include',
+          headers: requestHeaders,
+          body: JSON.stringify({
+            query: addToCartQuery,
+            variables: { from: item.sourceShipID, to: targetID }
+          })
+        });
+        const responseBody = await readJSONResponse(response);
+        const errors = Array.isArray(responseBody.payload?.errors)
+          ? responseBody.payload.errors.map((entry) => normalizeText(entry?.message || JSON.stringify(entry))).filter(Boolean)
+          : [];
+        upgradeToken = responseBody.payload?.data?.addToCart?.jwt || '';
+        graphQLAccessDenied = response.status === 401 || response.status === 403;
+        graphQLFailure = normalizeText(errors.join(' ') || responseBody.responseText || 'RSI did not return an upgrade cart token.');
+        attemptSummaries.push(`${targetID}:${response.status}/${upgradeToken ? 'token' : 'no-token'}`);
+        if (graphQLAccessDenied || (response.ok && errors.length === 0 && upgradeToken)) break;
+      }
+
+      if (!upgradeToken) {
+        return {
+          accessDenied: graphQLAccessDenied,
+          status: graphQLAccessDenied ? 'access-denied' : 'failed',
+          checkoutURL: null,
+          addedOfferIDs,
+          failureMessage: graphQLFailure,
+          debugSummary: `upgradeGraphQL: offer=${item.offerID}, from=${item.sourceShipID}, targets=${attemptSummaries.join(', ')}`
+        };
+      }
+
+      const tokenResponse = await postJSON(
+        '/api/store/v2/cart/token',
+        { jwt: upgradeToken },
+        `upgrade cart token (${item.offerID})`,
+        true
+      );
+      if (!tokenResponse.ok) {
+        return {
+          accessDenied: tokenResponse.accessDenied,
+          status: tokenResponse.accessDenied ? 'access-denied' : 'failed',
+          checkoutURL: null,
+          addedOfferIDs,
+          failureMessage: tokenResponse.failureMessage,
+          debugSummary: tokenResponse.debugSummary
+        };
+      }
+
+      addedOfferIDs.push(item.offerID);
+    }
+
+    return {
+      accessDenied: false,
+      status: 'ok',
+      checkoutURL: new URL('/en/pledge/cart', window.location.origin).toString(),
+      addedOfferIDs,
+      failureMessage: null,
+      debugSummary: cartClearResult.debugSummary + ', added=' + addedOfferIDs.length + ', requested=' + normalizedItems.length
+    };
+    """
+
     private static let prepareBuybackCheckoutScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
     const cookieValue = (name) => {
@@ -8293,8 +8639,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -9165,8 +9511,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -9273,8 +9619,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -9384,8 +9730,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -9470,10 +9816,22 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     private static let authorizedDevicesExtractionScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
     const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
+    const nativeRsiTokenValue = typeof nativeRsiToken === 'string' ? nativeRsiToken : '';
+    const nativeRsiDeviceValue = typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '';
     const cookieValue = (name) => {
       const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
       const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
       return match ? decodeURIComponent(match[1]) : '';
+    };
+    const isAuthenticationFailure = (payload, responseText) => {
+      const raw = normalizeText([
+        payload?.code,
+        payload?.msg,
+        payload?.message,
+        responseText
+      ].filter(Boolean).join(' ')).toLowerCase();
+      return raw.includes('errnotauthenticated') ||
+        raw.includes('must be authenticated to reach this area');
     };
     const isPasswordConfirmationRequired = (payload, responseText) => {
       const raw = normalizeText([
@@ -9506,8 +9864,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || nativeRsiTokenValue;
+    const rsiDevice = cookieValue('_rsi_device') || nativeRsiDeviceValue;
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -9628,7 +9986,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       }
       lastResponsePreview = normalizeText(responseText).slice(0, 280);
 
-      if (response.status === 401 || response.status === 403) {
+      if (response.status === 401 || response.status === 403 || isAuthenticationFailure(payload, responseText)) {
         return {
           accessDenied: true,
           status: 'access-denied',
@@ -9703,10 +10061,22 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     private static let removeAuthorizedDeviceScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
     const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
+    const nativeRsiTokenValue = typeof nativeRsiToken === 'string' ? nativeRsiToken : '';
+    const nativeRsiDeviceValue = typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '';
     const cookieValue = (name) => {
       const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
       const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
       return match ? decodeURIComponent(match[1]) : '';
+    };
+    const isAuthenticationFailure = (payload, responseText) => {
+      const raw = normalizeText([
+        payload?.code,
+        payload?.msg,
+        payload?.message,
+        responseText
+      ].filter(Boolean).join(' ')).toLowerCase();
+      return raw.includes('errnotauthenticated') ||
+        raw.includes('must be authenticated to reach this area');
     };
     const isPasswordConfirmationRequired = (payload, responseText) => {
       const raw = normalizeText([
@@ -9743,8 +10113,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || nativeRsiTokenValue;
+    const rsiDevice = cookieValue('_rsi_device') || nativeRsiDeviceValue;
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -9834,7 +10204,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     let didConfirmPassword = false;
     let passwordConfirmationDebug = '';
 
-    if (response.status === 401 || response.status === 403) {
+    if (response.status === 401 || response.status === 403 || isAuthenticationFailure(payload, responseText)) {
       return {
         accessDenied: true,
         status: 'access-denied',
@@ -9859,7 +10229,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         }
 
         ({ response, responseText, payload } = await postRemoval());
-        if (response.status === 401 || response.status === 403) {
+        if (response.status === 401 || response.status === 403 || isAuthenticationFailure(payload, responseText)) {
           return {
             accessDenied: true,
             status: 'access-denied',
@@ -9891,10 +10261,22 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     private static let removeAuthorizedDevicesScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
     const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
+    const nativeRsiTokenValue = typeof nativeRsiToken === 'string' ? nativeRsiToken : '';
+    const nativeRsiDeviceValue = typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '';
     const cookieValue = (name) => {
       const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
       const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
       return match ? decodeURIComponent(match[1]) : '';
+    };
+    const isAuthenticationFailure = (payload, responseText) => {
+      const raw = normalizeText([
+        payload?.code,
+        payload?.msg,
+        payload?.message,
+        responseText
+      ].filter(Boolean).join(' ')).toLowerCase();
+      return raw.includes('errnotauthenticated') ||
+        raw.includes('must be authenticated to reach this area');
     };
     const isPasswordConfirmationRequired = (payload, responseText) => {
       const raw = normalizeText([
@@ -9941,8 +10323,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || nativeRsiTokenValue;
+    const rsiDevice = cookieValue('_rsi_device') || nativeRsiDeviceValue;
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -10034,7 +10416,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     for (const device of targetDevices) {
       let { response, responseText, payload } = await postRemoval(device);
-      if (response.status === 401 || response.status === 403) {
+      if (response.status === 401 || response.status === 403 || isAuthenticationFailure(payload, responseText)) {
         return {
           accessDenied: true,
           status: 'access-denied',
@@ -10062,7 +10444,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         }
 
         ({ response, responseText, payload } = await postRemoval(device));
-        if (response.status === 401 || response.status === 403) {
+        if (response.status === 401 || response.status === 403 || isAuthenticationFailure(payload, responseText)) {
           return {
             accessDenied: true,
             status: 'access-denied',
@@ -10330,8 +10712,8 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     const csrfToken = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content') || '';
-    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token');
-    const rsiDevice = cookieValue('_rsi_device');
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
     const requestHeaders = {
       'Content-Type': 'application/json;charset=UTF-8',
       'Accept': 'application/json',
@@ -10426,6 +10808,7 @@ nonisolated enum RSIStoreCreditParser {
 }
 
 private nonisolated struct AccountOverview {
+    let accountHandle: String?
     let storeCreditUSD: Decimal?
     let totalSpendUSD: Decimal?
     let avatarURL: URL?
@@ -10691,6 +11074,7 @@ private nonisolated struct RemoteAccountBalances: Decodable {
     let graphQLStoreCreditValue: String?
     let storeCreditText: String?
     let avatarURL: String?
+    let profileHandle: String?
 }
 
 private nonisolated struct RemotePrimaryOrganization: Decodable {
@@ -10737,6 +11121,7 @@ private nonisolated struct RemoteLegacyReferralPage: Decodable {
 }
 
 private nonisolated struct AccountRefreshContext {
+    let accountHandle: String?
     let avatarURL: URL?
     let primaryOrganization: AccountOrganization?
     let storeCreditUSD: Decimal?
@@ -10854,6 +11239,15 @@ private nonisolated struct RemoteBuybackCheckoutPreparation: Decodable {
     let accessDenied: Bool
     let status: String
     let checkoutURL: String?
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
+private nonisolated struct RemoteWBCCUCheckoutPreparation: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let checkoutURL: String?
+    let addedOfferIDs: [String]
     let failureMessage: String?
     let debugSummary: String?
 }

@@ -244,6 +244,7 @@ private struct RSICheckoutWebView: UIViewRepresentable {
         private var lastCookieExportRequestID = 0
         private var didLoadInitialPage = false
         private var didReportCheckoutSuccess = false
+        private var preparedScriptAuthenticationArguments: [String: Any] = [:]
         private let onAutomationLog: @MainActor @Sendable (String) -> Void
         private let onCookiesExported: @MainActor @Sendable ([SessionCookie]) -> Void
         private let onCheckoutSucceeded: @MainActor @Sendable ([SessionCookie], URL?) -> Void
@@ -281,8 +282,17 @@ private struct RSICheckoutWebView: UIViewRepresentable {
 
             didLoadInitialPage = true
             Task { @MainActor in
-                await installCookies(cookies, in: webView)
-                webView.load(URLRequest(url: initialURL))
+                let preparedSession = await RSIAuthenticatedWebSession.prepare(
+                    cookies: cookies,
+                    in: webView
+                )
+                preparedScriptAuthenticationArguments = preparedSession.scriptArguments
+                webView.load(
+                    RSIAuthenticatedWebSession.request(
+                        url: initialURL,
+                        cookies: preparedSession.cookies
+                    )
+                )
             }
         }
 
@@ -368,33 +378,8 @@ private struct RSICheckoutWebView: UIViewRepresentable {
             decisionHandler(.allow)
         }
 
-        private func installCookies(_ cookies: [SessionCookie], in webView: WKWebView) async {
-            let store = webView.configuration.websiteDataStore.httpCookieStore
-            let existingCookies = await withCheckedContinuation { continuation in
-                store.getAllCookies { cookies in
-                    continuation.resume(returning: cookies)
-                }
-            }
-
-            for cookie in existingCookies where cookie.domain.contains("robertsspaceindustries.com") {
-                await withCheckedContinuation { continuation in
-                    store.delete(cookie) {
-                        continuation.resume()
-                    }
-                }
-            }
-
-            for cookie in cookies {
-                guard let httpCookie = cookie.httpCookie else {
-                    continue
-                }
-
-                await withCheckedContinuation { continuation in
-                    store.setCookie(httpCookie) {
-                        continuation.resume()
-                    }
-                }
-            }
+        private func allCookies(from store: WKHTTPCookieStore) async -> [HTTPCookie] {
+            await RSIAuthenticatedWebSession.allCookies(from: store)
         }
 
         private func currentRSICookies() async -> [SessionCookie] {
@@ -432,7 +417,11 @@ private struct RSICheckoutWebView: UIViewRepresentable {
         }
 
         private func cookieKey(_ cookie: HTTPCookie) -> String {
-            "\(cookie.domain)|\(cookie.path)|\(cookie.name)"
+            Self.cookieKey(cookie)
+        }
+
+        private static func cookieKey(_ cookie: HTTPCookie) -> String {
+            RSIAuthenticatedWebSession.cookieKey(cookie)
         }
 
         private func shouldOpenExternally(_ url: URL) -> Bool {
@@ -473,14 +462,20 @@ private struct RSICheckoutWebView: UIViewRepresentable {
             Task { @MainActor in
                 onAutomationLog("Injecting checkout automation for \(automation.storeCreditAmount.cartCreditInputString) USD.")
             }
-            webView.evaluateJavaScript(script) { [weak self] _, error in
-                guard let error else {
+            Task { @MainActor [weak self, weak webView] in
+                guard let self, let webView else {
                     return
                 }
 
-                let message = "Checkout automation injection failed: \(error.localizedDescription)"
-                Task { @MainActor in
-                    self?.onAutomationLog(message)
+                do {
+                    _ = try await webView.callAsyncJavaScript(
+                        script,
+                        arguments: preparedScriptAuthenticationArguments,
+                        in: nil,
+                        contentWorld: .page
+                    )
+                } catch {
+                    onAutomationLog("Checkout automation injection failed: \(error.localizedDescription)")
                 }
             }
         }
@@ -1067,9 +1062,9 @@ private struct RSICheckoutWebView: UIViewRepresentable {
                   'content-type': 'application/json'
                 };
                 const csrf = csrfToken();
-                const rsiToken = cookieValue('Rsi-Token');
-                const rsiDevice = cookieValue('_rsi_device');
-                const accountAuth = cookieValue('Rsi-Account-Auth');
+                const rsiToken = cookieValue('Rsi-Token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+                const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
+                const accountAuth = cookieValue('Rsi-Account-Auth') || (typeof nativeRsiAccountAuth === 'string' ? nativeRsiAccountAuth : '');
                 if (csrf) {
                   headers['x-csrf-token'] = csrf;
                 }

@@ -125,7 +125,9 @@ struct BuybackView: View {
                 }
             }
             .id(appLanguageRawValue)
-            .task(id: hangarItemLanguageRawValue) {
+            .task(
+                id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
+            ) {
                 await loadItemTranslationDictionary()
             }
             .onChange(of: isSearchPresented) { _, isPresented in
@@ -231,7 +233,10 @@ struct BuybackView: View {
     }
 
     private func loadItemTranslationDictionary() async {
-        await itemTranslationState.loadDictionary(for: hangarItemLanguageRawValue)
+        await itemTranslationState.loadDictionary(
+            for: hangarItemLanguageRawValue,
+            refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
+        )
     }
 
     private func matchesSearchFilters(for item: BuybackPledge) -> Bool {
@@ -269,7 +274,10 @@ struct BuybackView: View {
 
         do {
             let preparation = try await appModel.prepareBuybackCheckout(for: itemGroup.checkoutPledge)
-            let cookies = appModel.session?.cookies ?? preparation.updatedCookies
+            let cookies = RSISessionCookieSet.merging(
+                savedCookies: appModel.session?.cookies ?? [],
+                refreshedCookies: preparation.updatedCookies
+            )
             checkoutContext = RSICheckoutContext(
                 itemTitle: itemGroup.representative.title,
                 checkoutURL: preparation.checkoutURL,

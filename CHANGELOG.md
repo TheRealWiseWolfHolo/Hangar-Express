@@ -1,5 +1,52 @@
 # Changelog
 
+## v1.0.9 (In Progress)
+
+### Added
+- Added a Beta badge and one-time experimental-feature disclaimer before opening WBCCU Deals for the first time.
+- Added an Apple Intelligence-inspired left-to-right reveal when Hangar item text changes from English to a translated language, including a subtle multicolor luminous edge and Reduce Motion support.
+- Added a translation-method chooser when selecting a translated Hangar item language and after upgrading, with clear Local and Cloud explanations, the current choice preserved, and a reminder that the method can be changed later in Settings.
+- Added a WBCCU Deals tool that displays current StarCitizen-Info Warbond upgrade offers with ship artwork, standard and Warbond values, savings, and feed freshness.
+- Added an Event Calendar tool with official CIG and Bar Citizen dates from StarCitizen-Info, agenda and location filters, in-app event sources, sharing, Calendar export, and an offline last-known-good feed.
+- Added clearly labeled anticipated dates for nine major annual Star Citizen events, projected from their official 2025 month/day windows.
+
+### Changed
+- Opens the item-translation method chooser at full height so every explanation is immediately visible, with Cloud presented first as the blue primary choice and Local shown as a neutral grey alternative.
+- Caches the Account profile-background choices locally and reuses them until the fleet inventory changes, avoiding repeated full-fleet grouping and sorting when Account is opened.
+- Silently refreshes the hosted Hangar item translation dictionary whenever the app launches or returns to the foreground while a translated item language is selected; English skips the refresh entirely.
+- Started the `1.0.9` release branch and release-note tracking for ongoing work.
+- Set the app release metadata to version 1.0.9, build 45.
+- Began the Early Access overhaul with a compact Settings status row and moved the profile badge preference into Manage Plans, while preserving existing StoreKit product IDs and saved entitlement keys so current access carries forward after updating.
+- Removed duplicate lifetime-plan details from the Early Access status card so lifetime owners see one concise Lifetime Access line.
+- Kept Manage Plans card fills and borders visible when expanding the sheet to full height.
+- Shortened the Early Access notice by removing its redundant affiliation footer.
+- Simplified the Early Access feature comparison labels and values for faster scanning.
+- Reworded Manage Plans headings, restore controls, guidance, and StoreKit status messages to avoid purchase terminology.
+- Clarified that Early Access support funds Hangar Express only, does not buy anything from CIG or RSI, and does not guarantee specific or continued app features.
+- Reframed the Early Access status message around Hangar Express being free and supporter contributions being optional.
+- Identified Hangar Express as open-source software in its legal disclaimer and removed the Official RSI Website link.
+- Replaced the broken WBCCU store link with an in-app cart that clears the RSI cart through its authenticated cart mutation, verifies it is empty, prepares only the selected source-to-Warbond upgrades, and opens checkout inside Hangar Express.
+- Simplified WBCCU deal cards by removing redundant availability and new-money labels and shortening the cart status text.
+- Simplified the WBCCU footer to show only the feed's last-updated time above the cart controls.
+- Hid WBCCU checkout controls for an empty cart and made them float at the bottom of the screen while the cart contains upgrades.
+- Added a compact red Clear Cart action to the floating WBCCU checkout controls.
+- Reorganized Tools into a compact two-column grid with icon tiles and concise titles.
+- Added persistent drag reordering to the Tools grid after a deliberate one-second hold.
+- Renamed the Tools grid entries with shorter, clearer English and Simplified Chinese labels.
+- Moved cloud terminology generation into a durable background queue and made the app upload up to four batches in parallel, so catalog-term submissions finish quickly on the phone while generation and retry work continue in the cloud.
+- Simplified the Cloud Review privacy message to clearly state that only text needing translation is uploaded and that uploads contain no personally identifiable information.
+- Reduced Cloud Review upload latency by sending validated text directly to Remote Queues in batches of up to 50, leaving every database lookup and AI task to the background consumer, and hiding the upload progress bar as soon as queueing completes.
+
+### Fixed
+- Unified RSI browser authentication for buy-back checkout, WBCCU checkout, device management, account actions, and visible checkout pages so HttpOnly launcher tokens are supplied consistently to navigation and scripted requests.
+- Dismissed the refresh progress overlay one second after its final 100% completion update, instead of leaving a completed card visible while background refresh work finishes.
+- Fixed valid RSI organizations appearing unavailable when launcher authentication omitted the username by resolving the citizen handle from the authenticated account menu, saving that identity for later refreshes, and retaining the last successfully loaded organization during temporary lookup failures.
+- Fixed intermittent signed-out WBCCU checkout pages by carrying the freshly prepared RSI session into the in-app browser, verifying WebKit retained its cookies, and attaching them to the first cart request.
+- Moved on-device translation cache encoding and atomic file writes off the main thread, coalesced intermediate saves, and added ordered completion and background flushes so large hangars stay responsive without changing existing cache data.
+- Fixed tool reordering so the selected icon follows the drag while surrounding icons animate into place, instead of lifting the entire Tools section.
+- Fixed the dragged tool remaining enlarged after release and removed animation lag from finger tracking. Tool tiles now grow throughout the full one-second hold, provide a haptic cue when reordering activates, use a scroll-cooperative recognizer before activation, and disable page scrolling while an icon is being dragged.
+- Fixed Logged-In Device Management for valid RSI sessions whose authentication cookies are HttpOnly by supplying the native session tokens to device requests, while treating RSI's HTTP 200 `ErrNotAuthenticated` response as an expired session that requires sign-in.
+
 ## v1.0.8 (In Progress)
 
 ### Added

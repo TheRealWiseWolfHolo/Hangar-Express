@@ -355,6 +355,7 @@ nonisolated struct RSIShipCatalog: Sendable {
     let ships: [Ship]
     let manufacturers: [Manufacturer]
     let storeUpgradeOffers: [StoreUpgradeOffer]
+    let generatedAt: Date?
 
     private let shipsByKey: [String: Ship]
     private let mirroredImageURLsBySource: [String: URL]
@@ -364,11 +365,13 @@ nonisolated struct RSIShipCatalog: Sendable {
     init(
         ships: [Ship],
         manufacturers: [Manufacturer] = [],
-        storeUpgradeOffers: [StoreUpgradeOffer] = []
+        storeUpgradeOffers: [StoreUpgradeOffer] = [],
+        generatedAt: Date? = nil
     ) {
         self.ships = ships
         self.manufacturers = manufacturers
         self.storeUpgradeOffers = storeUpgradeOffers
+        self.generatedAt = generatedAt
 
         var keyedShips: [String: Ship] = [:]
         var mirroredImages: [String: URL] = [:]
@@ -502,7 +505,8 @@ nonisolated struct HostedShipCatalogClient: Sendable {
                 )
             },
             manufacturers: payload.manufacturers.map { $0.catalogManufacturer },
-            storeUpgradeOffers: payload.storeUpgradeOffers.compactMap(\.catalogOffer)
+            storeUpgradeOffers: payload.storeUpgradeOffers.compactMap(\.catalogOffer),
+            generatedAt: payload.generatedAt
         )
     }
 
@@ -1150,6 +1154,9 @@ nonisolated struct HostedLimitedShipSaleClient: Sendable {
 public nonisolated enum HostedShipFeedEndpoints {
     public static let primaryBaseURL = URL(string: "https://starcitizen-info.remote.example.invalid")!
     public static let fallbackBaseURL = URL(string: "https://fallback.example.invalid")!
+    static let cloudTranslationBaseURL = URL(
+        string: "https://hangar-express-translations.liuchen2004.remote.example.invalid"
+    )!
 
     public static let catalogURLs: [URL] = [
         primaryBaseURL.appendingPathComponent("ships.json"),
@@ -1166,12 +1173,20 @@ public nonisolated enum HostedShipFeedEndpoints {
         fallbackBaseURL.appendingPathComponent("limited-ships.json")
     ]
 
+    public static let eventCalendarURLs: [URL] = [
+        fallbackBaseURL.appendingPathComponent("events.json"),
+        primaryBaseURL.appendingPathComponent("events.json")
+    ]
+
     static func itemTranslationURLs(for language: HangarItemLanguage) -> [URL] {
         guard let locale = language.translationLocaleIdentifier else {
             return []
         }
 
         return [
+            cloudTranslationBaseURL
+                .appendingPathComponent("item-translations")
+                .appendingPathComponent("\(locale).json"),
             primaryBaseURL
                 .appendingPathComponent("item-translations")
                 .appendingPathComponent("\(locale).json"),
@@ -1463,18 +1478,31 @@ private nonisolated struct RemoteHostedShipDetail: Decodable {
 }
 
 private nonisolated struct RemoteHostedShipCatalogPayload: Decodable {
+    let generatedAt: Date?
     let manufacturers: [RemoteHostedManufacturer]
     let ships: [RemoteHostedShip]
     let storeUpgradeOffers: [RemoteHostedStoreUpgradeOffer]
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        generatedAt = try container.decodeIfPresent(String.self, forKey: .generatedAt)
+            .flatMap(Self.parseISO8601Date)
         manufacturers = try container.decodeIfPresent([RemoteHostedManufacturer].self, forKey: .manufacturers) ?? []
         ships = try container.decode([RemoteHostedShip].self, forKey: .ships)
         storeUpgradeOffers = try container.decodeIfPresent(
             [RemoteHostedStoreUpgradeOffer].self,
             forKey: .storeUpgradeOffers
         ) ?? []
+    }
+
+    private static func parseISO8601Date(_ rawValue: String) -> Date? {
+        let fractionalFormatter = ISO8601DateFormatter()
+        fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractionalFormatter.date(from: rawValue) {
+            return date
+        }
+
+        return ISO8601DateFormatter().date(from: rawValue)
     }
 
     func manufacturer(named name: String?, slug: String?) -> RSIShipCatalog.Manufacturer? {
@@ -1492,6 +1520,7 @@ private nonisolated struct RemoteHostedShipCatalogPayload: Decodable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case generatedAt
         case manufacturers
         case ships
         case storeUpgradeOffers

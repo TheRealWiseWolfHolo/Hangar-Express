@@ -242,7 +242,9 @@ struct HangarDashboardView: View {
                 }
             }
             .id(appLanguageRawValue)
-            .task(id: hangarItemLanguageRawValue) {
+            .task(
+                id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
+            ) {
                 await loadItemTranslationDictionary()
             }
             .task(id: hangarImagePrefetchID(for: visiblePackageGroups)) {
@@ -546,7 +548,10 @@ struct HangarDashboardView: View {
     }
 
     private func loadItemTranslationDictionary() async {
-        await itemTranslationState.loadDictionary(for: hangarItemLanguageRawValue)
+        await itemTranslationState.loadDictionary(
+            for: hangarItemLanguageRawValue,
+            refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
+        )
     }
 
     private func matchesSearchFilters(for package: HangarPackage) -> Bool {
