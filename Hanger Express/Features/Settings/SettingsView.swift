@@ -48,7 +48,6 @@ private struct CloudTranslationCoverage {
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
-    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
     @AppStorage(HangarItemTranslationMissMode.storageKey) private var itemTranslationMissModeRawValue = HangarItemTranslationMissMode.onDevice.rawValue
     @AppStorage(AppAppearance.storageKey) private var appAppearanceRawValue = AppAppearance.system.rawValue
     @AppStorage(SyncPreferences.workerCountKey) private var syncWorkerCount = Double(SyncPreferences.defaultWorkerCount)
@@ -86,24 +85,18 @@ struct SettingsView: View {
                 )
 
                 Section {
-                    Picker("App Language", selection: $appLanguageRawValue) {
+                    Picker("Language", selection: $appLanguageRawValue) {
                         ForEach(AppLanguage.allCases) { language in
                             language.label
                                 .tag(language.rawValue)
                         }
                     }
                     .pickerStyle(.menu)
-
-                    Picker("Item Language", selection: $hangarItemLanguageRawValue) {
-                        ForEach(HangarItemLanguage.allCases) { language in
-                            language.label
-                                .tag(language.rawValue)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .onChange(of: hangarItemLanguageRawValue) { _, newValue in
+                    .onChange(of: appLanguageRawValue) { _, newValue in
                         handleItemLanguageChange(
-                            HangarItemLanguage.resolved(from: newValue)
+                            HangarItemLanguage.resolved(
+                                forAppLanguageRawValue: newValue
+                            )
                         )
                     }
 
@@ -119,9 +112,7 @@ struct SettingsView: View {
                 }
 
                 if RemoteHangarItemTranslationRollout.isEnabled,
-                   HangarItemLanguage.resolved(
-                       from: hangarItemLanguageRawValue
-                   ) == .simplifiedChinese {
+                   resolvedItemLanguage == .simplifiedChinese {
                     Section {
                         Picker(
                             "Translation Mode",
@@ -158,10 +149,10 @@ struct SettingsView: View {
                                 }
                             )
                             .task(
-                                id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
+                                id: "\(resolvedItemLanguage.rawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
                             ) {
                                 await itemTranslationState.loadDictionary(
-                                    for: hangarItemLanguageRawValue,
+                                    for: resolvedItemLanguage.rawValue,
                                     refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
                                 )
                             }
@@ -501,13 +492,19 @@ struct SettingsView: View {
         cloudDictionaryRefreshState = .refreshing
         do {
             try await itemTranslationState.refreshDictionary(
-                for: hangarItemLanguageRawValue
+                for: resolvedItemLanguage.rawValue
             )
             appModel.didRefreshHostedItemTranslationDictionary()
             cloudDictionaryRefreshState = .succeeded(.now)
         } catch {
             cloudDictionaryRefreshState = .failed(error.localizedDescription)
         }
+    }
+
+    private var resolvedItemLanguage: HangarItemLanguage {
+        HangarItemLanguage.resolved(
+            forAppLanguageRawValue: appLanguageRawValue
+        )
     }
 }
 

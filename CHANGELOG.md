@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.0.10 (In Progress)
+
+### English
+
+- Manage trusted devices directly in Hangar Express. Verification codes, device lists, and device removal now stay inside the app without opening a browser.
+- Character Repair now works with RSI's latest account system. The reason is optional, Issue Council links are supported, and the app shows the one-hour waiting period after a request.
+- One Language setting now controls both the app interface and item names across Hangar, Fleet, and Buy Back. Your Cloud or Local translation choice is also preserved when updating the app.
+- Buy Back item names and contents are now included in Cloud translation review while personal account information remains excluded.
+- Typing, Chinese input, and searching feel smoother, and a new keyboard button makes it easy to dismiss the keyboard.
+- The Account Tools section has a cleaner layout, with clear beta labels for Trusted Devices and Character Repair.
+- Fixed missing online catalogue and translation data, inconsistent ship roles between Fleet cards and ship details, and unclear WBCCU empty-state wording.
+
+### 简体中文
+
+- 现在可直接在机库通内管理受信任设备。验证码、设备列表和移除设备均可在应用内完成，无需打开浏览器。
+- 角色修复现已适配 RSI 最新的账户系统。修复原因可以留空，也可填写 Issue Council 链接；提交后，应用会显示一小时等待时间。
+- 现在只需一个“语言”设置，即可同时控制应用界面以及机库、舰队和回购中的物品名称。更新应用后，云端或本地翻译方式也会继续保留。
+- 回购物品名称及其包含内容现已加入云端翻译审核，同时仍会排除个人账户信息。
+- 优化了英文与中文输入、键盘弹出和搜索时的流畅度，并新增了便捷的收起键盘按钮。
+- 账户工具区域采用更简洁的布局，并为受信任设备和角色修复添加了清晰的测试版标识。
+- 修复了在线舰船目录和翻译数据缺失、舰队卡片与舰船详情定位不一致，以及 WBCCU 空状态说明不够清晰的问题。
+
 ## v1.0.9 (In Progress)
 
 ### Added

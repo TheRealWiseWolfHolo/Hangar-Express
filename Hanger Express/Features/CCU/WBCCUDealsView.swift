@@ -131,7 +131,7 @@ struct WBCCUDealsView: View {
                     ContentUnavailableView(
                         "No WBCCU Deals",
                         systemImage: "tag.slash",
-                        description: Text("StarCitizen-Info is not reporting any available Warbond CCU offers right now.")
+                        description: Text("No Warbond CCU offers are available right now.")
                     )
                     .padding(.vertical, 44)
                 } else {

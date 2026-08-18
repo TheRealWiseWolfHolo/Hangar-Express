@@ -586,19 +586,22 @@ final class LiveHangarRepository: HangarRepository {
 
     func requestCharacterRepair(
         for session: UserSession,
-        password: String
+        reason: String,
+        issueCouncilURL: String?
     ) async throws -> CharacterRepairResult {
         if session.authMode == .developerPreview {
             return try await previewRepository.requestCharacterRepair(
                 for: session,
-                password: password
+                reason: reason,
+                issueCouncilURL: issueCouncilURL
             )
         }
 
         try validate(session: session)
         return try await browser.requestCharacterRepair(
             using: session.cookies,
-            password: password
+            reason: reason,
+            issueCouncilURL: issueCouncilURL
         )
     }
 
@@ -703,6 +706,29 @@ final class LiveHangarRepository: HangarRepository {
 
         try validate(session: session)
         return try await browser.fetchAuthorizedDevices(using: session.cookies, password: password)
+    }
+
+    func requestAuthorizedDevicesVerificationCode(
+        for session: UserSession
+    ) async throws -> [SessionCookie] {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.requestAuthorizedDevicesVerificationCode(for: session)
+        }
+
+        try validate(session: session)
+        return try await browser.requestAuthorizedDevicesVerificationCode(using: session.cookies)
+    }
+
+    func verifyAuthorizedDevices(
+        for session: UserSession,
+        code: String
+    ) async throws -> [SessionCookie] {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.verifyAuthorizedDevices(for: session, code: code)
+        }
+
+        try validate(session: session)
+        return try await browser.verifyAuthorizedDevices(using: session.cookies, code: code)
     }
 
     func removeAuthorizedDevice(
@@ -3343,12 +3369,29 @@ private struct RemoteCharacterRepairExecution: Decodable {
     let status: String
     let failureMessage: String?
     let debugSummary: String?
+    let remainingSeconds: Int?
 }
 
 private struct RemoteAuthorizedDevicesLookup: Decodable {
     let accessDenied: Bool
+    let verificationRequired: Bool
     let status: String
     let devices: [RemoteAuthorizedDevice]
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
+private struct RemoteAuthorizedDevicesVerification: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
+private struct RemoteAuthorizedDeviceRemovalResult: Decodable {
+    let accessDenied: Bool
+    let verificationRequired: Bool
+    let status: String
     let failureMessage: String?
     let debugSummary: String?
 }
@@ -4859,18 +4902,18 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     fileprivate func requestCharacterRepair(
         using cookies: [SessionCookie],
-        password: String
+        reason: String,
+        issueCouncilURL: String?
     ) async throws -> CharacterRepairResult {
-        let url = try storefrontURL(path: "/en/account/reset")
+        let url = try storefrontURL(path: "/en/account/settings/character-repair")
         try await prepareWebView(with: cookies)
         try await load(url: url)
 
         let result = try await evaluate(
             script: Self.requestCharacterRepairScript,
             arguments: [
-                "reason": "Character reset",
-                "issueCouncilURL": "",
-                "currentPassword": password
+                "reason": reason,
+                "issueCouncilURL": issueCouncilURL ?? ""
             ],
             as: RemoteCharacterRepairExecution.self
         )
@@ -4895,6 +4938,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         return CharacterRepairResult(
             wasSuccessful: shouldTreatAsSuccess,
             failureMessage: failureMessage,
+            cooldownRemainingSeconds: result.remainingSeconds,
             updatedCookies: await currentRSICookies()
         )
     }
@@ -5134,17 +5178,14 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     fileprivate func fetchAuthorizedDevices(
         using cookies: [SessionCookie],
-        password: String?
+        password _: String?
     ) async throws -> [AuthorizedDevice] {
-        let url = try storefrontURL(path: "/en/account/security/devices")
+        let url = try storefrontURL(path: "/en/account/settings/login-security/trusted_devices")
         try await prepareWebView(with: cookies)
         try await load(url: url)
 
         let result = try await evaluate(
             script: Self.authorizedDevicesExtractionScript,
-            arguments: [
-                "currentPassword": password ?? ""
-            ],
             as: RemoteAuthorizedDevicesLookup.self
         )
 
@@ -5152,36 +5193,60 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             throw LiveHangarRepositoryError.sessionExpired
         }
 
+        if result.verificationRequired {
+            throw HangarAccountActionError.authorizedDevicesVerificationRequired
+        }
+
         guard result.status == "ok" else {
-            let failureMessage = [result.failureMessage, result.debugSummary]
-                .compactMap { value in
-                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                }
-                .joined(separator: "\n\n")
-                .nilIfEmpty ?? "RSI did not return the authorized device list."
+            let failureMessage = Self.userFacingDeviceManagementFailure(
+                result.failureMessage,
+                debugSummary: result.debugSummary,
+                fallback: "RSI did not return the authorized device list."
+            )
             throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
         }
 
         return result.devices.map(\.domainModel)
     }
 
-    fileprivate func removeAuthorizedDevice(
+    fileprivate func requestAuthorizedDevicesVerificationCode(
+        using cookies: [SessionCookie]
+    ) async throws -> [SessionCookie] {
+        try await performAuthorizedDevicesVerification(
+            using: cookies,
+            operation: "request",
+            code: ""
+        )
+    }
+
+    fileprivate func verifyAuthorizedDevices(
         using cookies: [SessionCookie],
-        device: AuthorizedDevice,
-        password: String?
-    ) async throws {
-        let url = try storefrontURL(path: "/en/account/security/devices")
+        code: String
+    ) async throws -> [SessionCookie] {
+        try await performAuthorizedDevicesVerification(
+            using: cookies,
+            operation: "verify",
+            code: code
+        )
+    }
+
+    private func performAuthorizedDevicesVerification(
+        using cookies: [SessionCookie],
+        operation: String,
+        code: String
+    ) async throws -> [SessionCookie] {
+        let url = try storefrontURL(path: "/en/account/settings/login-security/trusted_devices")
         try await prepareWebView(with: cookies)
         try await load(url: url)
 
         let result = try await evaluate(
-            script: Self.removeAuthorizedDeviceScript,
+            script: Self.authorizedDevicesVerificationScript,
             arguments: [
-                "deviceID": device.id,
-                "deviceName": device.displayName,
-                "currentPassword": password ?? ""
+                "operation": operation,
+                "verificationCode": code,
+                "verificationPermission": AuthorizedDevicesVerification.permission
             ],
-            as: RemoteAuthorizedDeviceRemoval.self
+            as: RemoteAuthorizedDevicesVerification.self
         )
 
         if result.accessDenied {
@@ -5189,12 +5254,50 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         }
 
         guard result.status == "ok" else {
-            let failureMessage = [result.failureMessage, result.debugSummary]
-                .compactMap { value in
-                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                }
-                .joined(separator: "\n\n")
-                .nilIfEmpty ?? "RSI did not remove the selected authorized device."
+            let failureMessage = Self.userFacingDeviceManagementFailure(
+                result.failureMessage,
+                debugSummary: result.debugSummary,
+                fallback: operation == "request"
+                    ? "RSI did not send the verification code."
+                    : "RSI did not accept the verification code."
+            )
+            throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
+        }
+
+        return await currentRSICookies()
+    }
+
+    fileprivate func removeAuthorizedDevice(
+        using cookies: [SessionCookie],
+        device: AuthorizedDevice,
+        password _: String?
+    ) async throws {
+        let url = try storefrontURL(path: "/en/account/settings/login-security/trusted_devices")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let result = try await evaluate(
+            script: Self.authorizedDeviceRemovalScript,
+            arguments: [
+                "deviceID": device.id
+            ],
+            as: RemoteAuthorizedDeviceRemovalResult.self
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        if result.verificationRequired {
+            throw HangarAccountActionError.authorizedDevicesVerificationRequired
+        }
+
+        guard result.status == "ok" else {
+            let failureMessage = Self.userFacingDeviceManagementFailure(
+                result.failureMessage,
+                debugSummary: result.debugSummary,
+                fallback: "RSI did not remove the selected logged-in device."
+            )
             throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
         }
     }
@@ -5232,14 +5335,42 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         }
 
         guard result.status == "ok" else {
-            let failureMessage = [result.failureMessage, result.debugSummary]
-                .compactMap { value in
-                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                }
-                .joined(separator: "\n\n")
-                .nilIfEmpty ?? "RSI did not remove the selected authorized devices."
+            let failureMessage = Self.userFacingDeviceManagementFailure(
+                result.failureMessage,
+                debugSummary: result.debugSummary,
+                fallback: "RSI did not remove the selected authorized devices."
+            )
             throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
         }
+    }
+
+    nonisolated static func userFacingDeviceManagementFailure(
+        _ failureMessage: String?,
+        debugSummary: String?,
+        fallback: String
+    ) -> String {
+        let message = failureMessage?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedMessage = message?.lowercased() ?? ""
+        let returnedHTML = normalizedMessage.hasPrefix("<!doctype html") ||
+            normalizedMessage.hasPrefix("<html") ||
+            normalizedMessage.contains("<head>") ||
+            normalizedMessage.contains("<body")
+
+        if returnedHTML {
+            let status = debugSummary?
+                .components(separatedBy: CharacterSet.decimalDigits.inverted)
+                .first(where: { $0.count == 3 })
+            let statusSuffix = status.map { " (HTTP \($0))" } ?? ""
+            return "RSI device management is temporarily unavailable\(statusSuffix). Try again later."
+        }
+
+        return [message, debugSummary]
+            .compactMap { value in
+                value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            }
+            .joined(separator: "\n\n")
+            .nilIfEmpty ?? fallback
     }
 
     fileprivate func currentRSICookies() async -> [SessionCookie] {
@@ -9813,7 +9944,322 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     };
     """
 
+    private static let authorizedDevicesVerificationScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const operationValue = typeof operation === 'string' ? operation : '';
+    const codeValue = typeof verificationCode === 'string' ? verificationCode.replace(/\\D/g, '').slice(0, 6) : '';
+    const permissionValue = typeof verificationPermission === 'string' ? verificationPermission : 'settings_verified';
+    const nativeRsiTokenValue = typeof nativeRsiToken === 'string' ? nativeRsiToken : '';
+    const nativeRsiDeviceValue = typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '';
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || nativeRsiTokenValue;
+    const rsiDevice = cookieValue('_rsi_device') || nativeRsiDeviceValue;
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    const headers = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+    if (rsiToken) headers['x-rsi-token'] = rsiToken;
+    if (rsiDevice) headers['x-rsi-device'] = rsiDevice;
+    if (csrfToken) headers['x-csrf-token'] = csrfToken;
+
+    const isAuthenticationFailure = (payload, responseText) => {
+      const raw = normalizeText([payload?.code, payload?.msg, payload?.message, responseText].filter(Boolean).join(' ')).toLowerCase();
+      return raw.includes('errnotauthenticated') || raw.includes('must be authenticated');
+    };
+
+    if (operationValue === 'verify' && codeValue.length !== 6) {
+      return {
+        accessDenied: false,
+        status: 'invalid-code',
+        failureMessage: 'Enter the six-digit verification code from RSI.',
+        debugSummary: null
+      };
+    }
+
+    const endpoint = operationValue === 'request'
+      ? '/api/settings/RequestCodeChallenge'
+      : '/api/settings/VerifyCodeChallenge';
+    const body = operationValue === 'request'
+      ? {}
+      : { code: codeValue, permission: permissionValue };
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify(body)
+    });
+    const responseText = await response.text();
+    let payload = null;
+    try {
+      payload = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      payload = null;
+    }
+
+    if (response.status === 401 || isAuthenticationFailure(payload, responseText)) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        failureMessage: normalizeText(payload?.msg || payload?.message || payload?.code || 'RSI rejected the authenticated session.'),
+        debugSummary: `httpStatus=${response.status}`
+      };
+    }
+
+    const requestSucceeded = response.ok && Number(payload?.success ?? 0) === 1;
+    const challengeSucceeded = operationValue === 'request' || payload?.data?.success === true;
+    if (!requestSucceeded || !challengeSucceeded) {
+      return {
+        accessDenied: false,
+        status: 'failed',
+        failureMessage: normalizeText(payload?.data?.message || payload?.msg || payload?.message || payload?.code || (operationValue === 'request' ? 'RSI did not send the verification code.' : 'That verification code was not accepted. Use the newest RSI code and try again.')),
+        debugSummary: `operation=${operationValue || 'unknown'}, httpStatus=${response.status}`
+      };
+    }
+
+    return {
+      accessDenied: false,
+      status: 'ok',
+      failureMessage: null,
+      debugSummary: `operation=${operationValue}, httpStatus=${response.status}`
+    };
+    """
+
     private static let authorizedDevicesExtractionScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const nativeRsiTokenValue = typeof nativeRsiToken === 'string' ? nativeRsiToken : '';
+    const nativeRsiDeviceValue = typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '';
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || nativeRsiTokenValue;
+    const rsiDevice = cookieValue('_rsi_device') || nativeRsiDeviceValue;
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    const headers = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+    if (rsiToken) headers['x-rsi-token'] = rsiToken;
+    if (rsiDevice) headers['x-rsi-device'] = rsiDevice;
+    if (csrfToken) headers['x-csrf-token'] = csrfToken;
+
+    const failureText = (payload, responseText) => normalizeText([
+      payload?.code,
+      payload?.msg,
+      payload?.message,
+      responseText
+    ].filter(Boolean).join(' ')).toLowerCase();
+    const isAuthenticationFailure = (payload, responseText) => {
+      const raw = failureText(payload, responseText);
+      return raw.includes('errnotauthenticated') || raw.includes('must be authenticated');
+    };
+    const isVerificationFailure = (payload, responseText, status) => {
+      if (status === 403) return true;
+      const raw = failureText(payload, responseText);
+      return raw.includes('settings_verified') || raw.includes('verification') || raw.includes('permission');
+    };
+
+    const devices = [];
+    const seenDeviceIDs = new Set();
+    let page = 1;
+    let pageCount = 1;
+    let firstResponseStatus = 0;
+    let lastResponsePreview = '';
+
+    while (page <= pageCount && page <= 50) {
+      const response = await fetch('/api/security/devices/list', {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: JSON.stringify({ page })
+      });
+      const responseText = await response.text();
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        payload = null;
+      }
+      if (page === 1) firstResponseStatus = response.status;
+      lastResponsePreview = normalizeText(responseText).slice(0, 280);
+
+      if (response.status === 401 || isAuthenticationFailure(payload, responseText)) {
+        return {
+          accessDenied: true,
+          verificationRequired: false,
+          status: 'access-denied',
+          devices: [],
+          failureMessage: normalizeText(payload?.msg || payload?.message || payload?.code || 'RSI rejected the trusted-device request.'),
+          debugSummary: `httpStatus=${response.status}`
+        };
+      }
+
+      if (isVerificationFailure(payload, responseText, response.status)) {
+        return {
+          accessDenied: false,
+          verificationRequired: true,
+          status: 'verification-required',
+          devices: [],
+          failureMessage: null,
+          debugSummary: `httpStatus=${response.status}`
+        };
+      }
+
+      if (!response.ok || Number(payload?.success ?? 0) !== 1) {
+        return {
+          accessDenied: false,
+          verificationRequired: false,
+          status: 'failed',
+          devices: [],
+          failureMessage: normalizeText(payload?.msg || payload?.message || payload?.code || 'RSI did not return the trusted-device list.'),
+          debugSummary: `httpStatus=${response.status}, responsePreview=${lastResponsePreview || 'n/a'}`
+        };
+      }
+
+      const data = payload?.data || {};
+      const resultset = Array.isArray(data.resultset) ? data.resultset : [];
+      for (const item of resultset) {
+        const id = normalizeText(item?.id);
+        if (!id || seenDeviceIDs.has(id)) continue;
+        seenDeviceIDs.add(id);
+        devices.push({
+          id,
+          name: normalizeText(item?.name),
+          type: normalizeText(item?.device_type || item?.type) || null,
+          createdAtLabel: normalizeText(item?.time_created || item?.created_at) || null,
+          duration: normalizeText(item?.duration) || null,
+          isCurrent: Boolean(item?.is_current || item?.current)
+        });
+      }
+
+      const parsedPage = Number.parseInt(data.page || page, 10);
+      const parsedPageCount = Number.parseInt(data.pagecount || pageCount, 10);
+      page = Number.isFinite(parsedPage) ? parsedPage + 1 : page + 1;
+      pageCount = Number.isFinite(parsedPageCount) && parsedPageCount > 0 ? parsedPageCount : pageCount;
+    }
+
+    return {
+      accessDenied: false,
+      verificationRequired: false,
+      status: 'ok',
+      devices,
+      failureMessage: null,
+      debugSummary: `httpStatus=${firstResponseStatus}, deviceCount=${devices.length}`
+    };
+    """
+
+    private static let authorizedDeviceRemovalScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const deviceIDValue = normalizeText(typeof deviceID === 'string' ? deviceID : '');
+    const numericDeviceID = Number.parseInt(deviceIDValue, 10);
+    const nativeRsiTokenValue = typeof nativeRsiToken === 'string' ? nativeRsiToken : '';
+    const nativeRsiDeviceValue = typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '';
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || nativeRsiTokenValue;
+    const rsiDevice = cookieValue('_rsi_device') || nativeRsiDeviceValue;
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    const headers = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+    if (rsiToken) headers['x-rsi-token'] = rsiToken;
+    if (rsiDevice) headers['x-rsi-device'] = rsiDevice;
+    if (csrfToken) headers['x-csrf-token'] = csrfToken;
+
+    const failureText = (payload, responseText) => normalizeText([
+      payload?.code,
+      payload?.msg,
+      payload?.message,
+      payload?.data?.message,
+      responseText
+    ].filter(Boolean).join(' ')).toLowerCase();
+    const isAuthenticationFailure = (payload, responseText) => {
+      const raw = failureText(payload, responseText);
+      return raw.includes('errnotauthenticated') || raw.includes('must be authenticated');
+    };
+    const isVerificationFailure = (payload, responseText, status) => {
+      if (status === 403) return true;
+      const raw = failureText(payload, responseText);
+      return raw.includes('settings_verified') || raw.includes('verification') || raw.includes('permission');
+    };
+
+    if (!Number.isSafeInteger(numericDeviceID) || numericDeviceID <= 0) {
+      return {
+        accessDenied: false,
+        verificationRequired: false,
+        status: 'invalid-device',
+        failureMessage: 'RSI returned an invalid logged-in device identifier.',
+        debugSummary: null
+      };
+    }
+
+    const response = await fetch('/api/security/device/delete', {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify({ id: numericDeviceID })
+    });
+    const responseText = await response.text();
+    let payload = null;
+    try {
+      payload = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      payload = null;
+    }
+
+    if (response.status === 401 || isAuthenticationFailure(payload, responseText)) {
+      return {
+        accessDenied: true,
+        verificationRequired: false,
+        status: 'access-denied',
+        failureMessage: normalizeText(payload?.msg || payload?.message || payload?.code || 'RSI rejected the authenticated session.'),
+        debugSummary: `httpStatus=${response.status}`
+      };
+    }
+
+    if (isVerificationFailure(payload, responseText, response.status)) {
+      return {
+        accessDenied: false,
+        verificationRequired: true,
+        status: 'verification-required',
+        failureMessage: null,
+        debugSummary: `httpStatus=${response.status}`
+      };
+    }
+
+    if (!response.ok || Number(payload?.success ?? 0) !== 1) {
+      return {
+        accessDenied: false,
+        verificationRequired: false,
+        status: 'failed',
+        failureMessage: normalizeText(payload?.data?.message || payload?.msg || payload?.message || payload?.code || 'RSI did not remove the selected logged-in device.'),
+        debugSummary: `httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}`
+      };
+    }
+
+    return {
+      accessDenied: false,
+      verificationRequired: false,
+      status: 'ok',
+      failureMessage: null,
+      debugSummary: `deviceID=${numericDeviceID}, httpStatus=${response.status}`
+    };
+    """
+
+    private static let legacyAuthorizedDevicesExtractionScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
     const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
     const nativeRsiTokenValue = typeof nativeRsiToken === 'string' ? nativeRsiToken : '';
@@ -10483,10 +10929,45 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     private static let requestCharacterRepairScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-    const repairReason = typeof reason === 'string' && reason.trim() ? reason.trim() : 'Character reset';
+    const repairReason = typeof reason === 'string' && reason.trim()
+      ? reason.trim()
+      : 'My character is broken and needs repair.';
     const issueCouncilValue = typeof issueCouncilURL === 'string' ? issueCouncilURL.trim() : '';
-    const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
-    const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const errorMessageFromPayload = (payload) => {
+      if (!payload || typeof payload !== 'object') {
+        return '';
+      }
+
+      const errors = payload.errors;
+      if (Array.isArray(errors)) {
+        const message = errors.map(normalizeText).filter(Boolean).join('\\n');
+        if (message) {
+          return message;
+        }
+      } else if (errors && typeof errors === 'object') {
+        const message = Object.values(errors)
+          .flatMap((value) => Array.isArray(value) ? value : [value])
+          .map(normalizeText)
+          .filter(Boolean)
+          .join('\\n');
+        if (message) {
+          return message;
+        }
+      }
+
+      return normalizeText(payload.msg || payload.message || payload.code);
+    };
+    const responseData = (payload) => {
+      if (!payload || typeof payload !== 'object' || !('data' in payload)) {
+        return payload;
+      }
+      return payload.data;
+    };
 
     const hasAccessDeniedMarkup =
       document.title.toLowerCase().includes('access denied') ||
@@ -10501,171 +10982,192 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       };
     }
 
-    if (!currentPasswordValue) {
+    if (repairReason.length > 1024) {
       return {
         accessDenied: false,
-        status: 'missing-password',
-        failureMessage: 'Hangar Express does not have a saved RSI password for the character repair request.',
-        debugSummary: 'passwordPresent=no'
+        status: 'reason-too-long',
+        failureMessage: 'Keep the repair reason under 1,024 characters.',
+        debugSummary: `reasonLength=${repairReason.length}`
       };
     }
 
-    const isVisible = (element) => {
-      if (!element) {
-        return false;
-      }
-      const style = window.getComputedStyle(element);
-      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
-        return false;
-      }
-      const rect = element.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
+    const requestHeaders = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json;charset=UTF-8',
+      'X-Requested-With': 'XMLHttpRequest'
     };
-
-    const setFieldValue = (element, value) => {
-      if (!element) {
-        return false;
-      }
-      element.focus?.();
-      element.value = value;
-      element.dispatchEvent(new Event('input', { bubbles: true }));
-      element.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    };
-
-    const findRequestRepairButton = () => {
-      const preferred = document.querySelector('.js-reset-account');
-      if (preferred) {
-        return preferred;
-      }
-
-      return Array.from(document.querySelectorAll('a, button'))
-        .find((element) => normalizeText(element.textContent).toLowerCase() === 'request repair') || null;
-    };
-
-    const findRepairForm = () => {
-      const forms = Array.from(document.querySelectorAll('form[name="reset-account"], form[action*="/account/reset"]'))
-        .filter((form) =>
-          form.querySelector('[name="reason"]') &&
-          form.querySelector('[name="link_council_report"]') &&
-          form.querySelector('[name="current_password"]')
-        );
-
-      if (!forms.length) {
-        return null;
-      }
-
-      const visibleForms = forms.filter(isVisible);
-      const candidates = visibleForms.length ? visibleForms : forms;
-      return candidates.find((form) => {
-        const action = normalizeText(form.getAttribute('action') || form.action || '');
-        return action.includes('/account/reset') || action === '';
-      }) || candidates[candidates.length - 1];
-    };
-
-    const requestButton = findRequestRepairButton();
-    if (requestButton) {
-      requestButton.click();
+    if (csrfToken) {
+      requestHeaders['x-csrf-token'] = csrfToken;
+    }
+    if (rsiToken) {
+      requestHeaders['x-rsi-token'] = rsiToken;
+    }
+    if (rsiDevice) {
+      requestHeaders['x-rsi-device'] = rsiDevice;
     }
 
-    let form = null;
-    for (let attempt = 0; attempt < 25; attempt += 1) {
-      form = findRepairForm();
-      if (form) {
-        break;
+    const postJSON = async (path, body) => {
+      const response = await fetch(path, {
+        method: 'POST',
+        credentials: 'include',
+        headers: requestHeaders,
+        body: JSON.stringify(body)
+      });
+      const responseText = await response.text();
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        payload = null;
       }
-      await wait(100);
-    }
-
-    if (!form) {
-      return {
-        accessDenied: false,
-        status: 'missing-form',
-        failureMessage: 'Hangar Express could not find the RSI character repair request form.',
-        debugSummary: normalizeText(document.body.innerText).slice(0, 700)
-      };
-    }
-
-    const reasonField = form.querySelector('[name="reason"]');
-    const issueCouncilField = form.querySelector('[name="link_council_report"]');
-    const passwordField = form.querySelector('[name="current_password"]');
-    setFieldValue(reasonField, repairReason);
-    setFieldValue(issueCouncilField, issueCouncilValue);
-    setFieldValue(passwordField, currentPasswordValue);
-
-    const formData = new FormData(form);
-    formData.set('reason', repairReason);
-    formData.set('link_council_report', issueCouncilValue);
-    formData.set('current_password', currentPasswordValue);
-
-    const submitURL = new URL(form.getAttribute('action') || window.location.href, window.location.href).toString();
-    const requestBody = new URLSearchParams(formData);
-    const response = await fetch(submitURL, {
-      method: 'POST',
-      credentials: 'include',
-      headers: {
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'
-      },
-      body: requestBody.toString(),
-      redirect: 'follow'
-    });
-
-    const responseText = await response.text();
-    const parsedDocument = new DOMParser().parseFromString(responseText, 'text/html');
-    const responseBodyText = normalizeText(parsedDocument.body?.innerText || responseText);
-    const resetScopes = Array.from(parsedDocument.querySelectorAll('#reset-account'))
-      .filter((element) =>
-        element.querySelector('form[name="reset-account"]') ||
-        element.querySelector('.error-message') ||
-        element.querySelector('.success-message')
+      const normalizedFailure = normalizeText(
+        errorMessageFromPayload(payload) || responseText
       );
-    const messageScopes = resetScopes.length ? resetScopes : [parsedDocument];
-    const collectMessages = (selector) => messageScopes
-      .flatMap((scope) => Array.from(scope.querySelectorAll(selector)))
-      .map((element) => normalizeText(element.textContent))
-      .filter(Boolean);
-    const errorMessages = collectMessages('.js-error-message, .error-message, .alert-danger, .flash-error');
-    const successMessages = collectMessages('.js-success-message, .success-message, .alert-success, .flash-success');
-    const responseLooksAccessDenied =
-      response.status === 401 ||
-      response.status === 403 ||
-      parsedDocument.title.toLowerCase().includes('access denied') ||
-      responseBodyText.includes('Access denied');
-
-    if (responseLooksAccessDenied) {
-      return {
-        accessDenied: true,
-        status: 'access-denied',
-        failureMessage: errorMessages[0] || `RSI rejected the character repair request with HTTP ${response.status}.`,
-        debugSummary: `httpStatus=${response.status}, responseURL=${response.url || 'n/a'}`
-      };
-    }
-
-    if (!response.ok) {
-      return {
-        accessDenied: false,
-        status: 'failed',
-        failureMessage: errorMessages[0] || `RSI returned HTTP ${response.status} while requesting character repair.`,
-        debugSummary: `httpStatus=${response.status}, responsePreview=${responseBodyText.slice(0, 500) || 'n/a'}`
-      };
-    }
-
-    if (errorMessages.length) {
-      return {
-        accessDenied: false,
-        status: 'failed',
-        failureMessage: errorMessages.join('\\n'),
-        debugSummary: `httpStatus=${response.status}, responseURL=${response.url || 'n/a'}, successMessages=${successMessages.length}`
-      };
-    }
-
-    return {
-      accessDenied: false,
-      status: 'ok',
-      failureMessage: null,
-      debugSummary: `httpStatus=${response.status}, responseURL=${response.url || 'n/a'}, requestButtonClicked=${requestButton ? 'yes' : 'no'}, successMessages=${successMessages.length}`
+      const accessDenied =
+        response.status === 401 ||
+        response.status === 403 ||
+        normalizedFailure.toLowerCase().includes('errnotauthenticated');
+      return { response, responseText, payload, normalizedFailure, accessDenied };
     };
+
+    try {
+      const pagesResult = await postJSON('/api/settings/Pages', {});
+      if (pagesResult.accessDenied) {
+        return {
+          accessDenied: true,
+          status: 'access-denied',
+          failureMessage: pagesResult.normalizedFailure || 'RSI rejected the character repair settings request.',
+          debugSummary: `stage=pages, httpStatus=${pagesResult.response.status}`
+        };
+      }
+      const pages = responseData(pagesResult.payload);
+      if (!pagesResult.response.ok || !Array.isArray(pages)) {
+        return {
+          accessDenied: false,
+          status: 'settings-unavailable',
+          failureMessage: pagesResult.normalizedFailure || 'RSI did not return the current account settings pages.',
+          debugSummary: `stage=pages, httpStatus=${pagesResult.response.status}, payloadType=${Array.isArray(pages) ? 'array' : typeof pages}`
+        };
+      }
+
+      const repairPage = pages.find((page) =>
+        normalizeText(page?.route).toLowerCase() === 'character-repair'
+      );
+      if (!repairPage?.id) {
+        return {
+          accessDenied: false,
+          status: 'missing-page',
+          failureMessage: 'RSI did not advertise the Character Repair settings page for this account.',
+          debugSummary: `availableRoutes=${pages.map((page) => normalizeText(page?.route)).filter(Boolean).join(',') || 'none'}`
+        };
+      }
+
+      const pageResult = await postJSON('/api/settings/Page', { pageId: repairPage.id });
+      if (pageResult.accessDenied) {
+        return {
+          accessDenied: true,
+          status: 'access-denied',
+          failureMessage: pageResult.normalizedFailure || 'RSI rejected the character repair page request.',
+          debugSummary: `stage=page, httpStatus=${pageResult.response.status}`
+        };
+      }
+      const page = responseData(pageResult.payload);
+      if (!pageResult.response.ok || !page?.config) {
+        return {
+          accessDenied: false,
+          status: 'page-unavailable',
+          failureMessage: pageResult.normalizedFailure || 'RSI did not return the current Character Repair settings.',
+          debugSummary: `stage=page, httpStatus=${pageResult.response.status}, pageId=${String(repairPage.id)}, payloadType=${Array.isArray(page) ? 'array' : typeof page}`
+        };
+      }
+
+      const collectFields = (fields) => (Array.isArray(fields) ? fields : []).flatMap((field) => [
+        field,
+        ...collectFields(field?.children),
+        ...collectFields(field?.fields)
+      ]);
+      const fields = (page.config.sections || [])
+        .flatMap((section) => collectFields(section?.fields));
+      const repairField = fields.find((field) => {
+        const id = normalizeText(field?.id).toLowerCase();
+        return field?.type === 'confirmation' && (
+          id.includes('repair') ||
+          id.includes('reset') ||
+          fields.filter((candidate) => candidate?.type === 'confirmation').length === 1
+        );
+      });
+      if (!repairField?.id) {
+        return {
+          accessDenied: false,
+          status: 'missing-field',
+          failureMessage: 'RSI did not return the Character Repair request control.',
+          debugSummary: `pageId=${String(repairPage.id)}, fieldTypes=${fields.map((field) => normalizeText(field?.type)).filter(Boolean).join(',') || 'none'}`
+        };
+      }
+
+      let fieldState = page.values?.[repairField.id] || {};
+      if (typeof fieldState === 'string') {
+        try {
+          fieldState = JSON.parse(fieldState);
+        } catch {
+          fieldState = {};
+        }
+      }
+      const remainingSeconds = Number(fieldState?.remainingSeconds || 0);
+      if (Number.isFinite(remainingSeconds) && remainingSeconds > 0) {
+        const remainingMinutes = Math.max(1, Math.ceil(remainingSeconds / 60));
+        return {
+          accessDenied: false,
+          status: 'cooldown',
+          failureMessage: `RSI will allow another Character Repair request in about ${remainingMinutes} minute(s).`,
+          debugSummary: `pageId=${String(repairPage.id)}, fieldId=${String(repairField.id)}, remainingSeconds=${remainingSeconds}`,
+          remainingSeconds: Math.ceil(remainingSeconds)
+        };
+      }
+
+      const repairValue = { reason: repairReason };
+      if (issueCouncilValue) {
+        repairValue.issue_council = issueCouncilValue;
+      }
+      const updateResult = await postJSON('/api/settings/UpdateField', {
+        pageId: repairPage.id,
+        fieldId: repairField.id,
+        value: JSON.stringify(repairValue)
+      });
+      if (updateResult.accessDenied) {
+        return {
+          accessDenied: true,
+          status: 'access-denied',
+          failureMessage: updateResult.normalizedFailure || 'RSI rejected the character repair request.',
+          debugSummary: `stage=update, httpStatus=${updateResult.response.status}`
+        };
+      }
+      if (!updateResult.response.ok || !updateResult.payload?.success) {
+        return {
+          accessDenied: false,
+          status: 'failed',
+          failureMessage: updateResult.normalizedFailure || `RSI returned HTTP ${updateResult.response.status} while requesting Character Repair.`,
+          debugSummary: `stage=update, httpStatus=${updateResult.response.status}, pageId=${String(repairPage.id)}, fieldId=${String(repairField.id)}, responseCode=${normalizeText(updateResult.payload?.code) || 'n/a'}`
+        };
+      }
+
+      return {
+        accessDenied: false,
+        status: 'ok',
+        failureMessage: null,
+        debugSummary: `httpStatus=${updateResult.response.status}, pageId=${String(repairPage.id)}, fieldId=${String(repairField.id)}`
+      };
+    } catch (error) {
+      return {
+        accessDenied: false,
+        status: 'failed',
+        failureMessage: normalizeText(error?.message || error) || 'RSI did not complete the Character Repair request.',
+        debugSummary: 'stage=exception'
+      };
+    }
     """
 
     private static let applyUpgradeScript = """

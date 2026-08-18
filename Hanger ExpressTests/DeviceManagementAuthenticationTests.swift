@@ -3,6 +3,19 @@ import Testing
 @testable import Hanger_Express
 
 struct BrowserAuthenticationTests {
+    @Test func trustedDeviceVerificationCodesKeepSixDigitsOnly() {
+        #expect(AuthorizedDevicesVerification.normalizedCode(" 12a34-5678 ") == "123456")
+        #expect(AuthorizedDevicesVerification.normalizedCode("１２３456") == "123456")
+    }
+
+    @Test func knownCurrentDeviceRemainsProtectedFromRemoval() {
+        let currentDevice = AuthorizedDevice(id: "42", name: "This iPhone", isCurrent: true)
+        let otherDevice = AuthorizedDevice(id: "43", name: "Desktop")
+
+        #expect(currentDevice.shouldProtectFromBulkRemoval)
+        #expect(!otherDevice.shouldProtectFromBulkRemoval)
+    }
+
     @Test func suppliesHttpOnlyRSICookiesToEveryBrowserRequest() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let cookies = [
@@ -34,6 +47,28 @@ struct BrowserAuthenticationTests {
 
         #expect(arguments.rsiToken == "current")
         #expect(arguments.rsiDevice.isEmpty)
+    }
+
+    @Test func hidesHTMLDeviceManagementFailures() {
+        let message = RSIAccountPageBrowser.userFacingDeviceManagementFailure(
+            "<!DOCTYPE html><html><head><style>body { color: red; }</style></head></html>",
+            debugSummary: "httpStatus=500, responsePreview=<!DOCTYPE html>",
+            fallback: "Fallback"
+        )
+
+        #expect(message == "RSI device management is temporarily unavailable (HTTP 500). Try again later.")
+        #expect(!message.localizedCaseInsensitiveContains("doctype"))
+        #expect(!message.localizedCaseInsensitiveContains("style"))
+    }
+
+    @Test func preservesStructuredDeviceManagementFailures() {
+        let message = RSIAccountPageBrowser.userFacingDeviceManagementFailure(
+            "Password confirmation required.",
+            debugSummary: "httpStatus=403",
+            fallback: "Fallback"
+        )
+
+        #expect(message == "Password confirmation required.\n\nhttpStatus=403")
     }
 
     private func makeCookie(

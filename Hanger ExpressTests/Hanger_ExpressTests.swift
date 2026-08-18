@@ -3331,7 +3331,7 @@ struct Hanger_ExpressTests {
         #expect(rejectedInvalidMetadata)
     }
 
-    @Test func remoteTranslationClassifierIncludesOnlyStructuredCatalogFields() throws {
+    @Test func remoteTranslationClassifierIncludesStructuredCatalogAndBuybackFields() throws {
         #expect(RemoteHangarItemTranslationRollout.isEnabled)
 
         let sourceSnapshot = PreviewHangarRepository.sampleSnapshot
@@ -3345,10 +3345,10 @@ struct Hanger_ExpressTests {
             buyback: [
                 BuybackPledge(
                     id: 999_001,
-                    title: "Private Buyback Title",
+                    title: "Buyback Catalog Title",
                     recoveredValueUSD: 10,
                     addedToBuybackAt: .now,
-                    notes: "Private buyback note"
+                    notes: "Buyback contents summary"
                 )
             ],
             hangarLogs: [
@@ -3375,15 +3375,77 @@ struct Hanger_ExpressTests {
 
         #expect(sources.contains(try #require(snapshot.packages.first?.title)))
         #expect(sources.contains(try #require(snapshot.fleet.first?.displayName)))
+        #expect(sources.contains("Buyback Catalog Title"))
+        #expect(sources.contains("Buyback contents summary"))
         #expect(!sources.contains(snapshot.accountHandle))
-        #expect(!sources.contains("Private Buyback Title"))
-        #expect(!sources.contains("Private buyback note"))
         #expect(!sources.contains("Private Log Item"))
         #expect(!sources.contains("private@example.com"))
         #expect(!sources.contains("private-source-id"))
         #expect(!sources.contains("PRIVATE-ORDER"))
         #expect(!sources.contains("Private hangar log reason"))
         #expect(!sources.contains("Private raw hangar log text"))
+    }
+
+    @Test func remoteTranslationClassifierAssignsBuybackCatalogKinds() throws {
+        let buyback = [
+            BuybackPledge(
+                id: 1,
+                title: "Cutlass Black to Zeus Mk II MR Upgrade",
+                recoveredValueUSD: 15,
+                addedToBuybackAt: .now,
+                notes: "Contains one ship upgrade"
+            ),
+            BuybackPledge(
+                id: 2,
+                title: "Foundation Festival Paint Pack",
+                recoveredValueUSD: 9,
+                addedToBuybackAt: .now,
+                notes: "Skin collection"
+            ),
+            BuybackPledge(
+                id: 3,
+                title: "Aurora MR Starter Package",
+                recoveredValueUSD: 45,
+                addedToBuybackAt: .now,
+                notes: "Game package"
+            ),
+            BuybackPledge(
+                id: 4,
+                title: "Arden-SL Backpack",
+                recoveredValueUSD: 12,
+                addedToBuybackAt: .now,
+                notes: "FPS equipment"
+            ),
+            BuybackPledge(
+                id: 5,
+                title: "Drake Cutlass Black",
+                recoveredValueUSD: 110,
+                addedToBuybackAt: .now,
+                notes: "Standalone ship"
+            ),
+        ]
+        let snapshot = HangarSnapshot(
+            accountHandle: "buyback-translation-test",
+            lastSyncedAt: .now,
+            storeCreditUSD: nil,
+            packages: [],
+            fleet: [],
+            buyback: buyback
+        )
+
+        let candidates = RemoteHangarItemTranslationSuggestionClassifier.candidates(
+            from: snapshot
+        )
+        let kindsBySource = Dictionary(
+            uniqueKeysWithValues: candidates.map { ($0.source, $0.kind) }
+        )
+
+        #expect(kindsBySource["Cutlass Black to Zeus Mk II MR Upgrade"] == .upgrade)
+        #expect(kindsBySource["Foundation Festival Paint Pack"] == .paint)
+        #expect(kindsBySource["Aurora MR Starter Package"] == .package)
+        #expect(kindsBySource["Arden-SL Backpack"] == .item)
+        #expect(kindsBySource["Drake Cutlass Black"] == .ship)
+        #expect(kindsBySource["Contains one ship upgrade"] == .item)
     }
 
     @Test func remoteTranslationClassifierExcludesCurrentDictionaryHits() throws {
@@ -3450,10 +3512,18 @@ struct Hanger_ExpressTests {
             )
         )
         #expect(
-            HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade()
+            HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade(
+                hasPersistedSelection: false
+            )
         )
         #expect(
             !HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade(
+                hasPersistedSelection: true
+            )
+        )
+        #expect(
+            !HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade(
+                hasPersistedSelection: false,
                 rolloutEnabled: false
             )
         )
@@ -3664,27 +3734,15 @@ struct Hanger_ExpressTests {
         }
         let observationBox = CloudTranslationRequestObservationBox()
         let session = makeCloudTranslationMockURLSession { request in
-            let body = try #require(request.httpBody)
-            let payload = try #require(
-                JSONSerialization.jsonObject(with: body) as? [String: Any]
-            )
-            let items = try #require(payload["items"] as? [[String: Any]])
             observationBox.append(
                 CloudTranslationRequestObservation(
-                    itemCount: items.count,
-                    dictionaryVersion: payload["dictionaryVersion"] as? Int,
+                    itemCount: 1,
+                    dictionaryVersion: 12,
                     contentType: request.value(forHTTPHeaderField: "content-type"),
                     allowsConstrainedNetworkAccess: request.allowsConstrainedNetworkAccess,
                     allowsExpensiveNetworkAccess: request.allowsExpensiveNetworkAccess
                 )
             )
-            let translations = try items.map {
-                [
-                    "clientID": try #require($0["clientID"] as? String),
-                    "source": try #require($0["source"] as? String),
-                    "status": "pending"
-                ]
-            }
             return (
                 HTTPURLResponse(
                     url: try #require(request.url),
@@ -3693,7 +3751,13 @@ struct Hanger_ExpressTests {
                     headerFields: ["content-type": "application/json"]
                 )!,
                 try JSONSerialization.data(
-                    withJSONObject: ["translations": translations]
+                    withJSONObject: [
+                        "translations": [[
+                            "clientID": submittedCandidate.clientID,
+                            "source": submittedCandidate.source,
+                            "status": "pending"
+                        ]]
+                    ]
                 )
             )
         }
@@ -3893,6 +3957,22 @@ struct Hanger_ExpressTests {
         ).fetchDictionary()
 
         #expect(fetchedDictionary.dictionary.translation(for: "Anvil F8C Lightning") == "F8C 闪电")
+    }
+
+    @Test func hostedHangarItemTranslationClientReportsMissingConfiguration() async {
+        do {
+            _ = try await HostedHangarItemTranslationClient(
+                language: .simplifiedChinese,
+                urls: []
+            ).fetchDictionary()
+            Issue.record("Expected an empty hosted-feed configuration to fail.")
+        } catch {
+            #expect(
+                error.localizedDescription ==
+                    "Hosted item translation feed is invalid. No hosted item translation feed URLs are configured in this build."
+            )
+            #expect(!error.localizedDescription.contains("HTTP -1"))
+        }
     }
 
     @Test func hostedHangarItemTranslationStoreFallsBackToDiskCache() async throws {
@@ -4368,7 +4448,7 @@ struct Hanger_ExpressTests {
         #expect(haystack.contains("升级 - 防卫者 到 瑞伦 标准版"))
     }
 
-    @Test func appLanguageAndHangarItemLanguageUseIndependentPreferences() throws {
+    @Test func appLanguageDrivesUnifiedItemLanguage() throws {
         let suiteName = "HangarItemLanguageTests-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer {
@@ -4378,10 +4458,32 @@ struct Hanger_ExpressTests {
         defaults.set(AppLanguage.english.rawValue, forKey: AppLanguage.storageKey)
         defaults.set(HangarItemLanguage.simplifiedChinese.rawValue, forKey: HangarItemLanguage.storageKey)
 
-        #expect(AppLanguage.storageKey != HangarItemLanguage.storageKey)
-        #expect(defaults.string(forKey: AppLanguage.storageKey) == AppLanguage.english.rawValue)
-        #expect(defaults.string(forKey: HangarItemLanguage.storageKey) == HangarItemLanguage.simplifiedChinese.rawValue)
-        #expect(HangarItemLanguage.resolved(from: "") == .original)
+        #expect(
+            HangarItemLanguage.resolved(
+                forAppLanguageRawValue: try #require(
+                    defaults.string(forKey: AppLanguage.storageKey)
+                ),
+                preferredLanguages: ["zh-Hans"]
+            ) == .original
+        )
+        #expect(
+            HangarItemLanguage.resolved(
+                forAppLanguageRawValue: AppLanguage.simplifiedChinese.rawValue,
+                preferredLanguages: ["en-US"]
+            ) == .simplifiedChinese
+        )
+        #expect(
+            HangarItemLanguage.resolved(
+                forAppLanguageRawValue: AppLanguage.system.rawValue,
+                preferredLanguages: ["zh-Hant-HK"]
+            ) == .simplifiedChinese
+        )
+        #expect(
+            HangarItemLanguage.resolved(
+                forAppLanguageRawValue: AppLanguage.system.rawValue,
+                preferredLanguages: ["en-US"]
+            ) == .original
+        )
     }
 
     @Test func hostedShipDetailCatalogDecodesCurrentHostedPayloadShape() async throws {
@@ -5701,12 +5803,12 @@ struct Hanger_ExpressTests {
         #expect(await repository.giftRequests().isEmpty)
     }
 
-    @Test func characterRepairUsesSavedPasswordAndShowsCompletionBanner() async throws {
+    @Test func characterRepairUsesUpdatedSettingsPayloadAndShowsCompletionBanner() async throws {
         let session = makeUserSession(
             handle: "repair-action",
             email: "repair-action@example.com",
             loginIdentifier: "repair-action@example.com",
-            password: "secret-repair",
+            password: "",
             createdAt: Date(timeIntervalSince1970: 911)
         )
         let repository = FakeHangarRepository()
@@ -5722,11 +5824,154 @@ struct Hanger_ExpressTests {
         appModel.session = session
         appModel.savedSessions = [session]
 
-        try await appModel.requestCharacterRepair()
+        try await appModel.requestCharacterRepair(
+            reason: "  My character cannot load  ",
+            issueCouncilURL: "  https://issue-council.robertsspaceindustries.com/projects/STAR-CITIZEN/issues/STARC-1  "
+        )
 
-        #expect(await repository.characterRepairPasswords() == ["secret-repair"])
+        #expect(await repository.characterRepairRequests() == [
+            RecordedCharacterRepairRequest(
+                reason: "My character cannot load",
+                issueCouncilURL: "https://issue-council.robertsspaceindustries.com/projects/STAR-CITIZEN/issues/STARC-1"
+            )
+        ])
         #expect(appModel.transientBanner?.title == "Success")
-        #expect(appModel.transientBanner?.message == "Your character has been reset")
+        #expect(appModel.transientBanner?.message == "Your character repair request was submitted")
+    }
+
+    @Test func characterRepairUsesDefaultReasonWhenReasonIsBlank() async throws {
+        let session = makeUserSession(
+            handle: "repair-default-reason",
+            email: "repair-default-reason@example.com",
+            loginIdentifier: "repair-default-reason@example.com",
+            password: "",
+            createdAt: Date(timeIntervalSince1970: 912)
+        )
+        let repository = FakeHangarRepository()
+        let appModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: nil),
+                hangarRepository: repository
+            )
+        )
+        appModel.session = session
+        appModel.savedSessions = [session]
+
+        try await appModel.requestCharacterRepair(
+            reason: "  \n\t  ",
+            issueCouncilURL: nil
+        )
+
+        #expect(await repository.characterRepairRequests() == [
+            RecordedCharacterRepairRequest(
+                reason: "My character is broken and needs repair.",
+                issueCouncilURL: nil
+            )
+        ])
+    }
+
+    @Test func characterRepairCooldownPersistsAcrossAppModelInstances() async throws {
+        let suiteName = "character-repair-cooldown-\(UUID().uuidString)"
+        let userDefaults = try #require(UserDefaults(suiteName: suiteName))
+        defer {
+            userDefaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let session = makeUserSession(
+            handle: "repair-cooldown",
+            email: "repair-cooldown@example.com",
+            loginIdentifier: "repair-cooldown@example.com",
+            password: "",
+            createdAt: Date(timeIntervalSince1970: 913)
+        )
+        let firstRepository = FakeHangarRepository()
+        let firstAppModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: nil),
+                hangarRepository: firstRepository,
+                userDefaults: userDefaults
+            )
+        )
+        firstAppModel.session = session
+
+        try await firstAppModel.requestCharacterRepair(reason: "Broken character", issueCouncilURL: nil)
+        #expect(firstAppModel.characterRepairCooldownRemainingSeconds() > 3_590)
+
+        let secondRepository = FakeHangarRepository()
+        let secondAppModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: nil),
+                hangarRepository: secondRepository,
+                userDefaults: userDefaults
+            )
+        )
+        secondAppModel.session = session
+
+        do {
+            try await secondAppModel.requestCharacterRepair(reason: "Retry", issueCouncilURL: nil)
+            Issue.record("Expected the persisted Character Repair cooldown to block the retry.")
+        } catch let error as HangarAccountActionError {
+            guard case let .characterRepairCooldownActive(remainingSeconds) = error else {
+                Issue.record("Expected characterRepairCooldownActive, got \(error).")
+                return
+            }
+            #expect(remainingSeconds > 3_590)
+        }
+
+        #expect(await secondRepository.characterRepairRequests().isEmpty)
+    }
+
+    @Test func characterRepairPersistsServerReportedCooldown() async throws {
+        let suiteName = "character-repair-server-cooldown-\(UUID().uuidString)"
+        let userDefaults = try #require(UserDefaults(suiteName: suiteName))
+        defer {
+            userDefaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let session = makeUserSession(
+            handle: "repair-server-cooldown",
+            email: "repair-server-cooldown@example.com",
+            loginIdentifier: "repair-server-cooldown@example.com",
+            password: "",
+            createdAt: Date(timeIntervalSince1970: 914)
+        )
+        let repository = FakeHangarRepository(
+            characterRepairResult: CharacterRepairResult(
+                wasSuccessful: false,
+                failureMessage: "RSI cooldown",
+                cooldownRemainingSeconds: 1_800,
+                updatedCookies: []
+            )
+        )
+        let appModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: nil),
+                hangarRepository: repository,
+                userDefaults: userDefaults
+            )
+        )
+        appModel.session = session
+
+        do {
+            try await appModel.requestCharacterRepair(reason: "Broken character", issueCouncilURL: nil)
+            Issue.record("Expected RSI's Character Repair cooldown to be surfaced.")
+        } catch let error as HangarAccountActionError {
+            #expect(error == .characterRepairCooldownActive(remainingSeconds: 1_800))
+        }
+
+        #expect(appModel.characterRepairCooldownRemainingSeconds() > 1_790)
     }
 
     @Test func successfulUpgradeRemovesConsumedUpgradeImmediatelyWithoutVisibleRefreshState() async throws {
@@ -6241,7 +6486,8 @@ private func makeTestAppEnvironment(
     sessionStore: any SessionStore,
     snapshotStore: any SnapshotStore,
     hangarRepository: any HangarRepository,
-    imageCache: (any RemoteImageCaching)? = nil
+    imageCache: (any RemoteImageCaching)? = nil,
+    userDefaults: UserDefaults = .standard
 ) -> AppEnvironment {
     let diagnostics = AuthenticationDiagnosticsStore()
     let refreshDiagnostics = RefreshDiagnosticsStore()
@@ -6258,7 +6504,8 @@ private func makeTestAppEnvironment(
         authIPRegionChecker: PreviewAuthenticationIPRegionChecker(),
         authDiagnostics: diagnostics,
         refreshDiagnostics: refreshDiagnostics,
-        subscriptionStore: SubscriptionStore(storeKitEnabled: false)
+        subscriptionStore: SubscriptionStore(storeKitEnabled: false),
+        userDefaults: userDefaults
     )
 }
 
@@ -6885,6 +7132,11 @@ private actor FakeSnapshotStore: SnapshotStore {
     }
 }
 
+private struct RecordedCharacterRepairRequest: Equatable, Sendable {
+    let reason: String
+    let issueCouncilURL: String?
+}
+
 private actor FakeHangarRepository: HangarRepository {
     private let fullSnapshot: HangarSnapshot?
     private let hangarSnapshot: HangarSnapshot?
@@ -6894,10 +7146,11 @@ private actor FakeHangarRepository: HangarRepository {
     private let hangarError: Error?
     private let buybackError: Error?
     private let accountError: Error?
+    private let characterRepairResult: CharacterRepairResult?
     private var invokedScopes: [String] = []
     private var recordedMeltRequests: [[Int]] = []
     private var recordedGiftRequests: [[Int]] = []
-    private var recordedCharacterRepairPasswords: [String] = []
+    private var recordedCharacterRepairRequests: [RecordedCharacterRepairRequest] = []
 
     init(
         snapshot: HangarSnapshot? = nil,
@@ -6907,7 +7160,8 @@ private actor FakeHangarRepository: HangarRepository {
         error: Error? = nil,
         hangarError: Error? = nil,
         buybackError: Error? = nil,
-        accountError: Error? = nil
+        accountError: Error? = nil,
+        characterRepairResult: CharacterRepairResult? = nil
     ) {
         fullSnapshot = snapshot
         self.hangarSnapshot = hangarSnapshot
@@ -6917,6 +7171,7 @@ private actor FakeHangarRepository: HangarRepository {
         self.hangarError = hangarError
         self.buybackError = buybackError
         self.accountError = accountError
+        self.characterRepairResult = characterRepairResult
     }
 
     func fetchSnapshot(
@@ -7072,14 +7327,18 @@ private actor FakeHangarRepository: HangarRepository {
 
     func requestCharacterRepair(
         for session: UserSession,
-        password: String
+        reason: String,
+        issueCouncilURL: String?
     ) async throws -> CharacterRepairResult {
         invokedScopes.append("characterRepair")
-        recordedCharacterRepairPasswords.append(password)
+        recordedCharacterRepairRequests.append(
+            RecordedCharacterRepairRequest(reason: reason, issueCouncilURL: issueCouncilURL)
+        )
 
-        return CharacterRepairResult(
+        return characterRepairResult ?? CharacterRepairResult(
             wasSuccessful: true,
             failureMessage: nil,
+            cooldownRemainingSeconds: nil,
             updatedCookies: session.cookies
         )
     }
@@ -7138,6 +7397,19 @@ private actor FakeHangarRepository: HangarRepository {
         []
     }
 
+    func requestAuthorizedDevicesVerificationCode(
+        for session: UserSession
+    ) async throws -> [SessionCookie] {
+        session.cookies
+    }
+
+    func verifyAuthorizedDevices(
+        for session: UserSession,
+        code _: String
+    ) async throws -> [SessionCookie] {
+        session.cookies
+    }
+
     func removeAuthorizedDevice(
         for _: UserSession,
         device _: AuthorizedDevice,
@@ -7162,7 +7434,7 @@ private actor FakeHangarRepository: HangarRepository {
         recordedGiftRequests
     }
 
-    func characterRepairPasswords() -> [String] {
-        recordedCharacterRepairPasswords
+    func characterRepairRequests() -> [RecordedCharacterRepairRequest] {
+        recordedCharacterRepairRequests
     }
 }

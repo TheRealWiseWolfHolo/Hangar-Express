@@ -13,6 +13,7 @@ struct AppEnvironment {
     let authDiagnostics: AuthenticationDiagnosticsStore
     let refreshDiagnostics: RefreshDiagnosticsStore
     let subscriptionStore: SubscriptionStore
+    let userDefaults: UserDefaults
 
     init(
         sessionStore: any SessionStore,
@@ -25,7 +26,8 @@ struct AppEnvironment {
         authIPRegionChecker: any AuthenticationIPRegionChecking,
         authDiagnostics: AuthenticationDiagnosticsStore,
         refreshDiagnostics: RefreshDiagnosticsStore,
-        subscriptionStore: SubscriptionStore
+        subscriptionStore: SubscriptionStore,
+        userDefaults: UserDefaults = .standard
     ) {
         self.sessionStore = sessionStore
         self.snapshotStore = snapshotStore
@@ -38,6 +40,7 @@ struct AppEnvironment {
         self.authDiagnostics = authDiagnostics
         self.refreshDiagnostics = refreshDiagnostics
         self.subscriptionStore = subscriptionStore
+        self.userDefaults = userDefaults
     }
 
     static var preview: AppEnvironment {

@@ -32,9 +32,10 @@ nonisolated enum HangarItemTranslationMethodPromptPolicy {
     }
 
     static func shouldPromptAfterUpgrade(
+        hasPersistedSelection: Bool,
         rolloutEnabled: Bool = RemoteHangarItemTranslationRollout.isEnabled
     ) -> Bool {
-        rolloutEnabled
+        rolloutEnabled && !hasPersistedSelection
     }
 }
 
@@ -189,7 +190,32 @@ nonisolated enum RemoteHangarItemTranslationSuggestionClassifier {
             add(ship.sourcePackageName, kind: .package)
         }
 
+        for buybackPledge in snapshot.buyback {
+            let titleKind = buybackTranslationKind(for: buybackPledge)
+            add(buybackPledge.title, kind: titleKind)
+            add(buybackPledge.displayedNotes, kind: .item)
+            add(buybackPledge.sourceRawInfo?.titleText, kind: titleKind)
+        }
+
         return candidates
+    }
+
+    private static func buybackTranslationKind(
+        for pledge: BuybackPledge
+    ) -> RemoteHangarItemTranslationKind {
+        if pledge.isUpgrade {
+            return .upgrade
+        }
+        if pledge.isSkin {
+            return .paint
+        }
+        if pledge.isPackage {
+            return .package
+        }
+        if pledge.isGear {
+            return .item
+        }
+        return .ship
     }
 }
 

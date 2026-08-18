@@ -269,6 +269,7 @@ nonisolated struct ApplyUpgradeResult: Hashable, Sendable {
 nonisolated struct CharacterRepairResult: Hashable, Sendable {
     let wasSuccessful: Bool
     let failureMessage: String?
+    let cooldownRemainingSeconds: Int?
     let updatedCookies: [SessionCookie]
 }
 
@@ -525,6 +526,21 @@ nonisolated struct AuthorizedDevice: Identifiable, Hashable, Sendable {
     }
 }
 
+nonisolated enum AuthorizedDevicesVerification {
+    static let permission = "settings_verified"
+    static let codeLength = 6
+
+    static func normalizedCode(_ value: String) -> String {
+        String(
+            value
+                .compactMap(\.wholeNumberValue)
+                .map(String.init)
+                .joined()
+                .prefix(codeLength)
+        )
+    }
+}
+
 protocol HangarRepository: Sendable {
     func fetchSnapshot(
         for session: UserSession,
@@ -592,7 +608,8 @@ protocol HangarRepository: Sendable {
 
     func requestCharacterRepair(
         for session: UserSession,
-        password: String
+        reason: String,
+        issueCouncilURL: String?
     ) async throws -> CharacterRepairResult
 
     func prepareBuybackCheckout(
@@ -617,6 +634,15 @@ protocol HangarRepository: Sendable {
         for session: UserSession,
         password: String?
     ) async throws -> [AuthorizedDevice]
+
+    func requestAuthorizedDevicesVerificationCode(
+        for session: UserSession
+    ) async throws -> [SessionCookie]
+
+    func verifyAuthorizedDevices(
+        for session: UserSession,
+        code: String
+    ) async throws -> [SessionCookie]
 
     func removeAuthorizedDevice(
         for session: UserSession,

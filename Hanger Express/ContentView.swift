@@ -6,6 +6,7 @@ struct ContentView: View {
 
     var body: some View {
         RootView(appModel: appModel)
+            .keyboardDismissToolbar()
             .task {
                 await appModel.bootstrap()
             }

@@ -42,7 +42,7 @@ struct AuthenticationFlowView: View {
             case .standard:
                 return AppLocalizer.string("Your password is stored securely in this device's Keychain and used only to sign in and authenticate with RSI services. It is never shared with the app developer or any third-party service.")
             case .readOnly:
-                return AppLocalizer.string("Read-only login opens an RSI browser session. You enter your password directly on RSI's website, so it is never visible to or saved by Hangar Express. Password-confirmed features—including gifting, melting, applying upgrades, character repair, and device management—are disabled for this account.")
+                return AppLocalizer.string("Read-only login opens an RSI browser session. You enter your password directly on RSI's website, so it is never visible to or saved by Hangar Express. Password-confirmed features—including gifting, melting, applying upgrades, and character repair—are disabled for this account.")
             }
         }
     }

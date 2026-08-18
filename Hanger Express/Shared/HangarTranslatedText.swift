@@ -297,19 +297,25 @@ private struct HangarTranslationGlowMask: View {
 struct IMEAwareSearchRow: View {
     @Binding private var text: String
     @Binding private var isActive: Bool
+    @State private var draftText: String
+    @State private var pendingCommitTask: Task<Void, Never>?
 
     private let prompt: String
     private let onCommittedTextChange: () -> Void
+    private let debounceDuration: Duration
 
     init(
         text: Binding<String>,
         isActive: Binding<Bool> = .constant(false),
         prompt: String,
+        debounceDuration: Duration = .milliseconds(200),
         onCommittedTextChange: @escaping () -> Void = {}
     ) {
         _text = text
         _isActive = isActive
+        _draftText = State(initialValue: text.wrappedValue)
         self.prompt = prompt
+        self.debounceDuration = debounceDuration
         self.onCommittedTextChange = onCommittedTextChange
     }
 
@@ -320,17 +326,19 @@ struct IMEAwareSearchRow: View {
                 .foregroundStyle(.secondary)
 
             IMEAwareSearchTextField(
-                text: $text,
+                text: $draftText,
                 placeholder: prompt,
                 onEditingChanged: { isEditing in
-                    isActive = isEditing || !text.isEmpty
+                    isActive = isEditing || !draftText.isEmpty
                 },
-                onCommittedTextChange: onCommittedTextChange
+                onCommittedTextChange: scheduleDraftCommit
             )
             .frame(minHeight: 26)
 
-            if !text.isEmpty {
+            if !draftText.isEmpty {
                 Button {
+                    pendingCommitTask?.cancel()
+                    draftText = ""
                     text = ""
                     isActive = false
                     onCommittedTextChange()
@@ -348,6 +356,32 @@ struct IMEAwareSearchRow: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Color(uiColor: .secondarySystemGroupedBackground))
         )
+        .onChange(of: text) { _, newValue in
+            guard draftText != newValue else {
+                return
+            }
+            pendingCommitTask?.cancel()
+            draftText = newValue
+        }
+        .onDisappear {
+            pendingCommitTask?.cancel()
+            pendingCommitTask = nil
+        }
+    }
+
+    private func scheduleDraftCommit() {
+        pendingCommitTask?.cancel()
+        let value = draftText
+
+        pendingCommitTask = Task { @MainActor in
+            try? await Task.sleep(for: debounceDuration)
+            guard !Task.isCancelled, text != value else {
+                return
+            }
+
+            text = value
+            onCommittedTextChange()
+        }
     }
 }
 
@@ -378,7 +412,32 @@ private struct IMEAwareSearchTextField: UIViewRepresentable {
             action: #selector(Coordinator.textDidChange(_:)),
             for: .editingChanged
         )
+        textField.inputAccessoryView = makeKeyboardAccessory(for: textField)
         return textField
+    }
+
+    private func makeKeyboardAccessory(for textField: UITextField) -> UIToolbar {
+        let toolbar = UIToolbar()
+        toolbar.sizeToFit()
+
+        let dismissAction = UIAction { [weak textField] _ in
+            textField?.resignFirstResponder()
+        }
+        let dismissButton = UIBarButtonItem(
+            title: AppLocalizer.string("Done"),
+            image: UIImage(systemName: "chevron.down"),
+            primaryAction: dismissAction
+        )
+        dismissButton.accessibilityLabel = AppLocalizer.string("Hide Keyboard")
+        toolbar.items = [
+            UIBarButtonItem(
+                barButtonSystemItem: .flexibleSpace,
+                target: nil,
+                action: nil
+            ),
+            dismissButton
+        ]
+        return toolbar
     }
 
     func updateUIView(_ uiView: UITextField, context: Context) {

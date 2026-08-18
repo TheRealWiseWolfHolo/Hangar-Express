@@ -6,6 +6,8 @@ enum HangarItemLanguage: String, CaseIterable, Identifiable, Sendable {
     case original
     case simplifiedChinese
 
+    // Retained only so older installs can leave their former independent
+    // preference in place without affecting the unified language selection.
     nonisolated static let storageKey = "hangar.itemLanguage"
 
     var id: Self { self }
@@ -31,6 +33,25 @@ enum HangarItemLanguage: String, CaseIterable, Identifiable, Sendable {
 
     nonisolated static func resolved(from rawValue: String) -> HangarItemLanguage {
         HangarItemLanguage(rawValue: rawValue) ?? .original
+    }
+
+    nonisolated static func resolved(
+        forAppLanguageRawValue rawValue: String,
+        preferredLanguages: [String] = Locale.preferredLanguages
+    ) -> HangarItemLanguage {
+        switch AppLanguage.resolved(from: rawValue) {
+        case .english:
+            return .original
+        case .simplifiedChinese:
+            return .simplifiedChinese
+        case .system:
+            let preferredLanguage = preferredLanguages.first?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased() ?? ""
+            return preferredLanguage.hasPrefix("zh")
+                ? .simplifiedChinese
+                : .original
+        }
     }
 }
 

@@ -47,7 +47,6 @@ struct HangarDashboardView: View {
 
     @Environment(\.displayScale) private var displayScale
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
-    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
     @AppStorage(DisplayPreferences.hangarUpgradedShipDisplayModeKey) private var showsUpgradedShipInHangar = DisplayPreferences.hangarUpgradedShipDisplayEnabledByDefault
     @AppStorage(DisplayPreferences.compositeUpgradeThumbnailModeKey) private var usesCompositeUpgradeThumbnails = DisplayPreferences.compositeUpgradeThumbnailsEnabledByDefault
     @AppStorage(DisplayPreferences.hangarGiftedHighlightKey) private var highlightsGiftedHangarRows = DisplayPreferences.hangarGiftedHighlightEnabledByDefault
@@ -499,14 +498,7 @@ struct HangarDashboardView: View {
     private var filteredPackageGroups: [GroupedHangarPackage] {
         let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
         let currentItemTranslator = itemTranslator
-        let searchSignature = HangarPackageSearchHaystackCache.Signature(
-            snapshotLastSyncedAt: snapshot.lastSyncedAt,
-            languageRawValue: currentItemTranslator.language.rawValue,
-            dictionaryLocale: currentItemTranslator.dictionary?.locale,
-            dictionaryVersion: currentItemTranslator.dictionary?.version,
-            translationCacheGeneration: translationService.cacheGeneration,
-            showsUpgradedShipInHangar: showsUpgradedShipInHangar
-        )
+        let searchSignature = searchIndexSignature(for: currentItemTranslator)
 
         return allPackageGroups.filter { packageGroup in
             let package = packageGroup.representative
@@ -547,11 +539,51 @@ struct HangarDashboardView: View {
         itemTranslationState.translator(for: hangarItemLanguageRawValue)
     }
 
+    private var hangarItemLanguageRawValue: String {
+        HangarItemLanguage.resolved(
+            forAppLanguageRawValue: appLanguageRawValue
+        ).rawValue
+    }
+
     private func loadItemTranslationDictionary() async {
         await itemTranslationState.loadDictionary(
             for: hangarItemLanguageRawValue,
             refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
         )
+        await warmSearchIndex()
+    }
+
+    private func searchIndexSignature(
+        for translator: HangarItemTranslator
+    ) -> HangarPackageSearchHaystackCache.Signature {
+        HangarPackageSearchHaystackCache.Signature(
+            snapshotLastSyncedAt: snapshot.lastSyncedAt,
+            languageRawValue: translator.language.rawValue,
+            dictionaryLocale: translator.dictionary?.locale,
+            dictionaryVersion: translator.dictionary?.version,
+            translationCacheGeneration: translationService.cacheGeneration,
+            showsUpgradedShipInHangar: showsUpgradedShipInHangar
+        )
+    }
+
+    private func warmSearchIndex() async {
+        let translator = itemTranslator
+        let signature = searchIndexSignature(for: translator)
+
+        for (offset, packageGroup) in allPackageGroups.enumerated() {
+            guard !Task.isCancelled else {
+                return
+            }
+            _ = searchHaystackCache.haystack(
+                for: packageGroup,
+                signature: signature,
+                itemTranslator: translator,
+                translationService: translationService
+            )
+            if offset.isMultiple(of: 20) {
+                await Task.yield()
+            }
+        }
     }
 
     private func matchesSearchFilters(for package: HangarPackage) -> Bool {

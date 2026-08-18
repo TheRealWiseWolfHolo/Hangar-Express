@@ -733,6 +733,10 @@ final class AppModel {
     private static let upgradeRequestTimeoutSeconds = 20
     private static let upgradeTargetLookupTimeoutSeconds = 20
     private static let characterRepairRequestTimeoutSeconds = 25
+    private static let characterRepairReasonMaximumLength = 1_024
+    private static let defaultCharacterRepairReason = "My character is broken and needs repair."
+    private static let characterRepairCooldownDuration: TimeInterval = 60 * 60
+    private static let characterRepairCooldownDefaultsKeyPrefix = "account.characterRepair.cooldownUntil"
     private static let buybackCheckoutPreparationTimeoutSeconds = 30
     private static let wbccuCheckoutPreparationBaseTimeoutSeconds = 60
     private static let limitedShipCartInsertionTimeoutSeconds = 30
@@ -782,7 +786,7 @@ final class AppModel {
         authDiagnostics = environment.authDiagnostics
         refreshDiagnostics = environment.refreshDiagnostics
         subscriptionStore = environment.subscriptionStore
-        userDefaults = .standard
+        userDefaults = environment.userDefaults
     }
 
     var snapshot: HangarSnapshot? {
@@ -1401,8 +1405,8 @@ final class AppModel {
 
     private var currentHangarItemLanguage: HangarItemLanguage {
         HangarItemLanguage.resolved(
-            from: userDefaults.string(forKey: HangarItemLanguage.storageKey)
-                ?? HangarItemLanguage.original.rawValue
+            forAppLanguageRawValue: userDefaults.string(forKey: AppLanguage.storageKey)
+                ?? AppLanguage.system.rawValue
         )
     }
 
@@ -1987,8 +1991,8 @@ final class AppModel {
 
     func clearLocalCache() async {
         let suspendedTranslationLanguage = HangarItemLanguage.resolved(
-            from: userDefaults.string(forKey: HangarItemLanguage.storageKey)
-                ?? HangarItemLanguage.original.rawValue
+            forAppLanguageRawValue: userDefaults.string(forKey: AppLanguage.storageKey)
+                ?? AppLanguage.system.rawValue
         )
         let shouldSuspendTranslationPreload = suspendedTranslationLanguage.translationLocaleIdentifier != nil
         if shouldSuspendTranslationPreload {
@@ -2026,8 +2030,8 @@ final class AppModel {
 
     func clearTranslationCache() async {
         let rebuildPromptLanguage = HangarItemLanguage.resolved(
-            from: userDefaults.string(forKey: HangarItemLanguage.storageKey)
-                ?? HangarItemLanguage.original.rawValue
+            forAppLanguageRawValue: userDefaults.string(forKey: AppLanguage.storageKey)
+                ?? AppLanguage.system.rawValue
         )
 
         await HostedHangarItemTranslationStore.shared.clear()
@@ -2551,7 +2555,7 @@ final class AppModel {
         )
     }
 
-    func requestCharacterRepair() async throws {
+    func requestCharacterRepair(reason: String, issueCouncilURL: String?) async throws {
         guard !isRefreshing else {
             throw HangarAccountActionError.actionInProgress
         }
@@ -2564,10 +2568,27 @@ final class AppModel {
             throw HangarAccountActionError.readOnlySession
         }
 
-        guard let credentials = session.credentials,
-              !credentials.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw HangarAccountActionError.missingStoredPassword
+        let localCooldownRemaining = characterRepairCooldownRemainingSeconds()
+        guard localCooldownRemaining == 0 else {
+            throw HangarAccountActionError.characterRepairCooldownActive(
+                remainingSeconds: localCooldownRemaining
+            )
         }
+
+        let trimmedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedReason = trimmedReason.isEmpty
+            ? Self.defaultCharacterRepairReason
+            : trimmedReason
+
+        guard normalizedReason.count <= Self.characterRepairReasonMaximumLength else {
+            throw HangarAccountActionError.characterRepairReasonTooLong(
+                maximum: Self.characterRepairReasonMaximumLength
+            )
+        }
+
+        let trimmedIssueCouncilURL = issueCouncilURL?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalizedIssueCouncilURL = trimmedIssueCouncilURL.isEmpty ? nil : trimmedIssueCouncilURL
 
         try await sensitiveActionAuthorizer.authorize(
             reason: characterRepairAuthorizationReason()
@@ -2578,7 +2599,8 @@ final class AppModel {
             let result = try await withTimeout(seconds: timeoutSeconds) { [self] in
                 try await self.hangarRepository.requestCharacterRepair(
                     for: session,
-                    password: credentials.password
+                    reason: normalizedReason,
+                    issueCouncilURL: normalizedIssueCouncilURL
                 )
             } onTimeout: {
                 HangarAccountActionError.characterRepairTimedOut(timeoutSeconds: timeoutSeconds)
@@ -2588,15 +2610,31 @@ final class AppModel {
                 await persistUpdatedSessionCookies(result.updatedCookies, baseSession: session)
             }
 
+            if let remainingSeconds = result.cooldownRemainingSeconds,
+               remainingSeconds > 0 {
+                recordCharacterRepairCooldown(
+                    for: session,
+                    duration: TimeInterval(remainingSeconds)
+                )
+                throw HangarAccountActionError.characterRepairCooldownActive(
+                    remainingSeconds: remainingSeconds
+                )
+            }
+
             guard result.wasSuccessful else {
                 throw HangarAccountActionError.characterRepairRejected(
                     message: result.failureMessage ?? AppLocalizer.string("RSI stopped the character repair request before Hangar Express could confirm it.")
                 )
             }
 
+            recordCharacterRepairCooldown(
+                for: session,
+                duration: Self.characterRepairCooldownDuration
+            )
+
             showCompletedActionBanner(
                 title: AppLocalizer.string("Success"),
-                message: AppLocalizer.string("Your character has been reset")
+                message: AppLocalizer.string("Your character repair request was submitted")
             )
         } catch let error as HangarAccountActionError {
             throw error
@@ -2613,6 +2651,37 @@ final class AppModel {
 
             throw HangarAccountActionError.characterRepairRejected(message: error.localizedDescription)
         }
+    }
+
+    func characterRepairCooldownRemainingSeconds(at date: Date = .now) -> Int {
+        guard let session else {
+            return 0
+        }
+
+        let key = characterRepairCooldownDefaultsKey(for: session)
+        let cooldownEndsAt = userDefaults.double(forKey: key)
+        guard cooldownEndsAt > 0 else {
+            return 0
+        }
+
+        let remaining = cooldownEndsAt - date.timeIntervalSince1970
+        guard remaining > 0 else {
+            userDefaults.removeObject(forKey: key)
+            return 0
+        }
+
+        return Int(ceil(remaining))
+    }
+
+    private func recordCharacterRepairCooldown(for session: UserSession, duration: TimeInterval) {
+        userDefaults.set(
+            Date.now.addingTimeInterval(duration).timeIntervalSince1970,
+            forKey: characterRepairCooldownDefaultsKey(for: session)
+        )
+    }
+
+    private func characterRepairCooldownDefaultsKey(for session: UserSession) -> String {
+        "\(Self.characterRepairCooldownDefaultsKeyPrefix).\(session.id.uuidString.lowercased())"
     }
 
     func prepareBuybackCheckout(for pledge: BuybackPledge) async throws -> BuybackCheckoutPreparation {
@@ -2737,6 +2806,110 @@ final class AppModel {
             throw error
         } catch {
             throw HangarAccountActionError.limitedShipCartInsertionRejected(message: error.localizedDescription)
+        }
+    }
+
+    func requestAuthorizedDevicesVerificationCode() async throws {
+        guard let session else {
+            throw HangarAccountActionError.missingSession
+        }
+
+        guard !session.isReadOnly else {
+            throw HangarAccountActionError.readOnlySession
+        }
+
+        let timeoutSeconds = Self.authorizedDevicesRequestTimeoutSeconds
+        do {
+            let updatedCookies = try await withTimeout(seconds: timeoutSeconds) { [self] in
+                try await self.hangarRepository.requestAuthorizedDevicesVerificationCode(for: session)
+            } onTimeout: {
+                HangarAccountActionError.authorizedDevicesUnavailable(
+                    message: AppLocalizer.format(
+                        "RSI did not send the verification code within %lld seconds.",
+                        timeoutSeconds
+                    )
+                )
+            }
+            await persistUpdatedSessionCookies(updatedCookies, baseSession: session)
+        } catch let error as HangarAccountActionError {
+            throw error
+        } catch {
+            if await handleReauthenticationIfNeeded(
+                for: error,
+                session: session,
+                existingSnapshot: snapshot
+            ) {
+                throw HangarAccountActionError.authorizedDevicesUnavailable(
+                    message: AppLocalizer.string("Your saved RSI session expired. Sign in again before managing logged-in devices.")
+                )
+            }
+
+            throw HangarAccountActionError.authorizedDevicesUnavailable(message: error.localizedDescription)
+        }
+    }
+
+    func verifyAuthorizedDevices(code: String) async throws -> [AuthorizedDevice] {
+        guard let session else {
+            throw HangarAccountActionError.missingSession
+        }
+
+        guard !session.isReadOnly else {
+            throw HangarAccountActionError.readOnlySession
+        }
+
+        let normalizedCode = AuthorizedDevicesVerification.normalizedCode(code)
+        guard normalizedCode.count == AuthorizedDevicesVerification.codeLength else {
+            throw HangarAccountActionError.authorizedDevicesUnavailable(
+                message: AppLocalizer.string("Enter the six-digit verification code from RSI.")
+            )
+        }
+
+        let timeoutSeconds = Self.authorizedDevicesRequestTimeoutSeconds
+        do {
+            let updatedCookies = try await withTimeout(seconds: timeoutSeconds) { [self] in
+                try await self.hangarRepository.verifyAuthorizedDevices(
+                    for: session,
+                    code: normalizedCode
+                )
+            } onTimeout: {
+                HangarAccountActionError.authorizedDevicesUnavailable(
+                    message: AppLocalizer.format(
+                        "RSI did not verify the code within %lld seconds.",
+                        timeoutSeconds
+                    )
+                )
+            }
+            await persistUpdatedSessionCookies(updatedCookies, baseSession: session)
+
+            let verifiedSession = self.session ?? session.updatingCookies(updatedCookies)
+            let password = verifiedSession.credentials?.password
+            return try await withTimeout(seconds: timeoutSeconds) { [self] in
+                try await self.hangarRepository.fetchAuthorizedDevices(
+                    for: verifiedSession,
+                    password: password
+                )
+            } onTimeout: {
+                HangarAccountActionError.authorizedDevicesUnavailable(
+                    message: AppLocalizer.format(
+                        "RSI did not return the logged-in device list within %lld seconds.",
+                        timeoutSeconds
+                    )
+                )
+            }
+        } catch let error as HangarAccountActionError {
+            throw error
+        } catch {
+            if await handleReauthenticationIfNeeded(
+                for: error,
+                session: session,
+                existingSnapshot: snapshot
+            ) {
+                throw HangarAccountActionError.authorizedDevicesUnavailable(
+                    message: AppLocalizer.string("Your saved RSI session expired. Sign in again before managing logged-in devices.")
+                )
+            }
+
+            throw HangarAccountActionError.authorizedDevicesUnavailable(message: error.localizedDescription)
         }
     }
 
@@ -3805,9 +3978,14 @@ final class AppModel {
         let acknowledgedMethodVersion = userDefaults.string(
             forKey: Self.itemTranslationMethodAcknowledgedVersionDefaultsKey
         )
+        let hasPersistedTranslationMethod = userDefaults.string(
+            forKey: HangarItemTranslationMissMode.storageKey
+        ).flatMap(HangarItemTranslationMissMode.init(rawValue:)) != nil
 
         if acknowledgedMethodVersion != currentVersion,
-           HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade() {
+           HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade(
+               hasPersistedSelection: hasPersistedTranslationMethod
+           ) {
             let prompt = ItemTranslationMethodPrompt(
                 language: currentHangarItemLanguage,
                 currentMode: currentHangarItemTranslationMissMode,

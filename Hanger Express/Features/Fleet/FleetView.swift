@@ -48,6 +48,7 @@ struct FleetView: View {
 
     let appModel: AppModel
     let snapshot: HangarSnapshot
+    private let allShipGroups: [GroupedFleetShip]
     @Environment(\.displayScale) private var displayScale
     @State private var searchText = ""
     @State private var sortMode: SortMode = .manufacturer
@@ -58,10 +59,17 @@ struct FleetView: View {
     @State private var fleetImagePrefetchTask: Task<Void, Never>?
     @Namespace private var shipCardTransitionNamespace
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
-    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
     @AppStorage("fleetDisplayMode") private var displayModeRawValue = DisplayMode.singleColumn.rawValue
     @State private var itemTranslationState = HangarItemTranslationViewState()
     @State private var translationService = OnDeviceHangarItemTranslationService.shared
+    @State private var searchHaystackCache = FleetSearchHaystackCache()
+    @State private var displaySectionCache = FleetDisplaySectionCache()
+
+    init(appModel: AppModel, snapshot: HangarSnapshot) {
+        self.appModel = appModel
+        self.snapshot = snapshot
+        allShipGroups = snapshot.fleet.groupedForFleetDisplay
+    }
 
     private var displayMode: DisplayMode {
         DisplayMode(rawValue: displayModeRawValue) ?? .singleColumn
@@ -368,26 +376,39 @@ struct FleetView: View {
     }
 
     private var displaySections: [FleetDisplaySection] {
-        switch sortMode {
-        case .manufacturer:
-            return groupedSections(for: sortedShipGroups) { shipGroup in
-                normalizedHeaderTitle(FleetPresentationFormatter.manufacturerDisplayName(shipGroup.representative.manufacturer))
-                    ?? AppLocalizer.string("Unknown Manufacturer")
+        let signature = FleetDisplaySectionCache.Signature(
+            snapshotLastSyncedAt: snapshot.lastSyncedAt,
+            query: searchText,
+            sortMode: sortMode.rawValue,
+            languageRawValue: itemTranslator.language.rawValue,
+            dictionaryLocale: itemTranslator.dictionary?.locale,
+            dictionaryVersion: itemTranslator.dictionary?.version,
+            translationCacheGeneration: translationService.cacheGeneration
+        )
+
+        return displaySectionCache.sections(for: signature) {
+            let filteredGroups = filteredShipGroups
+            switch sortMode {
+            case .manufacturer:
+                return groupedSections(for: sortedShipGroups(from: filteredGroups)) { shipGroup in
+                    normalizedHeaderTitle(FleetPresentationFormatter.manufacturerDisplayName(shipGroup.representative.manufacturer))
+                        ?? AppLocalizer.string("Unknown Manufacturer")
+                }
+            case .function:
+                return functionSections(from: filteredGroups)
+            case .msrp:
+                return [
+                    FleetDisplaySection(
+                        title: nil,
+                        shipGroups: sortedShipGroups(from: filteredGroups)
+                    )
+                ]
             }
-        case .function:
-            return functionSections(from: filteredShipGroups)
-        case .msrp:
-            return [
-                FleetDisplaySection(
-                    title: nil,
-                    shipGroups: sortedShipGroups
-                )
-            ]
         }
     }
 
-    private var sortedShipGroups: [GroupedFleetShip] {
-        filteredShipGroups.sorted { lhs, rhs in
+    private func sortedShipGroups(from groups: [GroupedFleetShip]) -> [GroupedFleetShip] {
+        groups.sorted { lhs, rhs in
             switch sortMode {
             case .manufacturer:
                 if lhs.representative.manufacturer != rhs.representative.manufacturer {
@@ -510,16 +531,28 @@ struct FleetView: View {
 
     private var filteredShipGroups: [GroupedFleetShip] {
         let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
-        _ = translationService.cacheGeneration
 
         guard !normalizedSearchText.isEmpty else {
-            return snapshot.fleet.groupedForFleetDisplay
+            return allShipGroups
         }
 
-        return snapshot.fleet.groupedForFleetDisplay.filter { shipGroup in
+        let signature = FleetSearchHaystackCache.Signature(
+            snapshotLastSyncedAt: snapshot.lastSyncedAt,
+            languageRawValue: itemTranslator.language.rawValue,
+            dictionaryLocale: itemTranslator.dictionary?.locale,
+            dictionaryVersion: itemTranslator.dictionary?.version,
+            translationCacheGeneration: translationService.cacheGeneration
+        )
+
+        return allShipGroups.filter { shipGroup in
             shipGroup.ships.contains {
-                translationService
-                    .fleetSearchableText(for: $0, using: itemTranslator)
+                searchHaystackCache
+                    .haystack(
+                        for: $0,
+                        signature: signature,
+                        itemTranslator: itemTranslator,
+                        translationService: translationService
+                    )
                     .contains(normalizedSearchText)
             }
         }
@@ -529,11 +562,44 @@ struct FleetView: View {
         itemTranslationState.translator(for: hangarItemLanguageRawValue)
     }
 
+    private var hangarItemLanguageRawValue: String {
+        HangarItemLanguage.resolved(
+            forAppLanguageRawValue: appLanguageRawValue
+        ).rawValue
+    }
+
     private func loadItemTranslationDictionary() async {
         await itemTranslationState.loadDictionary(
             for: hangarItemLanguageRawValue,
             refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
         )
+        await warmSearchIndex()
+    }
+
+    private func warmSearchIndex() async {
+        let translator = itemTranslator
+        let signature = FleetSearchHaystackCache.Signature(
+            snapshotLastSyncedAt: snapshot.lastSyncedAt,
+            languageRawValue: translator.language.rawValue,
+            dictionaryLocale: translator.dictionary?.locale,
+            dictionaryVersion: translator.dictionary?.version,
+            translationCacheGeneration: translationService.cacheGeneration
+        )
+
+        for (offset, ship) in allShipGroups.flatMap(\.ships).enumerated() {
+            guard !Task.isCancelled else {
+                return
+            }
+            _ = searchHaystackCache.haystack(
+                for: ship,
+                signature: signature,
+                itemTranslator: translator,
+                translationService: translationService
+            )
+            if offset.isMultiple(of: 20) {
+                await Task.yield()
+            }
+        }
     }
 
     private func cardSubtitle(for shipGroup: GroupedFleetShip) -> String? {
@@ -611,7 +677,12 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
     }
 
     var badgeText: String? {
-        self == .wbccuDeals ? "BETA" : nil
+        switch self {
+        case .wbccuDeals, .authorizedDevices, .resetCharacter:
+            return "BETA"
+        case .allShips, .ccuChainCalculator, .eventCalendar:
+            return nil
+        }
     }
 
     var isAvailable: Bool {
@@ -663,10 +734,10 @@ struct FleetToolsSection: View {
 
             LazyVGrid(
                 columns: [
-                    GridItem(.flexible(), spacing: 12),
-                    GridItem(.flexible(), spacing: 12)
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
                 ],
-                spacing: 12
+                spacing: 10
             ) {
                 ForEach(orderedTools) { tool in
                     FleetToolTile(
@@ -767,7 +838,7 @@ struct FleetToolsSection: View {
             return
         }
 
-        let frame = toolFrames[tool] ?? CGRect(origin: .zero, size: CGSize(width: 164, height: 124))
+        let frame = toolFrames[tool] ?? CGRect(origin: .zero, size: CGSize(width: 164, height: 116))
         draggedToolLocation = CGPoint(x: frame.midX, y: frame.midY)
         draggedToolSize = frame.size
         draggedTool = tool
@@ -1021,46 +1092,84 @@ private struct FleetToolTile: View {
     let action: () -> Void
 
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: tool.systemImage)
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(tool.isAvailable && isEnabled ? Color.accentColor : .secondary)
-                .frame(width: 44, height: 44)
-                .background(
-                    Circle()
-                        .fill((tool.isAvailable && isEnabled ? Color.accentColor : Color.secondary).opacity(0.12))
-                )
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: tool.systemImage)
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(tool.isAvailable && isEnabled ? Color.accentColor : .secondary)
+                    .frame(width: 42, height: 42)
+                    .background(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .fill(
+                                (tool.isAvailable && isEnabled ? Color.accentColor : Color.secondary)
+                                    .opacity(0.13)
+                            )
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .strokeBorder(
+                                (tool.isAvailable && isEnabled ? Color.accentColor : Color.secondary)
+                                    .opacity(0.12)
+                            )
+                    }
 
-            HStack(spacing: 6) {
-                Text(tool.title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.85)
+                Spacer(minLength: 0)
 
                 if let badgeText = tool.badgeText {
-                    Text(badgeText)
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .foregroundStyle(Color.accentColor)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(Color.accentColor.opacity(0.14))
-                        )
-                        .accessibilityLabel(Text("Beta"))
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 4, height: 4)
+
+                        Text(badgeText)
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 5)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color.accentColor.opacity(0.12))
+                    )
+                    .overlay {
+                        Capsule(style: .continuous)
+                            .strokeBorder(Color.accentColor.opacity(0.12))
+                    }
+                    .accessibilityLabel(Text("Beta"))
                 }
             }
+
+            Spacer(minLength: 14)
+
+            Text(tool.title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+                .multilineTextAlignment(.leading)
+                .lineLimit(2)
+                .minimumScaleFactor(0.82)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 16)
-        .frame(maxWidth: .infinity, minHeight: 124)
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 116, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Color(.secondarySystemGroupedBackground))
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+
+                RadialGradient(
+                    colors: [Color.accentColor.opacity(0.07), .clear],
+                    center: .topLeading,
+                    startRadius: 0,
+                    endRadius: 130
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
         )
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.055), lineWidth: 0.75)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .opacity(tool.isAvailable && isEnabled ? 1 : 0.62)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel(
@@ -1088,7 +1197,6 @@ struct AllShipsBrowserView: View {
     @State private var loadState: AllShipsLoadState = .idle
     @State private var isRefreshingCatalog = false
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
-    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
     @State private var itemTranslationState = HangarItemTranslationViewState()
     @State private var translationService = OnDeviceHangarItemTranslationService.shared
 
@@ -1230,6 +1338,12 @@ struct AllShipsBrowserView: View {
 
     private var itemTranslator: HangarItemTranslator {
         itemTranslationState.translator(for: hangarItemLanguageRawValue)
+    }
+
+    private var hangarItemLanguageRawValue: String {
+        HangarItemLanguage.resolved(
+            forAppLanguageRawValue: appLanguageRawValue
+        ).rawValue
     }
 
     private func loadItemTranslationDictionary() async {
@@ -2601,10 +2715,6 @@ private struct FleetShipDetailHeroCard: View {
     }
 
     private var roleSummary: String? {
-        if let detail {
-            return FleetRoleFormatter.summary(type: detail.career, focus: detail.role)
-        }
-
         return FleetPresentationFormatter.roleSummary(
             role: ship.role,
             categories: ship.roleCategories
@@ -3267,6 +3377,73 @@ private struct FleetShipDetailPill: View {
                     .fill(tint)
             )
             .lineLimit(1)
+    }
+}
+
+@MainActor
+private final class FleetSearchHaystackCache {
+    struct Signature: Equatable {
+        let snapshotLastSyncedAt: Date
+        let languageRawValue: String
+        let dictionaryLocale: String?
+        let dictionaryVersion: Int?
+        let translationCacheGeneration: Int
+    }
+
+    private var activeSignature: Signature?
+    private var entries: [Int: String] = [:]
+
+    func haystack(
+        for ship: FleetShip,
+        signature: Signature,
+        itemTranslator: HangarItemTranslator,
+        translationService: OnDeviceHangarItemTranslationService
+    ) -> String {
+        if activeSignature != signature {
+            activeSignature = signature
+            entries.removeAll(keepingCapacity: true)
+        }
+
+        if let haystack = entries[ship.id] {
+            return haystack
+        }
+
+        let haystack = translationService.fleetSearchableText(
+            for: ship,
+            using: itemTranslator
+        )
+        entries[ship.id] = haystack
+        return haystack
+    }
+}
+
+@MainActor
+private final class FleetDisplaySectionCache {
+    struct Signature: Equatable {
+        let snapshotLastSyncedAt: Date
+        let query: String
+        let sortMode: String
+        let languageRawValue: String
+        let dictionaryLocale: String?
+        let dictionaryVersion: Int?
+        let translationCacheGeneration: Int
+    }
+
+    private var activeSignature: Signature?
+    private var cachedSections: [FleetDisplaySection] = []
+
+    func sections(
+        for signature: Signature,
+        build: () -> [FleetDisplaySection]
+    ) -> [FleetDisplaySection] {
+        guard activeSignature != signature else {
+            return cachedSections
+        }
+
+        let sections = build()
+        activeSignature = signature
+        cachedSections = sections
+        return sections
     }
 }
 

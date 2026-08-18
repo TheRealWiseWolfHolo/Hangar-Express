@@ -25,6 +25,11 @@ nonisolated struct HostedHangarItemTranslationClient: Sendable {
         guard let expectedLocale = language.translationLocaleIdentifier else {
             throw HostedShipCatalogError.invalidItemTranslationFeed("Original item language does not have a remote feed.")
         }
+        guard !urls.isEmpty else {
+            throw HostedShipCatalogError.invalidItemTranslationFeed(
+                "No hosted item translation feed URLs are configured in this build."
+            )
+        }
 
         var lastError: Error?
 
@@ -62,7 +67,9 @@ nonisolated struct HostedHangarItemTranslationClient: Sendable {
             }
         }
 
-        throw lastError ?? HostedShipCatalogError.httpStatus(-1)
+        throw lastError ?? HostedShipCatalogError.invalidItemTranslationFeed(
+            "No hosted item translation feed URLs are configured in this build."
+        )
     }
 
     static func decodeDictionary(

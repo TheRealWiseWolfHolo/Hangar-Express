@@ -59,7 +59,7 @@ struct HangarLogView: View {
     let appModel: AppModel
 
     @Environment(\.dismiss) private var dismiss
-    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
+    @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @State private var searchText = ""
     @State private var timeFilter: TimeFilter = .all
     @State private var actionFilter: ActionFilter = .all
@@ -316,6 +316,12 @@ struct HangarLogView: View {
 
     private var itemTranslator: HangarItemTranslator {
         itemTranslationState.translator(for: hangarItemLanguageRawValue)
+    }
+
+    private var hangarItemLanguageRawValue: String {
+        HangarItemLanguage.resolved(
+            forAppLanguageRawValue: appLanguageRawValue
+        ).rawValue
     }
 
     private func loadItemTranslationDictionary() async {

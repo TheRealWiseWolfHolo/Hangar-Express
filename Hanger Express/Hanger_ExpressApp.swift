@@ -23,6 +23,9 @@ struct Hanger_ExpressApp: App {
             ContentView(appModel: appModel)
                 .environment(\.locale, appLanguage.locale)
                 .preferredColorScheme(appAppearance.colorScheme)
+                .onChange(of: appLanguageRawValue, initial: true) { _, newValue in
+                    AppLocalizer.updateCurrentLanguage(rawValue: newValue)
+                }
         }
     }
 }

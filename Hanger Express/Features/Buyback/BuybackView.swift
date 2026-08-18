@@ -4,7 +4,6 @@ import UIKit
 struct BuybackView: View {
     let appModel: AppModel
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
-    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
 
     enum SearchFilter: CaseIterable, Identifiable {
         case standaloneShips
@@ -230,6 +229,12 @@ struct BuybackView: View {
 
     private var itemTranslator: HangarItemTranslator {
         itemTranslationState.translator(for: hangarItemLanguageRawValue)
+    }
+
+    private var hangarItemLanguageRawValue: String {
+        HangarItemLanguage.resolved(
+            forAppLanguageRawValue: appLanguageRawValue
+        ).rawValue
     }
 
     private func loadItemTranslationDictionary() async {
