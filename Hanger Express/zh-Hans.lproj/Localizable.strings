@@ -151,6 +151,7 @@
 "Identity verification failed." = "身份验证失败。";
 "Available" = "可用";
 "Unavailable" = "不可用";
+"Included" = "已包含";
 "Not yet synced" = "尚未同步";
 "Citizen" = "公民";
 "No Organization" = "无组织";
@@ -484,10 +485,10 @@
 "Tools" = "工具";
 "Ship Catalogue" = "舰船目录";
 "WBCCU Deals" = "WBCCU优惠";
-"WBCCU Deals Beta" = "WBCCU 优惠测试版";
+"WBCCU Deals Notice" = "WBCCU 优惠提示";
 "WBCCU Deals is an experimental feature. It depends on live data and automated interactions with the RSI website, which may change or fail without notice. Verify every item, price, and cart before checkout. Use this feature at your own risk." = "WBCCU 优惠是一项实验性功能。它依赖实时数据和与 RSI 网站的自动交互，RSI 网站可能随时变更，功能也可能在无提示的情况下失败。结账前请核对所有物品、价格和购物车内容。使用风险由你自行承担。";
 "Continue" = "继续";
-"%@, Beta" = "%@，测试版";
+"%@, Early Access" = "%@，抢先体验";
 "CCU Calculator" = "CCU计算器";
 "Source Ship" = "来源舰船";
 "Destination Ship" = "目标舰船";

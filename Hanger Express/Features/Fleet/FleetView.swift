@@ -676,12 +676,12 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
-    var badgeText: String? {
+    var requiresEarlyAccess: Bool {
         switch self {
-        case .wbccuDeals, .authorizedDevices, .resetCharacter:
-            return "BETA"
-        case .allShips, .ccuChainCalculator, .eventCalendar:
-            return nil
+        case .wbccuDeals:
+            return true
+        case .allShips, .authorizedDevices, .ccuChainCalculator, .resetCharacter, .eventCalendar:
+            return false
         }
     }
 
@@ -692,6 +692,28 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
             || self == .ccuChainCalculator
             || self == .resetCharacter
             || self == .eventCalendar
+    }
+}
+
+struct EarlyAccessBadgeIcon: View {
+    private let gold = Color(red: 0.92, green: 0.78, blue: 0.32)
+
+    var body: some View {
+        Image(systemName: "sparkles")
+            .font(.system(size: 12, weight: .bold))
+            .foregroundStyle(gold)
+            .frame(width: 30, height: 30)
+            .background(
+                Circle()
+                    .fill(Color.black.opacity(0.72))
+            )
+            .overlay {
+                Circle()
+                    .strokeBorder(gold.opacity(0.34), lineWidth: 1)
+            }
+            .shadow(color: Color.black.opacity(0.22), radius: 5, y: 2)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text("Early Access"))
     }
 }
 
@@ -1115,27 +1137,8 @@ private struct FleetToolTile: View {
 
                 Spacer(minLength: 0)
 
-                if let badgeText = tool.badgeText {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(Color.accentColor)
-                            .frame(width: 4, height: 4)
-
-                        Text(badgeText)
-                            .font(.system(size: 9, weight: .bold, design: .rounded))
-                    }
-                    .foregroundStyle(Color.accentColor)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 5)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(Color.accentColor.opacity(0.12))
-                    )
-                    .overlay {
-                        Capsule(style: .continuous)
-                            .strokeBorder(Color.accentColor.opacity(0.12))
-                    }
-                    .accessibilityLabel(Text("Beta"))
+                if tool.requiresEarlyAccess {
+                    EarlyAccessBadgeIcon()
                 }
             }
 
@@ -1173,9 +1176,9 @@ private struct FleetToolTile: View {
         .opacity(tool.isAvailable && isEnabled ? 1 : 0.62)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel(
-            tool.badgeText == nil
-                ? tool.title
-                : AppLocalizer.format("%@, Beta", tool.title)
+            tool.requiresEarlyAccess
+                ? AppLocalizer.format("%@, Early Access", tool.title)
+                : tool.title
         )
         .accessibilityAction {
             guard tool.isAvailable && isEnabled else {

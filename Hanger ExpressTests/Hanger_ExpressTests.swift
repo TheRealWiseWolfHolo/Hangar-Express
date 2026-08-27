@@ -7,6 +7,16 @@ import WebKit
 
 @MainActor
 struct Hanger_ExpressTests {
+    @Test func onlyWBCCUDealsRequiresEarlyAccess() {
+        let earlyAccessTools = Set(
+            FleetTool.allCases.filter(\.requiresEarlyAccess)
+        )
+
+        #expect(
+            earlyAccessTools == Set([FleetTool.wbccuDeals])
+        )
+    }
+
     @Test func sampleSnapshotRollsUpMetrics() async throws {
         let snapshot = PreviewHangarRepository.sampleSnapshot
 

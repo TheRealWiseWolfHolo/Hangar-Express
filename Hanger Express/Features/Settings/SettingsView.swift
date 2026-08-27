@@ -617,7 +617,7 @@ private struct ProSubscriptionSection: View {
     }
 }
 
-private struct ProPlansSheet: View {
+struct ProPlansSheet: View {
     @Environment(\.dismiss) private var dismiss
     let subscriptionStore: SubscriptionStore
     @Binding var showsEarlyAccessBadge: Bool
@@ -906,7 +906,8 @@ private struct ProFeatureComparisonCard: View {
     private let rows = [
         FeatureComparisonRow(feature: "Sync Speed", standard: "2x", pro: "Up to 10x"),
         FeatureComparisonRow(feature: "Hangar Log", standard: "Up to 5 Entries", pro: "Up to 500 Entries"),
-        FeatureComparisonRow(feature: "Account Switching", standard: "1 Account", pro: "Up to 10 Accounts")
+        FeatureComparisonRow(feature: "Account Switching", standard: "1 Account", pro: "Up to 10 Accounts"),
+        FeatureComparisonRow(feature: "WBCCU Deals", standard: "Unavailable", pro: "Included")
     ]
 
     var body: some View {

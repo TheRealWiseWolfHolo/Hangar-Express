@@ -17,6 +17,7 @@ struct AccountView: View {
     @State private var isOverviewSavedLoginVisible = false
     @State private var presentedTool: FleetTool?
     @State private var isShowingWBCCUDisclaimer = false
+    @State private var isShowingEarlyAccessPlans = false
     @State private var isToolReordering = false
     @State private var isLoadingReferralInviteCode = false
     @State private var copiedReferralInviteCode = false
@@ -185,6 +186,13 @@ struct AccountView: View {
                     totalSpendUSD: snapshot.metrics.totalSpendUSD
                 )
             }
+            .sheet(isPresented: $isShowingEarlyAccessPlans) {
+                ProPlansSheet(
+                    subscriptionStore: appModel.subscriptionStore,
+                    showsEarlyAccessBadge: $showsEarlyAccessBadge
+                )
+                .presentationDetents([.medium, .large])
+            }
             .sheet(item: $presentedTool) { tool in
                 switch tool {
                 case .allShips:
@@ -220,7 +228,7 @@ struct AccountView: View {
             } message: {
                 Text(referralInviteCopyErrorMessage ?? "")
             }
-            .alert("WBCCU Deals Beta", isPresented: $isShowingWBCCUDisclaimer) {
+            .alert("WBCCU Deals Notice", isPresented: $isShowingWBCCUDisclaimer) {
                 Button("Cancel", role: .cancel) {}
                 Button("Continue") {
                     hasAcknowledgedWBCCUDisclaimer = true
@@ -237,6 +245,11 @@ struct AccountView: View {
 
     private func handleToolSelection(_ tool: FleetTool) {
         guard tool.isAvailable else {
+            return
+        }
+
+        guard !tool.requiresEarlyAccess || appModel.isPro else {
+            isShowingEarlyAccessPlans = true
             return
         }
 
@@ -1157,98 +1170,31 @@ private enum AccountProBadgeKind {
 private struct AccountProBadge: View {
     let kind: AccountProBadgeKind
 
+    private let gold = Color(red: 0.92, green: 0.78, blue: 0.32)
+
     var body: some View {
-        HStack(alignment: .center, spacing: 3) {
-            VStack(alignment: .leading, spacing: -1) {
-                Text(verbatim: "Early")
-                Text(verbatim: "Access")
-            }
-            .font(.system(size: 8.5, weight: .heavy, design: .rounded))
-            .lineLimit(1)
+        HStack(spacing: 5) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 10, weight: .bold))
 
-            if kind == .proPlus {
-                Text("+")
-                    .font(.system(size: 18, weight: .black, design: .rounded))
-                    .baselineOffset(0.5)
-            }
+            Text(verbatim: "Early Access")
+                .font(.system(size: 9, weight: .heavy, design: .rounded))
+                .lineLimit(1)
         }
-        .foregroundStyle(textColor)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(backgroundGradient)
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .stroke(borderGradient, lineWidth: 1)
-            )
-            .shadow(color: shadowColor, radius: 8, y: 3)
+        .foregroundStyle(gold)
+        .padding(.horizontal, 8)
+        .frame(height: 30)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.black.opacity(0.72))
+        )
+        .overlay {
+            Capsule(style: .continuous)
+                .strokeBorder(gold.opacity(0.34), lineWidth: 1)
+        }
+        .shadow(color: Color.black.opacity(0.22), radius: 5, y: 2)
+        .accessibilityElement(children: .ignore)
             .accessibilityLabel(kind.accessibilityLabel)
-    }
-
-    private var textColor: Color {
-        switch kind {
-        case .pro:
-            return Color(red: 0.96, green: 0.94, blue: 0.86)
-        case .proPlus:
-            return Color(red: 0.92, green: 0.78, blue: 0.32)
-        }
-    }
-
-    private var backgroundGradient: LinearGradient {
-        switch kind {
-        case .pro:
-            return LinearGradient(
-                colors: [
-                    Color(red: 0.16, green: 0.18, blue: 0.22).opacity(0.96),
-                    Color(red: 0.38, green: 0.36, blue: 0.29).opacity(0.9)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        case .proPlus:
-            return LinearGradient(
-                colors: [
-                    Color.black.opacity(0.72),
-                    Color.black.opacity(0.46)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        }
-    }
-
-    private var borderGradient: LinearGradient {
-        switch kind {
-        case .pro:
-            return LinearGradient(
-                colors: [
-                    Color.white.opacity(0.34),
-                    Color(red: 0.95, green: 0.78, blue: 0.38).opacity(0.24)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        case .proPlus:
-            return LinearGradient(
-                colors: [
-                    Color(red: 0.92, green: 0.78, blue: 0.32).opacity(0.42),
-                    Color(red: 0.92, green: 0.78, blue: 0.32).opacity(0.16)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        }
-    }
-
-    private var shadowColor: Color {
-        switch kind {
-        case .pro:
-            return Color.black.opacity(0.24)
-        case .proPlus:
-            return Color.black.opacity(0.32)
-        }
     }
 }
 
