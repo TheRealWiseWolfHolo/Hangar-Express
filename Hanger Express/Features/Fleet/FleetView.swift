@@ -530,6 +530,9 @@ struct FleetView: View {
     }
 
     private var filteredShipGroups: [GroupedFleetShip] {
+        let performanceInterval = PerformanceTrace.begin("FleetSearch")
+        defer { PerformanceTrace.end("FleetSearch", performanceInterval) }
+
         let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
 
         guard !normalizedSearchText.isEmpty else {

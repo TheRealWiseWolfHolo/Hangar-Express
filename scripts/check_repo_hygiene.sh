@@ -42,7 +42,7 @@ scan_repo() {
     exit 1
   fi
 
-  if git grep -n -I -e "$forbidden_content_pattern" -- . ':(exclude)scripts/check_repo_hygiene.sh' > "$tmpdir/forbidden-content.txt"; then
+  if git grep -n -I -E -e "$forbidden_content_pattern" -- . ':(exclude)scripts/check_repo_hygiene.sh' > "$tmpdir/forbidden-content.txt"; then
     printf '%s\n' 'Sensitive content markers detected in tracked files:' >&2
     cat "$tmpdir/forbidden-content.txt" >&2
     exit 1

@@ -192,15 +192,15 @@ struct BuybackView: View {
                     context: context,
                     onCancel: { cookies in
                         checkoutContext = nil
-                        completeBuybackCheckout(exportedCookies: cookies)
+                        completeBuybackCheckout(exportedCookies: cookies, context: context)
                     },
                     onFinished: { cookies in
                         checkoutContext = nil
-                        completeBuybackCheckout(exportedCookies: cookies)
+                        completeBuybackCheckout(exportedCookies: cookies, context: context)
                     },
                     onSucceeded: { cookies, _ in
                         checkoutContext = nil
-                        completeBuybackCheckout(exportedCookies: cookies)
+                        completeBuybackCheckout(exportedCookies: cookies, context: context)
                     }
                 )
             }
@@ -208,6 +208,9 @@ struct BuybackView: View {
     }
 
     private var filteredItemGroups: [GroupedBuybackPledge] {
+        let performanceInterval = PerformanceTrace.begin("BuybackSearch")
+        defer { PerformanceTrace.end("BuybackSearch", performanceInterval) }
+
         _ = translationService.cacheGeneration
 
         return snapshot.buyback.groupedForBuybackDisplay.filter { itemGroup in
@@ -277,8 +280,11 @@ struct BuybackView: View {
             isPreparingCheckout = false
         }
 
+        let accountID = appModel.session?.id
+        let generation = appModel.accountContextGeneration
         do {
             let preparation = try await appModel.prepareBuybackCheckout(for: itemGroup.checkoutPledge)
+            guard accountID == appModel.session?.id, generation == appModel.accountContextGeneration else { return }
             let cookies = RSISessionCookieSet.merging(
                 savedCookies: appModel.session?.cookies ?? [],
                 refreshedCookies: preparation.updatedCookies
@@ -287,16 +293,20 @@ struct BuybackView: View {
                 itemTitle: itemGroup.representative.title,
                 checkoutURL: preparation.checkoutURL,
                 cookies: cookies,
-                navigationTitle: "Buy-back Checkout"
+                navigationTitle: "Buy-back Checkout",
+                accountID: accountID, accountGeneration: generation
             )
         } catch {
             buybackError = BuybackCheckoutError(message: error.localizedDescription)
         }
     }
 
-    private func completeBuybackCheckout(exportedCookies: [SessionCookie]) {
+    private func completeBuybackCheckout(exportedCookies: [SessionCookie], context: RSICheckoutContext) {
         Task {
-            await appModel.persistBrowserCookies(exportedCookies)
+            guard let accountID = context.accountID, accountID == appModel.session?.id,
+                  context.accountGeneration == appModel.accountContextGeneration else { return }
+            await appModel.persistBrowserCookies(exportedCookies, for: accountID, generation: context.accountGeneration)
+            guard accountID == appModel.session?.id, context.accountGeneration == appModel.accountContextGeneration else { return }
             await appModel.refresh(scope: .full)
         }
     }
@@ -363,6 +373,8 @@ struct BuybackView: View {
 struct RSICheckoutContext: Identifiable, Hashable {
     let id = UUID()
     let itemTitle: String
+    let accountID: UUID?
+    let accountGeneration: UInt64
     let checkoutURL: URL
     let cookies: [SessionCookie]
     let navigationTitle: String
@@ -374,10 +386,13 @@ struct RSICheckoutContext: Identifiable, Hashable {
         checkoutURL: URL,
         cookies: [SessionCookie],
         navigationTitle: String,
+        accountID: UUID?, accountGeneration: UInt64,
         completionButtonTitle: String = "Finished Shopping",
         automation: RSICheckoutAutomation? = nil
     ) {
         self.itemTitle = itemTitle
+        self.accountID = accountID
+        self.accountGeneration = accountGeneration
         self.checkoutURL = checkoutURL
         self.cookies = cookies
         self.navigationTitle = navigationTitle

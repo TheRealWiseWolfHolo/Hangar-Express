@@ -498,6 +498,7 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
     let buyback: [BuybackPledge]
     let hangarLogs: [HangarLogEntry]
     let referralStats: ReferralStats
+    let gameAccess: RSIGameAccessSummary?
 
     init(
         accountHandle: String,
@@ -511,7 +512,8 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
         fleet: [FleetShip],
         buyback: [BuybackPledge],
         hangarLogs: [HangarLogEntry] = [],
-        referralStats: ReferralStats = .unavailable
+        referralStats: ReferralStats = .unavailable,
+        gameAccess: RSIGameAccessSummary? = nil
     ) {
         self.accountHandle = accountHandle
         self.lastSyncedAt = lastSyncedAt
@@ -525,6 +527,7 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
         self.buyback = buyback
         self.hangarLogs = hangarLogs
         self.referralStats = referralStats
+        self.gameAccess = gameAccess
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -540,6 +543,7 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
         case buyback
         case hangarLogs
         case referralStats
+        case gameAccess
     }
 
     init(from decoder: Decoder) throws {
@@ -558,6 +562,7 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
         buyback = try container.decodeIfPresent([BuybackPledge].self, forKey: .buyback) ?? []
         hangarLogs = try container.decodeIfPresent([HangarLogEntry].self, forKey: .hangarLogs) ?? []
         referralStats = try container.decodeIfPresent(ReferralStats.self, forKey: .referralStats) ?? .unavailable
+        gameAccess = try container.decodeIfPresent(RSIGameAccessSummary.self, forKey: .gameAccess)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -574,6 +579,7 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
         try container.encode(buyback, forKey: .buyback)
         try container.encode(hangarLogs, forKey: .hangarLogs)
         try container.encode(referralStats, forKey: .referralStats)
+        try container.encodeIfPresent(gameAccess, forKey: .gameAccess)
     }
 
     func updatingHangar(
@@ -593,7 +599,8 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
             fleet: fleet,
             buyback: buyback,
             hangarLogs: hangarLogs,
-            referralStats: referralStats
+            referralStats: referralStats,
+            gameAccess: gameAccess
         )
     }
 
@@ -627,7 +634,8 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
             fleet: fleet,
             buyback: buyback,
             hangarLogs: hangarLogs,
-            referralStats: referralStats
+            referralStats: referralStats,
+            gameAccess: gameAccess
         )
     }
 
@@ -647,7 +655,8 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
             fleet: fleet,
             buyback: buyback,
             hangarLogs: hangarLogs,
-            referralStats: referralStats
+            referralStats: referralStats,
+            gameAccess: gameAccess
         )
     }
 
@@ -659,6 +668,7 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
         storeCreditUSD: Decimal?,
         totalSpendUSD: Decimal?,
         referralStats: ReferralStats,
+        gameAccess: RSIGameAccessSummary? = nil,
         lastSyncedAt: Date = .now
     ) -> HangarSnapshot {
         HangarSnapshot(
@@ -673,7 +683,8 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
             fleet: fleet,
             buyback: buyback,
             hangarLogs: hangarLogs,
-            referralStats: referralStats
+            referralStats: referralStats,
+            gameAccess: gameAccess ?? self.gameAccess
         )
     }
 
@@ -692,6 +703,7 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
                 storeCreditUSD: storeCreditUSD,
                 totalSpendUSD: totalSpendUSD,
                 referralStats: referralStats,
+                gameAccess: gameAccess ?? previousSnapshot.gameAccess,
                 lastSyncedAt: lastSyncedAt
             )
         }
@@ -704,6 +716,7 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
             storeCreditUSD: storeCreditUSD,
             totalSpendUSD: totalSpendUSD,
             referralStats: referralStats,
+            gameAccess: gameAccess ?? previousSnapshot.gameAccess,
             lastSyncedAt: lastSyncedAt
         )
     }
@@ -1524,6 +1537,9 @@ nonisolated struct GroupedHangarPackage: Identifiable, Hashable, Sendable {
 
 extension Sequence where Element == HangarPackage {
     var groupedForInventoryDisplay: [GroupedHangarPackage] {
+        let performanceInterval = PerformanceTrace.begin("GroupHangar")
+        defer { PerformanceTrace.end("GroupHangar", performanceInterval) }
+
         var orderedKeys: [HangarPackage.InventoryGroupingKey] = []
         var groupedPackages: [HangarPackage.InventoryGroupingKey: [HangarPackage]] = [:]
 
@@ -1830,6 +1846,9 @@ nonisolated struct GroupedFleetShip: Identifiable, Hashable, Sendable {
 
 extension Sequence where Element == FleetShip {
     var groupedForFleetDisplay: [GroupedFleetShip] {
+        let performanceInterval = PerformanceTrace.begin("GroupFleet")
+        defer { PerformanceTrace.end("GroupFleet", performanceInterval) }
+
         var orderedKeys: [FleetShip.GroupingKey] = []
         var groupedShips: [FleetShip.GroupingKey: [FleetShip]] = [:]
 
@@ -2086,6 +2105,9 @@ nonisolated struct GroupedBuybackPledge: Identifiable, Hashable, Sendable {
 
 extension Sequence where Element == BuybackPledge {
     var groupedForBuybackDisplay: [GroupedBuybackPledge] {
+        let performanceInterval = PerformanceTrace.begin("GroupBuyback")
+        defer { PerformanceTrace.end("GroupBuyback", performanceInterval) }
+
         var orderedKeys: [BuybackPledge.GroupingKey] = []
         var groupedPledges: [BuybackPledge.GroupingKey: [BuybackPledge]] = [:]
 

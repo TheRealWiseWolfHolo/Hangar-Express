@@ -1,5 +1,53 @@
 # Changelog
 
+## v1.1.0 (In Progress)
+
+### English
+
+- Hangar share pictures now use the selected item translation mode and the same displayed pledge title as the Hangar list. In Cloud mode, new names remain in English until their translations are reviewed and published.
+- Cloud translation submissions now provide a premium appearance count in the private review database, helping prioritize terms seen by Pro subscribers.
+- Chinese catalog translations now consistently use straight single quotation marks, including reviewed entries and new machine suggestions.
+- Hangar search now keeps its filters and results visible when the keyboard is dismissed. An X in the search field closes and clears the search.
+- Debounced search updates no longer replace newer keyboard input, and authentication transitions respect an in-progress account switch.
+- The email verification-code field now has a native Paste button, making copied RSI codes quicker to enter.
+- The RSI CAPTCHA image stays visible above its code field while the keyboard is open, and the authentication screen can scroll on smaller displays.
+- Removed the redundant text-format icon from the CAPTCHA code field.
+- Item translation reveals now animate row height when English and Chinese names use different numbers of lines, and clear the color effect when a row leaves the screen.
+- Account now shows Star Citizen and Squadron 42 game access in blue and green glass indicators, using RSI's signed-in Games Library entitlements.
+- Fixed game access checks that could remain unavailable by matching the Games Library's authenticated GET request and retrying through the app's RSI browser session when a direct request is rejected. Corrected a crash in that fallback when its response was plain text.
+- Integrated the Star Citizen and Squadron 42 access indicators into the profile card as a compact glass footer with a center divider and restrained blue and green accents.
+- The game-access footer now uses each game's logo and shows access through brightness alone. Entitlements refresh with Account and Full Refresh, then stay in the locally saved account snapshot instead of being requested when the Account tab opens.
+- The profile card's game-access footer now uses native Liquid Glass with vivid blue and green halves, a clean center split, and a shorter height. Its tint adapts to dark and light mode over a pure black or white base; the profile artwork stops above it.
+- The game-access footer now labels Star Citizen and Squadron 42 in Chinese when the app language is Chinese, with each logo and label centered in its half of the bar. The labels update immediately when the app language changes.
+- Fleet ship matching now recognizes both legacy Constellation names and CIG's Mk IV names. The hosted catalog restores the separate Phoenix Emerald entry with its last published MSRP, image, and role.
+- Unit tests now use isolated HTTP fixtures, preferences, caches, and temporary storage, with a shared simulator test scheme and automated build and test checks.
+- Added opt-in offline performance workloads and pipeline tracing to measure large inventories before optimization.
+- Saved accounts now update in Keychain without deleting the previous entry first. Storage failures are shown explicitly and preserve the current account and cached content.
+- Refreshes and account actions now reject late results after an account change. Conflicting actions are serialized through authorization and reconciliation, and uncertain submitted actions require review before retrying.
+
+### 简体中文
+
+- 机库分享图片现在会遵循所选物品翻译方式，并使用与机库列表相同的商品名称。在云端模式下，新名称会保持英文，直到译文审核并发布。
+- 云端翻译提交现在会在私有审核数据库中记录 Pro 用户的条目出现次数，帮助确定译文审核优先顺序。
+- 中文物品译名统一使用半角单引号，包括已审核条目和新生成的机器译文。
+- 收起键盘后，机库搜索筛选和结果会继续显示；搜索框右侧的 X 可关闭并清除搜索。
+- 修复延迟搜索更新覆盖新输入文字，以及重新登录流程绕过账户切换保护的问题。
+- 邮件验证码输入框新增系统“粘贴”按钮，方便快速输入已复制的 RSI 验证码。
+- 输入 RSI 图形验证码时，即使键盘弹出，验证码图片仍会显示在输入框上方；在较小屏幕上也可滚动登录页面。
+- 移除了图形验证码输入框左侧多余的文字格式图标。
+- 英文与中文物品名称行数不同时，翻译动画现在会平滑调整条目高度；条目离开屏幕时也会清除残留的彩色效果。
+- 账户页新增蓝色的 Star Citizen 和绿色的 Squadron 42 玻璃质感权限标识，依据 RSI 登录后的游戏库权益显示状态。
+- 修复游戏权限一直显示“暂时无法检查权限”的问题：使用与 RSI 游戏库一致的登录请求，并在直接请求失败时通过应用内的 RSI 浏览器会话重试；同时修复处理该浏览器返回文本时导致的闪退。
+- Star Citizen 与 Squadron 42 权限标识现已融入个人资料卡片，成为带中间分隔线、淡雅蓝绿配色的紧凑玻璃质感底栏。
+- 游戏权限底栏改用两款游戏的标志，并仅通过亮度显示权限状态；权限数据随“刷新账户”和“全部刷新”更新，保存在本机账户快照中，不再于打开账户页时单独请求。
+- 个人资料卡片的游戏权限底栏改用原生液态玻璃效果，蓝绿两半在中间清晰分界，整体高度也更紧凑。色调分别适配深色与浅色模式，底色为纯黑或纯白，背景图止于底栏上方。
+- 应用语言为中文时，游戏权限底栏显示“星际公民”和“42中队”；每组图标与文字在各自半栏中居中显示。切换应用语言后，文字会立即更新。
+- 舰队资料现可同时匹配旧版星座系列名称和 CIG 新增的 Mk IV 名称；线上舰船目录也恢复了独立的凤凰翡翠版条目及其上次发布的建议售价、图片和定位。
+- 单元测试改用独立的网络模拟、偏好设置、缓存与临时存储，并新增共享模拟器测试方案和自动构建测试检查。
+- 新增可选的离线性能测试数据和处理阶段追踪，用于在优化前测量大型机库的性能。
+- 更新已保存账户时不再先删除原有钥匙串条目；安全存储失败时会明确提示，并保留当前账户与缓存内容。
+- 切换账户后会忽略刷新和账户操作的过期结果；有冲突的操作会从身份验证到结果核对全程互斥，已提交但结果不确定的操作须先检查确认，才能重试。
+
 ## v1.0.10 (Release Candidate)
 
 ### English

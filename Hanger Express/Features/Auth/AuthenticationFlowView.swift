@@ -57,7 +57,20 @@ struct AuthenticationFlowView: View {
             ZStack(alignment: .top) {
                 AuthenticationBackground()
 
-                authenticationContent
+                ScrollView(.vertical) {
+                    authenticationContent
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if isCaptchaCodeFocused, let image = captchaImage {
+                        captchaArtwork(image, maxHeight: 124)
+                            .frame(maxWidth: 640)
+                            .padding(.horizontal, 20)
+                            .padding(.bottom, 8)
+                            .frame(maxWidth: .infinity)
+                            .background(.regularMaterial)
+                    }
+                }
             }
             .id(appLanguageRawValue)
             .navigationTitle("")
@@ -327,31 +340,18 @@ struct AuthenticationFlowView: View {
 
             AuthenticationCard {
                 VStack(spacing: 16) {
-                    if let data = viewModel.captchaImageData, let image = UIImage(data: data) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxHeight: 180)
-                            .frame(maxWidth: .infinity)
-                            .padding(10)
-                            .background(.white, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                            .accessibilityLabel("RSI CAPTCHA image")
+                    if !isCaptchaCodeFocused, let image = captchaImage {
+                        captchaArtwork(image, maxHeight: 180)
                     }
 
-                    HStack(spacing: 12) {
-                        Image(systemName: "textformat.abc")
-                            .frame(width: 22)
-                            .foregroundStyle(.secondary)
-
-                        TextField("CAPTCHA Code", text: $viewModel.captchaCode)
-                            .textInputAutocapitalization(.characters)
-                            .autocorrectionDisabled()
-                            .keyboardType(.asciiCapable)
-                            .focused($focusedField, equals: .captcha)
-                            .submitLabel(.go)
-                            .onSubmit { Task { await viewModel.submitCaptcha() } }
-                    }
-                    .authenticationInputSurface()
+                    TextField("CAPTCHA Code", text: $viewModel.captchaCode)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+                        .keyboardType(.asciiCapable)
+                        .focused($focusedField, equals: .captcha)
+                        .submitLabel(.go)
+                        .onSubmit { Task { await viewModel.submitCaptcha() } }
+                        .authenticationInputSurface()
 
                     Button {
                         focusedField = nil
@@ -380,6 +380,25 @@ struct AuthenticationFlowView: View {
                 }
             }
         }
+    }
+
+    private var isCaptchaCodeFocused: Bool {
+        viewModel.step == .captcha && focusedField == .captcha
+    }
+
+    private var captchaImage: UIImage? {
+        viewModel.captchaImageData.flatMap(UIImage.init(data:))
+    }
+
+    private func captchaArtwork(_ image: UIImage, maxHeight: CGFloat) -> some View {
+        Image(uiImage: image)
+            .resizable()
+            .scaledToFit()
+            .frame(maxHeight: maxHeight)
+            .frame(maxWidth: .infinity)
+            .padding(10)
+            .background(.white, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .accessibilityLabel("RSI CAPTCHA image")
     }
 
     private var savedAccountsSection: some View {
@@ -480,6 +499,17 @@ struct AuthenticationFlowView: View {
                             .autocorrectionDisabled()
                             .textContentType(.oneTimeCode)
                             .focused($focusedField, equals: .verificationCode)
+
+                        PasteButton(payloadType: String.self) { strings in
+                            guard let code = strings.first else { return }
+                            viewModel.updateVerificationCode(code)
+                        }
+                        .labelStyle(.titleOnly)
+                        .controlSize(.small)
+                        .buttonBorderShape(.capsule)
+                        .tint(.accentColor)
+                        .accessibilityLabel(Text("Paste Verification Code"))
+                        .disabled(viewModel.isSubmitting)
                     }
                     .authenticationInputSurface()
 

@@ -56,6 +56,8 @@ struct RootView: View {
                 }
             }
 
+            .id(appModel.accountContextGeneration)
+
             if let startupActivity = appModel.startupActivity {
                 StartupWarmupOverlay(
                     title: startupActivity.title,

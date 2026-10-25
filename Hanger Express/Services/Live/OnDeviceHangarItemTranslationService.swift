@@ -66,7 +66,17 @@ private actor OneShotAsyncResult<Value: Sendable> {
 @MainActor
 @Observable
 final class OnDeviceHangarItemTranslationService {
-    static let shared = OnDeviceHangarItemTranslationService()
+    static let shared: OnDeviceHangarItemTranslationService = {
+        #if DEBUG || HANGAR_BENCHMARKS
+        if BenchmarkDashboardView.requestedSize != nil {
+            // Offline UI measurements must not load the user's translation cache.
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("BenchmarkTranslations-\(UUID().uuidString)", isDirectory: true)
+            return OnDeviceHangarItemTranslationService(directoryURL: directory)
+        }
+        #endif
+        return OnDeviceHangarItemTranslationService()
+    }()
 
     private let persistenceWriter: OnDeviceTranslationCachePersistenceWriter
     private var cachedTranslations: [CacheKey: String] = [:]

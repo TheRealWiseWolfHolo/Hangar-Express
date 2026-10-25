@@ -158,6 +158,16 @@ nonisolated enum UpgradeTitleParser {
             index += 1
         }
 
+        // RSI's pledge listing added Mk IV to the original Constellation names,
+        // while older hangar pledges and the ship-detail feed still omit it.
+        if normalizedTokens.count >= 4,
+           normalizedTokens[0] == "constellation",
+           normalizedTokens[1] == "mk",
+           normalizedTokens[2] == "iv",
+           ["andromeda", "aquila", "phoenix", "taurus"].contains(normalizedTokens[3]) {
+            normalizedTokens.removeSubrange(1...2)
+        }
+
         let canonicalKey = normalizedTokens.joined(separator: " ")
         return legacyShipAliases[canonicalKey] ?? canonicalKey
     }
@@ -388,6 +398,15 @@ nonisolated struct RSIShipCatalog: Sendable {
                let mirroredImageURL = ship.imageURL,
                sourceImageURL != mirroredImageURL {
                 mirroredImages[sourceImageURL.absoluteString] = mirroredImageURL
+            }
+        }
+
+        // The hosted feed can retain historic names without letting an alias
+        // override another ship's primary name.
+        for ship in ships {
+            for alias in ship.aliases {
+                let key = UpgradeTitleParser.normalizedShipKey(alias)
+                keyedShips[key] = keyedShips[key] ?? ship
             }
         }
 

@@ -324,6 +324,9 @@ nonisolated enum CCUUpgradePlanner {
         selectedSourceMeltValueUSD: Decimal? = nil,
         excludedCandidateIDs: Set<String> = []
     ) -> CCUUpgradeRoute? {
+        let performanceInterval = PerformanceTrace.begin("CCURoute")
+        defer { PerformanceTrace.end("CCURoute", performanceInterval) }
+
         guard sourceShip.msrpUSD.isLessThan(destinationShip.msrpUSD) else {
             return nil
         }

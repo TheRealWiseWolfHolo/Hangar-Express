@@ -1,0 +1,55 @@
+name: iOS Build and Unit Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: xcode-27
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show toolchain and simulator runtime
+        run: |
+          xcodebuild -version
+          xcrun simctl list runtimes
+
+      - name: Build and run unit tests in parallel
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project 'Hanger Express.xcodeproj' \
+            -scheme 'Hanger Express Unit Tests' \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.0' \
+            -derivedDataPath "$RUNNER_TEMP/hangar-derived" \
+            -resultBundlePath "$RUNNER_TEMP/hangar-unit-tests.xcresult" \
+            -parallel-testing-enabled YES \
+            -maximum-parallel-testing-workers 2 \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee "$RUNNER_TEMP/hangar-unit-tests.log"
+
+      - name: Upload test results and build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unit-test-results
+          path: |
+            ${{ runner.temp }}/hangar-unit-tests.xcresult
+            ${{ runner.temp }}/hangar-unit-tests.log
+          if-no-files-found: warn
+          retention-days: 14

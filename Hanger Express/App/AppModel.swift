@@ -668,9 +668,11 @@ final class AppModel {
     var selectedTab: Tab = .hangar
     var session: UserSession?
     var savedSessions: [UserSession] = []
-    var loadState: LoadState = .idle
+    @ObservationIgnored private var snapshotRevision: UInt64 = 0
+    var loadState: LoadState = .idle { didSet { snapshotRevision &+= 1 } }
     var lastRefreshAt: Date?
     var lastRefreshErrorMessage: String?
+    var sessionStorageErrorMessage: String?
     var lastRefreshErrorScope: RefreshScope?
     var activeRefreshScope: RefreshScope?
     let refreshPresentation = RefreshPresentation()
@@ -688,6 +690,7 @@ final class AppModel {
     var itemTranslationDictionaryRefreshGeneration = 0
     private var hangarLogRefreshPreviewLogs: [HangarLogEntry] = []
     var previewsTranslationLoadingBar = false
+    private var startupActivityID: UUID?
     var startupActivity: StartupActivity?
     var transientBanner: TransientBanner?
 
@@ -698,14 +701,22 @@ final class AppModel {
     let refreshDiagnostics: RefreshDiagnosticsStore
     let subscriptionStore: SubscriptionStore
 
+    private let accountOperations: AccountOperationCoordinator
+    private var accountTransitionInProgress = false
+    private var refreshOperationID: UUID?
+    private var postRefreshImageTask: Task<Void, Never>?
     private let sessionStore: any SessionStore
     private let snapshotStore: any SnapshotStore
     private let imageCache: any RemoteImageCaching
     private let hangarRepository: any HangarRepository
     private let sensitiveActionAuthorizer: any SensitiveActionAuthorizing
     private let userDefaults: UserDefaults
+    private let responseCache: URLCache
+    private let shipCatalogStore: HostedShipCatalogStore
+    private let shipDetailCatalogStore: HostedShipDetailCatalogStore
     private var hasBootstrapped = false
     private var pendingAuthenticationDraft: AuthenticationDraft?
+    private var reconciliationOwner: AccountOperationOwner?
     private var silentHangarActionReconciliationTask: Task<Void, Never>?
     private var silentHangarActionReconciliationGeneration = 0
     private var completedRefreshPresentationDismissalTask: Task<Void, Never>?
@@ -775,6 +786,7 @@ final class AppModel {
     ]
 
     init(environment: AppEnvironment) {
+        accountOperations = AccountOperationCoordinator(defaults: environment.userDefaults)
         sessionStore = environment.sessionStore
         snapshotStore = environment.snapshotStore
         imageCache = environment.imageCache
@@ -787,6 +799,9 @@ final class AppModel {
         refreshDiagnostics = environment.refreshDiagnostics
         subscriptionStore = environment.subscriptionStore
         userDefaults = environment.userDefaults
+        responseCache = environment.responseCache
+        shipCatalogStore = environment.shipCatalogStore
+        shipDetailCatalogStore = environment.shipDetailCatalogStore
     }
 
     var snapshot: HangarSnapshot? {
@@ -1021,12 +1036,28 @@ final class AppModel {
         await subscriptionStore.start()
     }
 
+    func reportPremiumTranslationOccurrencesIfNeeded() async {
+        let currentPreload = itemTranslationPreloadTask
+        await currentPreload?.value
+        guard isPro,
+              currentHangarItemTranslationMissMode == .cloudReview,
+              let snapshot else {
+            return
+        }
+        requestItemTranslationPreload(
+            for: snapshot,
+            promptsWhenCacheIsMissing: false
+        )
+    }
+
     func bootstrap() async {
         guard !hasBootstrapped else {
             return
         }
 
         hasBootstrapped = true
+        let activityID = UUID()
+        startupActivityID = activityID
         startupActivity = StartupActivity(
             title: AppLocalizer.string("Starting Hangar Express"),
             detail: AppLocalizer.string("Restoring your saved RSI session and local cache.")
@@ -1035,20 +1066,37 @@ final class AppModel {
             stage: "app.bootstrap",
             summary: "Bootstrapping the app and restoring saved RSI sessions."
         )
-        defer { startupActivity = nil }
-        applyStoredSessions(await sessionStore.loadSnapshot(), resetContent: true)
+        let generation = accountOperations.generation
+        defer { if startupActivityID == activityID { startupActivity = nil; startupActivityID = nil } }
+        do {
+            let stored = try await sessionStore.loadSnapshot()
+            guard generation == accountOperations.generation else { return }
+            applyStoredSessions(stored, resetContent: true)
+        } catch {
+            guard generation == accountOperations.generation else { return }
+            hasBootstrapped = false
+            presentSessionStorageError(error)
+            return
+        }
         detectAppUpdateIfNeeded()
         scheduleSilentItemTranslationDictionaryRefreshIfNeeded()
         await reconcileLaunchState()
     }
 
     func enablePreviewSession() async {
+        guard beginAccountTransition() else { return }
+        defer { accountTransitionInProgress = false }
         let preview = UserSession.preview
-        applyStoredSessions(await sessionStore.save(preview, makeActive: true), resetContent: true)
+        guard await persistSession(preview, resetContent: true) else { return }
+        accountTransitionInProgress = false
         await refresh(scope: .full)
     }
 
-    func completeAuthentication(_ session: UserSession) async {
+    func completeAuthentication(_ session: UserSession, expectedFlowID: UUID? = nil) async {
+        if let expectedFlowID, expectedFlowID != authenticationFlowID { return }
+        guard beginAccountTransition() else { return }
+        defer { accountTransitionInProgress = false }
+        guard await persistSession(session, resetContent: true) else { return }
         reauthenticationPrompt = nil
         pendingAuthenticationDraft = nil
         authDiagnostics.record(
@@ -1056,34 +1104,38 @@ final class AppModel {
             summary: "Authentication completed. Starting a full refresh for the signed-in account.",
             detail: "displayName=\(session.displayName), cookieCount=\(session.cookies.count)"
         )
-        applyStoredSessions(await sessionStore.save(session, makeActive: true), resetContent: true)
+        accountTransitionInProgress = false
         await refresh(scope: .full)
     }
 
     func clearSession() async {
+        guard beginAccountTransition() else { return }
+        defer { accountTransitionInProgress = false }
         await authService.cancelPendingAuthentication()
         authDiagnostics.record(
             stage: "auth.clear-session",
             summary: "Clearing the active RSI session and local snapshot state."
         )
+        guard await changeStoredSessions(resetContent: true, operation: { try await self.sessionStore.clear() }) else { return }
         reauthenticationPrompt = nil
         pendingAuthenticationDraft = nil
-        applyStoredSessions(await sessionStore.clear(), resetContent: true)
         await snapshotStore.clear()
         selectedTab = .hangar
     }
 
     func clearSavedKeychainContent() async {
+        guard beginAccountTransition() else { return }
+        defer { accountTransitionInProgress = false }
         await authService.cancelPendingAuthentication()
         authDiagnostics.record(
             stage: "auth.clear-keychain",
             summary: "Removing all saved RSI accounts, cookies, and credentials from Keychain.",
             level: .warning
         )
+        guard await changeStoredSessions(resetContent: true, operation: { try await self.sessionStore.clear() }) else { return }
         reauthenticationPrompt = nil
         pendingAuthenticationDraft = nil
         authenticationFlowID = UUID()
-        applyStoredSessions(await sessionStore.clear(), resetContent: true)
         selectedTab = .hangar
     }
 
@@ -1094,6 +1146,8 @@ final class AppModel {
             return
         }
 
+        guard beginAccountTransition() else { return }
+        defer { accountTransitionInProgress = false }
         await authService.cancelPendingAuthentication()
         authDiagnostics.record(
             stage: "auth.add-account",
@@ -1121,17 +1175,22 @@ final class AppModel {
             return
         }
 
+        guard beginAccountTransition() else { return }
+        defer { accountTransitionInProgress = false }
         await authService.cancelPendingAuthentication()
         authDiagnostics.record(
             stage: "auth.switch-account",
             summary: "Switching to another saved RSI account."
         )
+        guard await changeStoredSessions(resetContent: true, operation: { try await self.sessionStore.selectSession(id: id) }) else { return }
         reauthenticationPrompt = nil
         pendingAuthenticationDraft = nil
-        applyStoredSessions(await sessionStore.selectSession(id: id), resetContent: true)
 
+        accountTransitionInProgress = false
         if let session {
+            let generation = accountOperations.generation
             let restoredSnapshot = await restoreCachedSnapshot(for: session)
+            guard generation == accountOperations.generation, self.session?.id == session.id else { return }
             if !restoredSnapshot {
                 await refresh(scope: .full)
             }
@@ -1141,6 +1200,8 @@ final class AppModel {
     func removeSavedAccount(id: UserSession.ID) async {
         let wasActiveSession = session?.id == id
         let removedSession = savedSessions.first(where: { $0.id == id })
+        guard beginAccountTransition(invalidate: wasActiveSession) else { return }
+        defer { accountTransitionInProgress = false }
         await authService.cancelPendingAuthentication()
         authDiagnostics.record(
             stage: "auth.remove-saved-account",
@@ -1148,16 +1209,19 @@ final class AppModel {
             detail: "wasActive=\(wasActiveSession)",
             level: .warning
         )
+        guard await changeStoredSessions(resetContent: wasActiveSession, operation: { try await self.sessionStore.deleteSession(id: id) }) else { return }
         if let removedSession {
             await snapshotStore.delete(for: removedSession)
         }
-        if removedSession?.id == session?.id {
+        if wasActiveSession {
             reauthenticationPrompt = nil
         }
-        applyStoredSessions(await sessionStore.deleteSession(id: id), resetContent: wasActiveSession)
 
+        accountTransitionInProgress = false
         if wasActiveSession, let session {
+            let generation = accountOperations.generation
             let restoredSnapshot = await restoreCachedSnapshot(for: session)
+            guard generation == accountOperations.generation, self.session?.id == session.id else { return }
             if !restoredSnapshot {
                 await refresh(scope: .full)
             }
@@ -1198,7 +1262,43 @@ final class AppModel {
         await switchAccount(to: id)
     }
 
-    func refresh(
+    func refresh(scope: RefreshScope = .full, affectedPledgeIDs: [Int]? = nil) async {
+        guard session != nil, refreshOperationID == nil else { return }
+        let reservation = UUID()
+        let generation = accountOperations.generation
+        refreshOperationID = reservation
+        defer {
+            if refreshOperationID == reservation { refreshOperationID = nil }
+            if Task.isCancelled && generation == accountOperations.generation {
+                refreshOperationID = nil
+                clearRefreshPresentation()
+                if case .loading = loadState { loadState = .idle }
+            }
+        }
+        let inherited = AccountOperationContext.owner
+        if accountOperations.hasMutation && inherited?.mutation != true {
+            guard accountOperations.isReconciling else { return }
+            cancelSilentHangarActionReconciliation()
+        }
+        do {
+            try await withOwnedAccountOperation(mutation: false) {
+                guard let owner = AccountOperationContext.owner else { return }
+                self.refreshOperationID = owner.id
+                defer {
+                    if self.refreshOperationID == owner.id {
+                        if Task.isCancelled && self.accountOperations.isCurrent(owner, session: self.session) {
+                            self.clearRefreshPresentation()
+                            if case .loading = self.loadState { self.loadState = .idle }
+                        }
+                        self.refreshOperationID = nil
+                    }
+                }
+                await self.performRefresh(scope: scope, affectedPledgeIDs: affectedPledgeIDs)
+            }
+        } catch { /* Cancelled/obsolete reads never surface account errors. */ }
+    }
+
+    private func performRefresh(
         scope: RefreshScope = .full,
         affectedPledgeIDs: [Int]? = nil
     ) async {
@@ -1213,8 +1313,19 @@ final class AppModel {
             return
         }
 
+        let performanceInterval = PerformanceTrace.begin("Refresh")
+        defer { PerformanceTrace.end("Refresh", performanceInterval) }
         let existingSnapshot = snapshot
+        let recoveryStamp = accountOperations.recoveryReadStamp(session)
         let resolvedScope = existingSnapshot == nil ? RefreshScope.full : scope
+        #if DEBUG || HANGAR_BENCHMARKS
+        let networkProfileID = PerformanceNetworkMetrics.shared.begin(scope: String(describing: resolvedScope))
+        defer {
+            if let networkProfileID {
+                PerformanceNetworkMetrics.shared.end(networkProfileID, visibleError: lastRefreshErrorMessage != nil)
+            }
+        }
+        #endif
         if resolvedScope == .hangarLog {
             hangarLogRefreshPreviewLogs = existingSnapshot?.hangarLogs ?? []
         } else {
@@ -1225,7 +1336,9 @@ final class AppModel {
             await HostedShipCatalogStore.shared.clear()
             await HostedShipDetailCatalogStore.shared.clear()
         }
+        guard currentAccountOperationIsValid else { return }
 
+        postRefreshImageTask?.cancel()
         if existingSnapshot == nil {
             loadState = .loading
         }
@@ -1238,8 +1351,10 @@ final class AppModel {
         concurrentRefreshEntries = initialConcurrentRefreshEntries(for: session, scope: resolvedScope)
         refreshProgress = concurrentRefreshEntries.isEmpty ? initialProgress(for: session, scope: resolvedScope) : nil
         beginRefreshDiagnostics(for: resolvedScope, session: session)
+        let owner = AccountOperationContext.owner
         let progressRelay = RefreshProgressDisplayRelay { [weak self] progress in
-            self?.applyIncomingRefreshProgress(progress)
+            guard let self, self.currentAccountOperationIsValid(owner) else { return }
+            self.applyIncomingRefreshProgress(progress)
         }
         defer {
             progressRelay.cancel()
@@ -1270,6 +1385,7 @@ final class AppModel {
                 }
             }
 
+            try requireCurrentAccountOperation()
             completeVisibleRefresh(
                 snapshot,
                 diagnosticsStage: "refresh.complete",
@@ -1278,6 +1394,10 @@ final class AppModel {
             requestItemTranslationPreload(for: snapshot, promptsWhenCacheIsMissing: true)
             persistSnapshotInBackground(snapshot, for: session)
             await persistResolvedAccountIdentityIfNeeded(from: snapshot, baseSession: session)
+            guard currentAccountOperationIsValid else { return }
+            if resolvedScope == .full || resolvedScope == .hangar {
+                accountOperations.recordRecoveryRead(session, stamp: recoveryStamp)
+            }
             schedulePostRefreshImageInvalidation(
                 for: resolvedScope,
                 previousSnapshot: existingSnapshot,
@@ -1285,12 +1405,14 @@ final class AppModel {
             )
             return
         } catch {
+            guard currentAccountOperationIsValid else { return }
+            if error is CancellationError { clearRefreshPresentation(); return }
             if await handleReauthenticationIfNeeded(
                 for: error,
                 session: session,
                 existingSnapshot: existingSnapshot
             ) {
-                clearRefreshPresentation()
+                if currentAccountOperationIsValid { clearRefreshPresentation() }
                 return
             }
 
@@ -1314,7 +1436,7 @@ final class AppModel {
             }
         }
 
-        clearRefreshPresentation()
+        if currentAccountOperationIsValid { clearRefreshPresentation() }
     }
 
     private func completeVisibleRefresh(
@@ -1353,8 +1475,9 @@ final class AppModel {
             return nil
         }
 
+        let owner = AccountOperationContext.owner
         return { [weak self] hangarLogs in
-            guard let self,
+            guard let self, self.currentAccountOperationIsValid(owner),
                   !hangarLogs.isEmpty else {
                 return
             }
@@ -1374,10 +1497,33 @@ final class AppModel {
     }
 
     private func persistSnapshotInBackground(_ snapshot: HangarSnapshot, for session: UserSession) {
-        let snapshotStore = snapshotStore
-        Task.detached(priority: .utility) {
-            await snapshotStore.save(snapshot, for: session)
+        guard currentAccountOperationIsValid, self.session?.id == session.id,
+              let owner = try? accountOperations.begin(session: session, mutation: false) else { return }
+        let jobID = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.accountOperations.finish(owner, session: session, succeeded: true)
+                self.accountOperations.finishedJob(jobID)
+            }
+            guard self.currentAccountOperationIsValid(owner), !Task.isCancelled else { return }
+            await AccountOperationContext.$owner.withValue(owner) {
+                await self.saveSnapshotOffMainActor(snapshot, for: session)
+            }
         }
+        accountOperations.track(owner, id: jobID) { task.cancel() }
+    }
+
+    private func saveSnapshotOffMainActor(_ snapshot: HangarSnapshot, for session: UserSession) async {
+        // Preserve the original utility-executor persistence path. Ownership is
+        // checked before submission; #4 still owns ordering already-started I/O.
+        guard currentAccountOperationIsValid, self.session?.id == session.id else { return }
+        let store = snapshotStore
+        let io = Task.detached(priority: .utility) {
+            guard !Task.isCancelled else { return }
+            await store.save(snapshot, for: session)
+        }
+        await withTaskCancellationHandler(operation: { await io.value }, onCancel: { io.cancel() })
     }
 
     private func resetItemTranslationPreloadLogs() {
@@ -1528,6 +1674,7 @@ final class AppModel {
         }
 
         let missMode = currentHangarItemTranslationMissMode
+        let isPremiumSubscriber = subscriptionStore.isPro
         let sources: [String]
         switch missMode {
         case .onDevice:
@@ -1587,6 +1734,7 @@ final class AppModel {
                         for: snapshot,
                         excluding: dictionaryResult.dictionary,
                         mode: missMode,
+                        isPremiumSubscriber: isPremiumSubscriber,
                         progressHandler: { progress in
                             self.applyCloudItemTranslationUploadProgress(
                                 progress,
@@ -1926,14 +2074,28 @@ final class AppModel {
         previousSnapshot: HangarSnapshot?,
         refreshedSnapshot: HangarSnapshot
     ) {
-        Task { [weak self] in
+        guard currentAccountOperationIsValid, let session,
+              let owner = try? accountOperations.begin(session: session, mutation: false) else { return }
+        postRefreshImageTask?.cancel()
+        let jobID = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.accountOperations.finish(owner, session: session, succeeded: true)
+                self.accountOperations.finishedJob(jobID)
+            }
+            await AccountOperationContext.$owner.withValue(owner) {
             try? await Task.sleep(nanoseconds: Self.postRefreshImageInvalidationDelayNanoseconds)
-            await self?.invalidateImageCache(
+            guard self.currentAccountOperationIsValid else { return }
+            await self.invalidateImageCache(
                 for: scope,
                 previousSnapshot: previousSnapshot,
                 refreshedSnapshot: refreshedSnapshot
             )
+            }
         }
+        postRefreshImageTask = task
+        accountOperations.track(owner, id: jobID) { task.cancel() }
     }
 
     func dismissRefreshError() {
@@ -1959,11 +2121,13 @@ final class AppModel {
             return
         }
 
+        let activityID = UUID()
+        startupActivityID = activityID
         startupActivity = StartupActivity(
             title: AppLocalizer.string("Waking Up"),
             detail: AppLocalizer.string("Checking your saved RSI session and cached hangar data.")
         )
-        defer { startupActivity = nil }
+        defer { if startupActivityID == activityID { startupActivity = nil; startupActivityID = nil } }
         await reconcileLaunchState()
     }
 
@@ -1990,6 +2154,8 @@ final class AppModel {
     }
 
     func clearLocalCache() async {
+        guard beginAccountTransition() else { return }
+        defer { accountTransitionInProgress = false }
         let suspendedTranslationLanguage = HangarItemLanguage.resolved(
             forAppLanguageRawValue: userDefaults.string(forKey: AppLanguage.storageKey)
                 ?? AppLanguage.system.rawValue
@@ -2006,10 +2172,10 @@ final class AppModel {
 
         await snapshotStore.clear()
         await ProfileBackgroundOptionsCache.shared.clear()
-        URLCache.shared.removeAllCachedResponses()
+        responseCache.removeAllCachedResponses()
         await imageCache.clear()
-        await HostedShipCatalogStore.shared.clear()
-        await HostedShipDetailCatalogStore.shared.clear()
+        await shipCatalogStore.clear()
+        await shipDetailCatalogStore.clear()
         hangarFleetImageReloadToken = UUID()
         buybackImageReloadToken = UUID()
         accountImageReloadToken = UUID()
@@ -2025,6 +2191,7 @@ final class AppModel {
             return
         }
 
+        accountTransitionInProgress = false
         await refresh(scope: .full)
     }
 
@@ -2059,7 +2226,7 @@ final class AppModel {
         }
     }
 
-    func melt(packageGroup: GroupedHangarPackage, quantity: Int) async throws {
+    private func performMelt(packageGroup: GroupedHangarPackage, quantity: Int) async throws {
         guard !isRefreshing else {
             throw HangarAccountActionError.actionInProgress
         }
@@ -2101,7 +2268,8 @@ final class AppModel {
 
         if !result.updatedCookies.isEmpty {
             let updatedSession = session.updatingCookies(result.updatedCookies)
-            applyStoredSessions(await sessionStore.save(updatedSession, makeActive: true), resetContent: false)
+            await persistSession(updatedSession)
+            try requireCurrentAccountOperation()
         }
 
         if result.wasSuccessful {
@@ -2141,7 +2309,7 @@ final class AppModel {
         }
     }
 
-    func melt(packageGroups: [GroupedHangarPackage]) async throws {
+    private func performBulkMelt(packageGroups: [GroupedHangarPackage]) async throws {
         guard !isRefreshing else {
             throw HangarAccountActionError.actionInProgress
         }
@@ -2188,7 +2356,8 @@ final class AppModel {
 
         if !result.updatedCookies.isEmpty {
             let updatedSession = session.updatingCookies(result.updatedCookies)
-            applyStoredSessions(await sessionStore.save(updatedSession, makeActive: true), resetContent: false)
+            await persistSession(updatedSession)
+            try requireCurrentAccountOperation()
         }
 
         if result.wasSuccessful {
@@ -2226,7 +2395,7 @@ final class AppModel {
         }
     }
 
-    func gift(
+    private func performGift(
         packageGroup: GroupedHangarPackage,
         quantity: Int,
         recipientName: String,
@@ -2289,7 +2458,8 @@ final class AppModel {
 
         if !result.updatedCookies.isEmpty {
             let updatedSession = session.updatingCookies(result.updatedCookies)
-            applyStoredSessions(await sessionStore.save(updatedSession, makeActive: true), resetContent: false)
+            await persistSession(updatedSession)
+            try requireCurrentAccountOperation()
         }
 
         if result.wasSuccessful {
@@ -2329,7 +2499,7 @@ final class AppModel {
         }
     }
 
-    func gift(
+    private func performBulkGift(
         packageGroups: [GroupedHangarPackage],
         recipientName: String,
         recipientEmail: String
@@ -2395,7 +2565,8 @@ final class AppModel {
 
         if !result.updatedCookies.isEmpty {
             let updatedSession = session.updatingCookies(result.updatedCookies)
-            applyStoredSessions(await sessionStore.save(updatedSession, makeActive: true), resetContent: false)
+            await persistSession(updatedSession)
+            try requireCurrentAccountOperation()
         }
 
         if result.wasSuccessful {
@@ -2433,7 +2604,7 @@ final class AppModel {
         }
     }
 
-    func fetchUpgradeTargets(for packageGroup: GroupedHangarPackage) async throws -> [UpgradeTargetCandidate] {
+    private func performUpgradeTargets(for packageGroup: GroupedHangarPackage) async throws -> [UpgradeTargetCandidate] {
         guard let session else {
             throw HangarAccountActionError.missingSession
         }
@@ -2446,7 +2617,7 @@ final class AppModel {
         let timeoutSeconds = Self.upgradeTargetLookupTimeoutSeconds
 
         do {
-            let targets = try await withTimeout(seconds: timeoutSeconds) { [self] in
+            let targets = try await withTimeout(seconds: timeoutSeconds, submission: false) { [self] in
                 try await self.hangarRepository.fetchUpgradeTargets(
                     for: session,
                     upgradeItemPledgeID: upgradeItemPledgeID
@@ -2473,7 +2644,7 @@ final class AppModel {
         }
     }
 
-    func applyUpgrade(
+    private func performApplyUpgrade(
         packageGroup: GroupedHangarPackage,
         target: UpgradeTargetCandidate
     ) async throws {
@@ -2519,7 +2690,8 @@ final class AppModel {
 
         if !result.updatedCookies.isEmpty {
             let updatedSession = session.updatingCookies(result.updatedCookies)
-            applyStoredSessions(await sessionStore.save(updatedSession, makeActive: true), resetContent: false)
+            await persistSession(updatedSession)
+            try requireCurrentAccountOperation()
         }
 
         guard result.wasSuccessful else {
@@ -2555,7 +2727,7 @@ final class AppModel {
         )
     }
 
-    func requestCharacterRepair(reason: String, issueCouncilURL: String?) async throws {
+    private func performCharacterRepair(reason: String, issueCouncilURL: String?) async throws {
         guard !isRefreshing else {
             throw HangarAccountActionError.actionInProgress
         }
@@ -2608,6 +2780,7 @@ final class AppModel {
 
             if !result.updatedCookies.isEmpty {
                 await persistUpdatedSessionCookies(result.updatedCookies, baseSession: session)
+                try requireCurrentAccountOperation()
             }
 
             if let remainingSeconds = result.cooldownRemainingSeconds,
@@ -2639,6 +2812,7 @@ final class AppModel {
         } catch let error as HangarAccountActionError {
             throw error
         } catch {
+            try requireCurrentAccountOperation()
             if await handleReauthenticationIfNeeded(
                 for: error,
                 session: session,
@@ -2684,7 +2858,7 @@ final class AppModel {
         "\(Self.characterRepairCooldownDefaultsKeyPrefix).\(session.id.uuidString.lowercased())"
     }
 
-    func prepareBuybackCheckout(for pledge: BuybackPledge) async throws -> BuybackCheckoutPreparation {
+    private func performBuybackCheckout(for pledge: BuybackPledge) async throws -> BuybackCheckoutPreparation {
         guard !isRefreshing else {
             throw HangarAccountActionError.actionInProgress
         }
@@ -2715,6 +2889,7 @@ final class AppModel {
 
             if !result.updatedCookies.isEmpty {
                 await persistUpdatedSessionCookies(result.updatedCookies, baseSession: session)
+                try requireCurrentAccountOperation()
             }
 
             return result
@@ -2725,7 +2900,7 @@ final class AppModel {
         }
     }
 
-    func prepareWBCCUCheckout(items: [WBCCUCheckoutItem]) async throws -> WBCCUCheckoutPreparation {
+    private func performWBCCUCheckout(items: [WBCCUCheckoutItem]) async throws -> WBCCUCheckoutPreparation {
         guard !isRefreshing else {
             throw HangarAccountActionError.actionInProgress
         }
@@ -2755,6 +2930,7 @@ final class AppModel {
 
             if !result.updatedCookies.isEmpty {
                 await persistUpdatedSessionCookies(result.updatedCookies, baseSession: session)
+                try requireCurrentAccountOperation()
             }
 
             return result
@@ -2769,7 +2945,7 @@ final class AppModel {
         try await hangarRepository.fetchLimitedShipSales()
     }
 
-    func addLimitedShipToCart(
+    private func performLimitedShipCart(
         _ ship: LimitedShipSale,
         log: @escaping LimitedShipCartLogHandler = { _ in }
     ) async throws -> LimitedShipCartInsertionResult {
@@ -2785,13 +2961,18 @@ final class AppModel {
             throw HangarAccountActionError.missingSession
         }
 
+        let owner = AccountOperationContext.owner
+        let guardedLog: LimitedShipCartLogHandler = { [weak self] line in
+            guard let self, self.currentAccountOperationIsValid(owner) else { return }
+            log(line)
+        }
         let timeoutSeconds = Self.limitedShipCartInsertionTimeoutSeconds
         do {
             let result = try await withTimeout(seconds: timeoutSeconds) { [self] in
                 try await self.hangarRepository.addLimitedShipToCart(
                     for: session,
                     ship: ship,
-                    log: log
+                    log: guardedLog
                 )
             } onTimeout: {
                 HangarAccountActionError.limitedShipCartInsertionTimedOut(timeoutSeconds: timeoutSeconds)
@@ -2799,6 +2980,7 @@ final class AppModel {
 
             if !result.updatedCookies.isEmpty {
                 await persistUpdatedSessionCookies(result.updatedCookies, baseSession: session)
+                try requireCurrentAccountOperation()
             }
 
             return result
@@ -2809,7 +2991,7 @@ final class AppModel {
         }
     }
 
-    func requestAuthorizedDevicesVerificationCode() async throws {
+    private func performDevicesCodeRequest() async throws {
         guard let session else {
             throw HangarAccountActionError.missingSession
         }
@@ -2831,9 +3013,11 @@ final class AppModel {
                 )
             }
             await persistUpdatedSessionCookies(updatedCookies, baseSession: session)
+            try requireCurrentAccountOperation()
         } catch let error as HangarAccountActionError {
             throw error
         } catch {
+            try requireCurrentAccountOperation()
             if await handleReauthenticationIfNeeded(
                 for: error,
                 session: session,
@@ -2848,7 +3032,7 @@ final class AppModel {
         }
     }
 
-    func verifyAuthorizedDevices(code: String) async throws -> [AuthorizedDevice] {
+    private func performDevicesVerification(code: String) async throws -> [AuthorizedDevice] {
         guard let session else {
             throw HangarAccountActionError.missingSession
         }
@@ -2880,10 +3064,11 @@ final class AppModel {
                 )
             }
             await persistUpdatedSessionCookies(updatedCookies, baseSession: session)
+            try requireCurrentAccountOperation()
 
             let verifiedSession = self.session ?? session.updatingCookies(updatedCookies)
             let password = verifiedSession.credentials?.password
-            return try await withTimeout(seconds: timeoutSeconds) { [self] in
+            return try await withTimeout(seconds: timeoutSeconds, submission: false) { [self] in
                 try await self.hangarRepository.fetchAuthorizedDevices(
                     for: verifiedSession,
                     password: password
@@ -2899,6 +3084,7 @@ final class AppModel {
         } catch let error as HangarAccountActionError {
             throw error
         } catch {
+            try requireCurrentAccountOperation()
             if await handleReauthenticationIfNeeded(
                 for: error,
                 session: session,
@@ -2913,7 +3099,7 @@ final class AppModel {
         }
     }
 
-    func fetchAuthorizedDevices() async throws -> [AuthorizedDevice] {
+    private func performFetchDevices() async throws -> [AuthorizedDevice] {
         guard let session else {
             throw HangarAccountActionError.missingSession
         }
@@ -2925,7 +3111,7 @@ final class AppModel {
         let timeoutSeconds = Self.authorizedDevicesRequestTimeoutSeconds
         let password = session.credentials?.password
         do {
-            return try await withTimeout(seconds: timeoutSeconds) { [self] in
+            return try await withTimeout(seconds: timeoutSeconds, submission: false) { [self] in
                 try await self.hangarRepository.fetchAuthorizedDevices(for: session, password: password)
             } onTimeout: {
                 HangarAccountActionError.authorizedDevicesUnavailable(
@@ -2938,6 +3124,7 @@ final class AppModel {
         } catch let error as HangarAccountActionError {
             throw error
         } catch {
+            try requireCurrentAccountOperation()
             if await handleReauthenticationIfNeeded(
                 for: error,
                 session: session,
@@ -2952,7 +3139,7 @@ final class AppModel {
         }
     }
 
-    func removeAuthorizedDevice(_ device: AuthorizedDevice) async throws {
+    private func performDeviceRemoval(_ device: AuthorizedDevice) async throws {
         guard let session else {
             throw HangarAccountActionError.missingSession
         }
@@ -2988,6 +3175,7 @@ final class AppModel {
         } catch let error as HangarAccountActionError {
             throw error
         } catch {
+            try requireCurrentAccountOperation()
             if await handleReauthenticationIfNeeded(
                 for: error,
                 session: session,
@@ -3002,7 +3190,7 @@ final class AppModel {
         }
     }
 
-    func removeAuthorizedDevicesExceptCurrent(_ devices: [AuthorizedDevice]) async throws {
+    private func performBulkDeviceRemoval(_ devices: [AuthorizedDevice]) async throws {
         let hasCurrentDeviceMarker = devices.contains(where: \.isCurrent)
         let hasHangarExpressFallback = devices.contains(where: \.matchesHangarExpressDeviceName)
         guard hasCurrentDeviceMarker || hasHangarExpressFallback else {
@@ -3056,6 +3244,7 @@ final class AppModel {
         } catch let error as HangarAccountActionError {
             throw error
         } catch {
+            try requireCurrentAccountOperation()
             if await handleReauthenticationIfNeeded(
                 for: error,
                 session: session,
@@ -3070,15 +3259,17 @@ final class AppModel {
         }
     }
 
-    func persistBrowserCookies(_ cookies: [SessionCookie]) async {
-        guard !cookies.isEmpty, let session else {
-            return
+    func persistBrowserCookies(_ cookies: [SessionCookie], for accountID: UUID, generation: UInt64) async {
+        guard !cookies.isEmpty, let session, session.id == accountID,
+              accountOperations.generation == generation else { return }
+        _ = try? await withOwnedAccountOperation(mutation: false) {
+            await self.persistUpdatedSessionCookies(cookies, baseSession: session)
         }
-
-        await persistUpdatedSessionCookies(cookies, baseSession: session)
     }
 
     private func cancelSilentHangarActionReconciliation() {
+        if let owner = reconciliationOwner { accountOperations.finishReconciliation(owner) }
+        reconciliationOwner = nil
         silentHangarActionReconciliationTask?.cancel()
         silentHangarActionReconciliationTask = nil
         silentHangarActionReconciliationGeneration += 1
@@ -3090,7 +3281,7 @@ final class AppModel {
         }
 
         let updatedSession = baseSession.updatingCookies(cookies)
-        applyStoredSessions(await sessionStore.save(updatedSession, makeActive: true), resetContent: false)
+        await persistSession(updatedSession)
     }
 
     private func scheduleSilentHangarActionReconciliation(
@@ -3104,11 +3295,19 @@ final class AppModel {
         cancelSilentHangarActionReconciliation()
 
         let generation = silentHangarActionReconciliationGeneration
-        silentHangarActionReconciliationTask = Task { @MainActor [weak self] in
+        let owner = AccountOperationContext.owner
+        if let owner { accountOperations.handOffReconciliation(owner) }
+        reconciliationOwner = owner
+        let jobID = UUID()
+        let task = Task { @MainActor [weak self] in
             guard let self else {
                 return
             }
 
+            defer {
+                if let owner { self.accountOperations.finishReconciliation(owner) }
+                self.accountOperations.finishedJob(jobID)
+            }
             await reconcileSuccessfulHangarAction(
                 using: session,
                 previousSnapshotForHangarRefresh: previousSnapshotForHangarRefresh,
@@ -3124,7 +3323,10 @@ final class AppModel {
             }
 
             self.silentHangarActionReconciliationTask = nil
+            self.reconciliationOwner = nil
         }
+        silentHangarActionReconciliationTask = task
+        if let owner { accountOperations.track(owner, id: jobID) { task.cancel() } }
     }
 
     private func applyOptimisticRemovalUpdate(
@@ -3216,13 +3418,16 @@ final class AppModel {
                 stage: "refresh.hangar.background-complete",
                 summary: "The background post-action hangar refresh finished successfully."
             )
-            persistSnapshotInBackground(refreshedSnapshot, for: session)
+            await saveSnapshotOffMainActor(refreshedSnapshot, for: session)
+            guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else { return }
+            if let owner = AccountOperationContext.owner { accountOperations.completeReconciliation(owner, session: session) }
             schedulePostRefreshImageInvalidation(
                 for: .hangar,
                 previousSnapshot: displayedSnapshot,
                 refreshedSnapshot: refreshedSnapshot
             )
         } catch {
+            guard currentAccountOperationIsValid else { return }
             if await handleReauthenticationIfNeeded(
                 for: error,
                 session: session,
@@ -3254,8 +3459,10 @@ final class AppModel {
         updatesVisibleProgress: Bool
     ) async -> Bool {
         var logSnapshot = existingSnapshot
+        let owner = AccountOperationContext.owner
         let progressRelay = RefreshProgressDisplayRelay { [weak self] progress in
-            self?.applyIncomingRefreshProgress(progress)
+            guard let self, self.currentAccountOperationIsValid(owner) else { return }
+            self.applyIncomingRefreshProgress(progress)
         }
         defer {
             progressRelay.cancel()
@@ -3313,6 +3520,7 @@ final class AppModel {
                 logSnapshot = refreshedSnapshot
                 persistSnapshotInBackground(refreshedSnapshot, for: session)
             } catch {
+                guard currentAccountOperationIsValid else { return false }
                 if await handleReauthenticationIfNeeded(
                     for: error,
                     session: session,
@@ -3356,7 +3564,7 @@ final class AppModel {
         using session: UserSession,
         generation: Int
     ) -> Bool {
-        !Task.isCancelled
+        currentAccountOperationIsValid
             && silentHangarActionReconciliationGeneration == generation
             && self.session?.accountKey == session.accountKey
     }
@@ -3388,7 +3596,9 @@ final class AppModel {
         session: UserSession,
         existingSnapshot: HangarSnapshot?
     ) async -> Bool {
-        guard let liveError = error as? LiveHangarRepositoryError,
+        guard currentAccountOperationIsValid,
+              self.session?.id == session.id,
+              let liveError = error as? LiveHangarRepositoryError,
               liveError.requiresReauthentication else {
             return false
         }
@@ -3402,7 +3612,8 @@ final class AppModel {
             detail: "reason=\(liveError.localizedDescription)",
             level: .warning
         )
-        applyStoredSessions(await sessionStore.save(invalidatedSession, makeActive: true), resetContent: false)
+        await persistSession(invalidatedSession)
+        guard currentAccountOperationIsValid else { return true }
         lastRefreshErrorMessage = nil
         lastRefreshErrorScope = nil
 
@@ -3424,7 +3635,11 @@ final class AppModel {
     }
 
     private func transitionToAuthentication(using session: UserSession, notice: String) async {
+        guard currentAccountOperationIsValid, beginAccountTransition() else { return }
+        defer { accountTransitionInProgress = false }
+        let generation = accountOperations.generation
         await authService.cancelPendingAuthentication()
+        guard generation == accountOperations.generation else { return }
         authDiagnostics.record(
             stage: "auth.transition",
             summary: "Returning to the login flow for the selected RSI account.",
@@ -3450,9 +3665,13 @@ final class AppModel {
     }
 
     private func restoreCachedSnapshot(for session: UserSession) async -> Bool {
-        guard let cachedSnapshot = await snapshotStore.load(for: session) else {
-            return false
-        }
+        let generation = accountOperations.generation
+        let revision = snapshotRevision
+        let cachedSnapshot = await snapshotStore.load(for: session)
+        guard generation == accountOperations.generation, self.session?.id == session.id,
+              !Task.isCancelled else { return false }
+        guard revision == snapshotRevision, refreshOperationID == nil else { return snapshot != nil }
+        guard let cachedSnapshot else { return false }
 
         lastRefreshAt = cachedSnapshot.lastSyncedAt
         loadState = .loaded(cachedSnapshot)
@@ -3490,7 +3709,9 @@ final class AppModel {
             return
         }
 
+        let generation = accountOperations.generation
         let restoredSnapshot = await restoreCachedSnapshot(for: session)
+        guard generation == accountOperations.generation, self.session?.id == session.id else { return }
 
         if restoredSnapshot {
             authDiagnostics.record(
@@ -3639,10 +3860,31 @@ final class AppModel {
             displayName: shouldReplaceDisplayName ? resolvedHandle : currentDisplayName,
             avatarURL: snapshot.avatarURL
         )
-        applyStoredSessions(await sessionStore.save(updatedSession, makeActive: true), resetContent: false)
+        await persistSession(updatedSession)
     }
 
     func loadMoreHangarLogEntries() async {
+        guard refreshOperationID == nil, !accountOperations.hasMutation else { return }
+        let reservation = UUID()
+        let generation = accountOperations.generation
+        refreshOperationID = reservation
+        defer {
+            if refreshOperationID == reservation { refreshOperationID = nil }
+            if Task.isCancelled && generation == accountOperations.generation {
+                refreshOperationID = nil
+                clearRefreshPresentation()
+                if case .loading = loadState { loadState = .idle }
+            }
+        }
+        _ = try? await withOwnedAccountOperation(mutation: false) {
+            guard let owner = AccountOperationContext.owner else { return }
+            self.refreshOperationID = owner.id
+            defer { if self.refreshOperationID == owner.id { self.refreshOperationID = nil } }
+            await self.performLoadMoreHangarLogEntries()
+        }
+    }
+
+    private func performLoadMoreHangarLogEntries() async {
         guard let session,
               let existingSnapshot = snapshot,
               !isRefreshing,
@@ -3666,15 +3908,19 @@ final class AppModel {
             session: session,
             context: AppLocalizer.string("Loading older hangar log entries from RSI.")
         )
+        let owner = AccountOperationContext.owner
         let progressRelay = RefreshProgressDisplayRelay { [weak self] progress in
-            self?.applyIncomingRefreshProgress(progress)
+            guard let self, self.currentAccountOperationIsValid(owner) else { return }
+            self.applyIncomingRefreshProgress(progress)
         }
 
         defer {
             progressRelay.cancel()
-            refreshProgress = nil
-            concurrentRefreshEntries = []
-            activeRefreshScope = nil
+            if let owner, accountOperations.isCurrent(owner, session: session) {
+                refreshProgress = nil
+                concurrentRefreshEntries = []
+                activeRefreshScope = nil
+            }
         }
 
         do {
@@ -3686,6 +3932,7 @@ final class AppModel {
                 progressRelay.submit(progress)
             }
 
+            guard currentAccountOperationIsValid else { return }
             completeVisibleRefresh(
                 refreshedSnapshot,
                 diagnosticsStage: "refresh.hangar-log.expanded",
@@ -3694,6 +3941,7 @@ final class AppModel {
             persistSnapshotInBackground(refreshedSnapshot, for: session)
             return
         } catch {
+            guard currentAccountOperationIsValid else { return }
             if await handleReauthenticationIfNeeded(
                 for: error,
                 session: session,
@@ -3875,9 +4123,48 @@ final class AppModel {
         }
     }
 
+    @discardableResult
+    private func persistSession(_ session: UserSession, resetContent: Bool = false) async -> Bool {
+        await changeStoredSessions(resetContent: resetContent) {
+            try await self.sessionStore.save(session, makeActive: true)
+        }
+    }
+
+    private func changeStoredSessions(
+        resetContent: Bool,
+        operation: () async throws -> StoredSessionsSnapshot
+    ) async -> Bool {
+        let generation = accountOperations.generation
+        guard currentAccountOperationIsValid else { return false }
+        do {
+            let stored = try await operation()
+            guard generation == accountOperations.generation, currentAccountOperationIsValid else { return false }
+            applyStoredSessions(stored, resetContent: resetContent)
+            return true
+        } catch {
+            presentSessionStorageError(error)
+            return false
+        }
+    }
+
+    private func presentSessionStorageError(_ error: Error) {
+        guard currentAccountOperationIsValid else { return }
+        sessionStorageErrorMessage = error.localizedDescription
+        var detail: String?
+        if case let SessionStoreError.security(operation, status) = error {
+            detail = "operation=\(operation.rawValue), status=\(status)"
+        }
+        authDiagnostics.record(
+            stage: "auth.secure-storage",
+            summary: "Secure account storage failed; the previous saved state was retained.",
+            detail: detail,
+            level: .error
+        )
+    }
+
     private func applyStoredSessions(_ snapshot: StoredSessionsSnapshot, resetContent: Bool) {
         let previousSessionID = session?.id
-
+        if previousSessionID != snapshot.activeSession?.id && !accountTransitionInProgress { invalidateAccountWork() }
         session = snapshot.activeSession
         savedSessions = snapshot.savedSessions
 
@@ -4265,12 +4552,24 @@ final class AppModel {
         }
     }
 
-    private func withTimeout<T>(
+    private func withTimeout<T: Sendable>(
         seconds: Int,
+        submission: Bool = true,
         operation: @escaping @Sendable () async throws -> T,
         onTimeout: @escaping @Sendable () -> Error
     ) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
+        try requireCurrentAccountOperation()
+        let submittingOwner = submission ? AccountOperationContext.owner : nil
+        let submittingSession = session
+        if let submittingOwner, let submittingSession {
+            accountOperations.willSubmit(submittingOwner, session: submittingSession)
+        }
+        defer {
+            if let submittingOwner, let submittingSession {
+                accountOperations.finishedSubmission(submittingOwner, session: submittingSession)
+            }
+        }
+        let value = try await withThrowingTaskGroup(of: T.self) { group in
             group.addTask {
                 try await operation()
             }
@@ -4284,6 +4583,11 @@ final class AppModel {
             group.cancelAll()
             return result
         }
+        try requireCurrentAccountOperation()
+        if let submittingOwner, let submittingSession {
+            accountOperations.receivedResponse(submittingOwner, session: submittingSession)
+        }
+        return value
     }
 
     private func currentAppVersionIdentifier() -> String? {
@@ -4307,6 +4611,7 @@ final class AppModel {
         previousSnapshot: HangarSnapshot?,
         refreshedSnapshot: HangarSnapshot
     ) async {
+        guard currentAccountOperationIsValid else { return }
         let urlsToInvalidate = imageURLsToInvalidate(
             for: scope,
             previousSnapshot: previousSnapshot,
@@ -4321,6 +4626,7 @@ final class AppModel {
             await imageCache.clear(urls: Array(urlsToInvalidate))
         }
 
+        guard currentAccountOperationIsValid else { return }
         switch scope {
         case .full:
             hangarFleetImageReloadToken = UUID()
@@ -4458,4 +4764,190 @@ private extension AppModel.ItemTranslationPreloadProgress.Phase {
             self = .failed
         }
     }
+}
+
+extension AppModel {
+    func melt(packageGroup: GroupedHangarPackage, quantity: Int) async throws -> Void {
+        try await withOwnedAccountOperation(mutation: true) {
+            try await self.performMelt(packageGroup: packageGroup, quantity: quantity)
+        }
+    }
+
+    func melt(packageGroups: [GroupedHangarPackage]) async throws -> Void {
+        try await withOwnedAccountOperation(mutation: true) {
+            try await self.performBulkMelt(packageGroups: packageGroups)
+        }
+    }
+
+    func gift(packageGroup: GroupedHangarPackage, quantity: Int, recipientName: String, recipientEmail: String) async throws -> Void {
+        try await withOwnedAccountOperation(mutation: true) {
+            try await self.performGift(packageGroup: packageGroup, quantity: quantity, recipientName: recipientName, recipientEmail: recipientEmail)
+        }
+    }
+
+    func gift(packageGroups: [GroupedHangarPackage], recipientName: String, recipientEmail: String) async throws -> Void {
+        try await withOwnedAccountOperation(mutation: true) {
+            try await self.performBulkGift(packageGroups: packageGroups, recipientName: recipientName, recipientEmail: recipientEmail)
+        }
+    }
+
+    func applyUpgrade(packageGroup: GroupedHangarPackage, target: UpgradeTargetCandidate) async throws -> Void {
+        try await withOwnedAccountOperation(mutation: true) {
+            try await self.performApplyUpgrade(packageGroup: packageGroup, target: target)
+        }
+    }
+
+    func requestCharacterRepair(reason: String, issueCouncilURL: String?) async throws -> Void {
+        try await withOwnedAccountOperation(mutation: true) {
+            try await self.performCharacterRepair(reason: reason, issueCouncilURL: issueCouncilURL)
+        }
+    }
+
+    func prepareBuybackCheckout(for pledge: BuybackPledge) async throws -> BuybackCheckoutPreparation {
+        try await withOwnedAccountOperation(mutation: true) {
+            try await self.performBuybackCheckout(for: pledge)
+        }
+    }
+
+    func prepareWBCCUCheckout(items: [WBCCUCheckoutItem]) async throws -> WBCCUCheckoutPreparation {
+        try await withOwnedAccountOperation(mutation: true) {
+            try await self.performWBCCUCheckout(items: items)
+        }
+    }
+
+    func addLimitedShipToCart(_ ship: LimitedShipSale, log: @escaping LimitedShipCartLogHandler = { _ in }) async throws -> LimitedShipCartInsertionResult {
+        try await withOwnedAccountOperation(mutation: true) {
+            try await self.performLimitedShipCart(ship, log: log)
+        }
+    }
+
+    func requestAuthorizedDevicesVerificationCode() async throws -> Void {
+        try await withOwnedAccountOperation(mutation: true) {
+            try await self.performDevicesCodeRequest()
+        }
+    }
+
+    func verifyAuthorizedDevices(code: String) async throws -> [AuthorizedDevice] {
+        try await withOwnedAccountOperation(mutation: true) {
+            try await self.performDevicesVerification(code: code)
+        }
+    }
+
+    func removeAuthorizedDevice(_ device: AuthorizedDevice) async throws -> Void {
+        try await withOwnedAccountOperation(mutation: true) {
+            try await self.performDeviceRemoval(device)
+        }
+    }
+
+    func removeAuthorizedDevicesExceptCurrent(_ devices: [AuthorizedDevice]) async throws -> Void {
+        try await withOwnedAccountOperation(mutation: true) {
+            try await self.performBulkDeviceRemoval(devices)
+        }
+    }
+
+    func fetchUpgradeTargets(for packageGroup: GroupedHangarPackage) async throws -> [UpgradeTargetCandidate] {
+        try await withOwnedAccountOperation(mutation: false) {
+            try await self.performUpgradeTargets(for: packageGroup)
+        }
+    }
+
+    func fetchAuthorizedDevices() async throws -> [AuthorizedDevice] {
+        try await withOwnedAccountOperation(mutation: false) {
+            try await self.performFetchDevices()
+        }
+    }
+
+    func waitForAccountOperationJobs(accountID: UUID? = nil) async { await accountOperations.waitForJobs(accountID: accountID) }
+    var accountContextGeneration: UInt64 { accountOperations.generation }
+    var requiresMutationReview: Bool {
+        !accountOperations.hasMutation && (session.map { accountOperations.requiresReview($0) } ?? false)
+    }
+    var canAcknowledgeMutationReview: Bool {
+        !accountOperations.hasMutation && (session.map { accountOperations.canAcknowledgeReview($0) } ?? false)
+    }
+    func acknowledgeMutationReview() { if let session { accountOperations.acknowledgeReview(session) } }
+
+    private var currentAccountOperationIsValid: Bool {
+        currentAccountOperationIsValid(AccountOperationContext.owner)
+    }
+    private func currentAccountOperationIsValid(_ owner: AccountOperationOwner?) -> Bool {
+        guard let owner else { return !Task.isCancelled }
+        return !Task.isCancelled && accountOperations.isCurrent(owner, session: session)
+    }
+    private func requireCurrentAccountOperation() throws {
+        guard currentAccountOperationIsValid else { throw AccountOperationError.obsolete }
+    }
+    private func withOwnedAccountOperation<T: Sendable>(
+        mutation: Bool, operation: @escaping @MainActor () async throws -> T
+    ) async throws -> T {
+        if let inherited = AccountOperationContext.owner {
+            try requireCurrentAccountOperation()
+            guard !mutation || inherited.mutation else { throw AccountOperationError.busy }
+            return try await operation()
+        }
+        guard !accountTransitionInProgress, let session else { throw AccountOperationError.obsolete }
+        if mutation && refreshOperationID != nil { throw HangarAccountActionError.actionInProgress }
+        let owner = try accountOperations.begin(session: session, mutation: mutation)
+        let jobID = UUID()
+        let task = Task { @MainActor in
+            try await AccountOperationContext.$owner.withValue(owner) {
+                try self.requireCurrentAccountOperation()
+                return try await operation()
+            }
+        }
+        let reply = AccountOperationResult<T>()
+        accountOperations.track(owner, id: jobID) {
+            task.cancel()
+            reply.resolve(.failure(AccountOperationError.obsolete))
+        }
+        do {
+            let value = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    reply.install(continuation)
+                    Task {
+                        let result: Result<T, Error>
+                        do { result = .success(try await task.value) }
+                        catch { result = .failure(error) }
+                        self.accountOperations.finishedJob(jobID)
+                        reply.resolve(result)
+                    }
+                }
+            } onCancel: {
+                task.cancel()
+                reply.resolve(.failure(CancellationError()))
+            }
+            guard currentAccountOperationIsValid(owner) else { throw AccountOperationError.obsolete }
+            accountOperations.finish(owner, session: session, succeeded: true)
+            return value
+        } catch {
+            if reconciliationOwner?.id == owner.id { cancelSilentHangarActionReconciliation() }
+            accountOperations.finish(owner, session: session, succeeded: false,
+                                     responseIsUsable: currentAccountOperationIsValid(owner))
+            throw error
+        }
+    }
+
+    private func invalidateAccountWork() {
+        accountOperations.invalidate()
+        refreshOperationID = nil
+        cancelSilentHangarActionReconciliation()
+        postRefreshImageTask?.cancel(); postRefreshImageTask = nil
+        itemTranslationPreloadTask?.cancel(); itemTranslationPreloadGeneration &+= 1
+        itemTranslationPreloadStallTask?.cancel(); itemTranslationPreloadProgressDismissalTask?.cancel()
+        itemTranslationPreloadProgress = nil
+        cloudItemTranslationUploadProgress = nil
+        itemTranslationPreprocessPrompt = nil
+        clearRefreshPresentation()
+        transientBanner = nil
+        startupActivityID = nil; startupActivity = nil
+        sessionStorageErrorMessage = nil
+        authenticationFlowID = UUID()
+    }
+    private func beginAccountTransition(invalidate: Bool = true) -> Bool {
+        guard !accountTransitionInProgress else { return false }
+        accountTransitionInProgress = true
+        if invalidate { invalidateAccountWork() }
+        return true
+    }
+
 }

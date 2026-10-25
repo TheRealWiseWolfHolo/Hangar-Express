@@ -36,6 +36,7 @@ struct AccountView: View {
                         proBadgeKind: proBadgeKind,
                         avatarURL: profileAvatarURL,
                         backgroundImageURL: profileBackgroundImageURL,
+                        gameAccess: snapshot.gameAccess,
                         reloadToken: appModel.accountImageReloadToken,
                         onExplainTotalValue: {
                             isShowingAccountTotalValueExplanation = true
@@ -47,11 +48,23 @@ struct AccountView: View {
                             isShowingBackgroundPicker = true
                         }
                     )
-                    .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+                    .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 0, trailing: 0))
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                 } header: {
                     Text("Profile")
+                }
+                .listSectionSpacing(.custom(0))
+
+                if appModel.requiresMutationReview {
+                    Section("Review Previous Action") {
+                        Text("The previous action may have reached RSI. Refresh, then review your hangar, cart, or devices on RSI before allowing another action.")
+                        Button("Refresh for Review") { Task { await appModel.refresh(scope: .full) } }
+                            .disabled(appModel.isRefreshing)
+                        Link("Review RSI Account", destination: URL(string: "https://robertsspaceindustries.com/en/account/pledges")!)
+                        Button("I Reviewed RSI — Allow New Actions") { appModel.acknowledgeMutationReview() }
+                            .disabled(!appModel.canAcknowledgeMutationReview)
+                    }
                 }
 
                 Section {
@@ -153,7 +166,7 @@ struct AccountView: View {
                 } header: {
                     Text("Sync")
                 } footer: {
-                    Text("Refresh Account updates balances, referral data, and profile metadata. Full Refresh also reloads hangar, fleet, and buy-back data.")
+                    Text("Refresh Account updates balances, referral data, profile metadata, and game access. Full Refresh also reloads hangar, fleet, and buy-back data.")
                 }
             }
             .scrollDisabled(isToolReordering)
@@ -1026,6 +1039,7 @@ private struct AccountProfileCard: View {
     let proBadgeKind: AccountProBadgeKind?
     let avatarURL: URL?
     let backgroundImageURL: URL?
+    let gameAccess: RSIGameAccessSummary?
     let reloadToken: UUID?
     let onExplainTotalValue: () -> Void
     let onShowConciergeLevels: () -> Void
@@ -1034,37 +1048,37 @@ private struct AccountProfileCard: View {
     private let cardShape = RoundedRectangle(cornerRadius: 24, style: .continuous)
 
     var body: some View {
+        VStack(spacing: 0) {
+            profileBanner
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.12))
+                .frame(height: 1)
+                .accessibilityHidden(true)
+
+            AccountGameAccessView(summary: gameAccess)
+        }
+        .background(Color(uiColor: .systemBackground))
+        .clipShape(cardShape)
+        .overlay {
+            cardShape.strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+        }
+        .overlay(alignment: .topLeading) {
+            ProfileAvatarView(
+                avatarURL: avatarURL,
+                displayName: displayName,
+                reloadToken: reloadToken
+            )
+            .offset(x: 18, y: -18)
+        }
+        .padding(.top, 18)
+        .padding(.vertical, 4)
+    }
+
+    private var profileBanner: some View {
         ZStack(alignment: .topLeading) {
-            cardShape
+            Rectangle()
                 .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.12, green: 0.32, blue: 0.46),
-                            Color(red: 0.07, green: 0.16, blue: 0.26)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .overlay {
-                    if let backgroundImageURL {
-                        CachedRemoteImage(url: backgroundImageURL, reloadToken: reloadToken) { phase in
-                            switch phase {
-                            case let .success(image):
-                                image
-                                    .resizable()
-                                    .scaledToFill()
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                    .clipped()
-                            case .empty, .failure:
-                                profileCardFallbackDecoration
-                            }
-                        }
-                    } else {
-                        profileCardFallbackDecoration
-                    }
-                }
-                .overlay {
                     LinearGradient(
                         colors: [
                             Color.black.opacity(0.84),
@@ -1076,18 +1090,7 @@ private struct AccountProfileCard: View {
                         startPoint: .leading,
                         endPoint: .trailing
                     )
-                }
-                .overlay(alignment: .topTrailing) {
-                    if let onChangeBackground {
-                        ProfileCardActionButton(
-                            systemName: "photo.on.rectangle.angled",
-                            action: onChangeBackground
-                        )
-                        .padding(.top, 16)
-                        .padding(.trailing, 16)
-                    }
-                }
-                .clipShape(cardShape)
+                )
 
             VStack(alignment: .leading, spacing: 10) {
                 Spacer(minLength: 52)
@@ -1118,17 +1121,16 @@ private struct AccountProfileCard: View {
             .frame(maxWidth: .infinity, minHeight: 150, alignment: .bottomLeading)
             .padding(18)
         }
-        .overlay(alignment: .topLeading) {
-            ProfileAvatarView(
-                avatarURL: avatarURL,
-                displayName: displayName,
-                reloadToken: reloadToken
-            )
-            .offset(x: 18, y: -18)
-        }
-        .overlay {
-            cardShape
-                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+        .background { profileArtwork }
+        .overlay(alignment: .topTrailing) {
+            if let onChangeBackground {
+                ProfileCardActionButton(
+                    systemName: "photo.on.rectangle.angled",
+                    action: onChangeBackground
+                )
+                .padding(.top, 16)
+                .padding(.trailing, 16)
+            }
         }
         .overlay(alignment: .bottomTrailing) {
             if let conciergeLevel {
@@ -1140,8 +1142,39 @@ private struct AccountProfileCard: View {
                 .padding(.bottom, 18)
             }
         }
-        .padding(.top, 18)
-        .padding(.vertical, 4)
+    }
+
+    private var profileArtwork: some View {
+        Rectangle()
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.12, green: 0.32, blue: 0.46),
+                        Color(red: 0.07, green: 0.16, blue: 0.26)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .overlay {
+                if let backgroundImageURL {
+                    CachedRemoteImage(url: backgroundImageURL, reloadToken: reloadToken) { phase in
+                        switch phase {
+                        case let .success(image):
+                            image
+                                .resizable()
+                                .scaledToFill()
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .clipped()
+                        case .empty, .failure:
+                            profileCardFallbackDecoration
+                        }
+                    }
+                } else {
+                    profileCardFallbackDecoration
+                }
+            }
+            .clipped()
     }
 
     private var profileCardFallbackDecoration: some View {

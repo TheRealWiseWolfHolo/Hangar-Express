@@ -289,6 +289,7 @@
 "Auth Debug Report Copied" = "认证调试报告已复制";
 "The full auth debug report was copied to the clipboard so a tester can paste it into a message." = "完整的认证调试报告已复制到剪贴板，测试人员现在可以将其粘贴到消息中。";
 "Verification Code" = "验证码";
+"Paste Verification Code" = "粘贴验证码";
 "Device Name" = "设备名称";
 "Verify" = "验证";
 "Back to Sign In" = "返回登录";
@@ -689,7 +690,7 @@
 "Refresh Account" = "刷新账户";
 "Refreshing Everything..." = "正在刷新全部...";
 "Full Refresh" = "完整刷新";
-"Refresh Account updates balances, referral data, and profile metadata. Full Refresh also reloads hangar, fleet, and buy-back data." = "刷新账户会更新余额、推荐数据和资料元数据。完整刷新还会重新加载机库、舰队和回购数据。";
+"Refresh Account updates balances, referral data, profile metadata, and game access. Full Refresh also reloads hangar, fleet, and buy-back data." = "刷新账户会更新余额、推荐数据、资料元数据和游戏权限。完整刷新还会重新加载机库、舰队和回购数据。";
 "Account Total Value" = "账户总价值";
 "Current Spend" = "当前消费";
 "Current Tier" = "当前等级";
@@ -723,6 +724,13 @@
 "Raw Hangar Express buy-back data" = "机库通原始回购数据";
 "Search packages, ships, insurance" = "搜索项目、舰船、保险";
 "Clear Search" = "清除搜索";
+"Close Search" = "关闭搜索";
+"Access active" = "已拥有游戏权限";
+"Star Citizen" = "星际公民";
+"Squadron 42" = "42中队";
+"No access" = "无游戏权限";
+"Checking access..." = "正在检查游戏权限...";
+"Access unavailable" = "暂时无法检查权限";
 "Log" = "日志";
 "Pledges" = "项目";
 "Grey actions need a fresh sign-in with saved credentials before Hangar Express can send live RSI requests." = "灰色操作需要重新登录并保存凭据后，机库通才能发送实时 RSI 请求。";
@@ -944,3 +952,18 @@
 "RSI did not return the logged-in device list within %lld seconds." = "RSI 未能在 %lld 秒内返回已登录设备列表。";
 "Your saved RSI session expired. Sign in again before managing logged-in devices." = "已保存的 RSI 会话已过期。请重新登录后再管理已登录设备。";
 "Hide Keyboard" = "收起键盘";
+
+"Secure Storage" = "安全存储";
+"Secure storage is unavailable. Unlock your device and try again. Your saved accounts have not been replaced." = "安全存储暂时不可用。请解锁设备后重试。已保存的账户尚未被替换。";
+"The saved account data could not be read. It has been preserved in secure storage." = "无法读取已保存的账户数据。原始数据仍保留在安全存储中。";
+"The account could not be saved. Your existing saved accounts have been preserved." = "无法保存账户。现有的已保存账户仍被保留。";
+
+"Another account action is still running. Wait for it to finish." = "另一个账户操作仍在进行中，请等待其完成。";
+"The previous action may have reached RSI. Open Account to refresh and review it before allowing another action." = "上一个操作可能已提交至 RSI。请打开“账户”页刷新并检查，再允许新的操作。";
+"This operation was cancelled because the account changed." = "账户已更改，此操作已取消。";
+"Sign-in was cancelled." = "登录已取消。";
+"Review Previous Action" = "检查上一个操作";
+"The previous action may have reached RSI. Refresh, then review your hangar, cart, or devices on RSI before allowing another action." = "上一个操作可能已提交至 RSI。请先刷新，再到 RSI 检查机库、购物车或设备状态，确认后才能允许新的操作。";
+"Refresh for Review" = "刷新以供检查";
+"Review RSI Account" = "检查 RSI 账户";
+"I Reviewed RSI — Allow New Actions" = "已检查 RSI，允许新的操作";

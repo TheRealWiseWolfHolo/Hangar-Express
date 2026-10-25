@@ -11,6 +11,9 @@ nonisolated struct FileSnapshotStore: SnapshotStore {
     }
 
     func load(for session: UserSession) async -> HangarSnapshot? {
+        let performanceInterval = PerformanceTrace.begin("SnapshotLoad")
+        defer { PerformanceTrace.end("SnapshotLoad", performanceInterval) }
+
         let fileURL = fileURL(for: session)
 
         guard let data = try? Data(contentsOf: fileURL) else {
@@ -26,6 +29,9 @@ nonisolated struct FileSnapshotStore: SnapshotStore {
     }
 
     func save(_ snapshot: HangarSnapshot, for session: UserSession) async {
+        let performanceInterval = PerformanceTrace.begin("SnapshotSave")
+        defer { PerformanceTrace.end("SnapshotSave", performanceInterval) }
+
         do {
             try ensureDirectoryExists()
             let data = try Self.makeEncoder().encode(snapshot)

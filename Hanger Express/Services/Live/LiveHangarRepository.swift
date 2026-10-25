@@ -53,6 +53,7 @@ final class LiveHangarRepository: HangarRepository {
         let totalSpendUSD: Decimal?
         let hangarLogs: [HangarLogEntry]
         let referralStats: ReferralStats
+        let gameAccess: RSIGameAccessSummary?
     }
 
     func fetchSnapshot(
@@ -100,7 +101,8 @@ final class LiveHangarRepository: HangarRepository {
             fleet: resolvedHangarPayload.fleet,
             buyback: resolvedBuyback,
             hangarLogs: resolvedAccountPayload.hangarLogs,
-            referralStats: resolvedAccountPayload.referralStats
+            referralStats: resolvedAccountPayload.referralStats,
+            gameAccess: resolvedAccountPayload.gameAccess
         )
     }
 
@@ -131,7 +133,7 @@ final class LiveHangarRepository: HangarRepository {
             stepNumber: 3,
             stepCount: 3
         )
-        let packages = remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) }
+        let packages = PerformanceTrace.measure("NormalizeHangar") { remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) } }
         let fleet = FleetProjector.project(packages: packages, shipCatalog: shipCatalog)
 
         progress(
@@ -263,7 +265,7 @@ final class LiveHangarRepository: HangarRepository {
 
         let resolvedRemoteBuyback = try await remoteBuyback
         let resolvedShipCatalog = await shipCatalog
-        let buyback = resolvedRemoteBuyback.map { normalize(buyback: $0, shipCatalog: resolvedShipCatalog) }
+        let buyback = PerformanceTrace.measure("NormalizeBuyback") { resolvedRemoteBuyback.map { normalize(buyback: $0, shipCatalog: resolvedShipCatalog) } }
         progress(
             makeProgress(
                 stage: .finalizing,
@@ -343,12 +345,14 @@ final class LiveHangarRepository: HangarRepository {
         try validate(session: session)
         progress(preparationProgress(for: session, stepNumber: 1, stepCount: 2))
 
+        async let fetchedGameAccess: RSIGameAccessSummary? = try? await RSIGameAccessService.fetch(using: session.cookies)
         let accountContext = try await fetchAccountContext(
             for: session,
             progress: progress,
             stepNumber: 2,
             stepCount: 2
         )
+        let gameAccess = await fetchedGameAccess
 
         return snapshot.updatingAccount(
             accountHandle: accountContext.accountHandle ?? snapshot.accountHandle,
@@ -358,6 +362,7 @@ final class LiveHangarRepository: HangarRepository {
             storeCreditUSD: accountContext.didRefreshAccountOverview ? accountContext.storeCreditUSD : snapshot.storeCreditUSD,
             totalSpendUSD: accountContext.didRefreshAccountOverview ? accountContext.totalSpendUSD : snapshot.totalSpendUSD,
             referralStats: accountContext.didRefreshReferralStats ? accountContext.referralStats : snapshot.referralStats,
+            gameAccess: gameAccess,
             lastSyncedAt: (accountContext.didRefreshAccountOverview || accountContext.didRefreshReferralStats) ? .now : snapshot.lastSyncedAt
         )
     }
@@ -383,7 +388,7 @@ final class LiveHangarRepository: HangarRepository {
             trackerID: FullRefreshTracker.hangar,
             trackerTitle: "Hangar"
         )
-        let packages = remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) }
+        let packages = PerformanceTrace.measure("NormalizeHangar") { remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) } }
         let fleet = FleetProjector.project(packages: packages, shipCatalog: shipCatalog)
         emitFullRefreshCompletion(
             progress: progress,
@@ -424,7 +429,7 @@ final class LiveHangarRepository: HangarRepository {
 
         let resolvedRemoteBuyback = try await remoteBuyback
         let resolvedShipCatalog = await shipCatalog
-        let buyback = resolvedRemoteBuyback.map { normalize(buyback: $0, shipCatalog: resolvedShipCatalog) }
+        let buyback = PerformanceTrace.measure("NormalizeBuyback") { resolvedRemoteBuyback.map { normalize(buyback: $0, shipCatalog: resolvedShipCatalog) } }
         emitFullRefreshCompletion(
             progress: progress,
             trackerID: FullRefreshTracker.buyback,
@@ -441,6 +446,7 @@ final class LiveHangarRepository: HangarRepository {
         browser: RSIAccountPageBrowser,
         progress: @escaping RefreshProgressHandler
     ) async throws -> FullAccountRefreshPayload {
+        async let fetchedGameAccess: RSIGameAccessSummary? = try? await RSIGameAccessService.fetch(using: session.cookies)
         let accountContext = try await fetchAccountContext(
             for: session,
             browser: browser,
@@ -450,6 +456,7 @@ final class LiveHangarRepository: HangarRepository {
             trackerID: FullRefreshTracker.account,
             trackerTitle: "Account"
         )
+        let gameAccess = await fetchedGameAccess
         emitFullRefreshCompletion(
             progress: progress,
             trackerID: FullRefreshTracker.account,
@@ -467,7 +474,8 @@ final class LiveHangarRepository: HangarRepository {
             storeCreditUSD: accountContext.storeCreditUSD,
             totalSpendUSD: accountContext.totalSpendUSD,
             hangarLogs: [],
-            referralStats: accountContext.referralStats
+            referralStats: accountContext.referralStats,
+            gameAccess: gameAccess
         )
     }
 
@@ -3062,7 +3070,10 @@ nonisolated enum FleetProjector {
     ]
 
     static func project(packages: [HangarPackage], shipCatalog: RSIShipCatalog?) -> [FleetShip] {
-        packages.flatMap { package in
+        let performanceInterval = PerformanceTrace.begin("FleetProjection")
+        defer { PerformanceTrace.end("FleetProjection", performanceInterval) }
+
+        return packages.flatMap { package in
             let fleetEntries = package.contents.compactMap { item -> (PackageItem, RSIShipCatalog.Ship?)? in
                 guard HangarPledgeSummaryParser.shouldRenderContentTitle(item.title) else {
                     return nil
@@ -3562,6 +3573,9 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
     }
 
     private func fetchHTML(path: String, page: Int, pageSize: Int) async throws -> HTTPPagePayload {
+        let performanceInterval = PerformanceTrace.begin("FetchHTML")
+        defer { PerformanceTrace.end("FetchHTML", performanceInterval) }
+
         let requestedURL = try pageURL(path: path, page: page, pageSize: pageSize)
         var request = URLRequest(url: requestedURL)
         request.httpMethod = "GET"
@@ -3590,7 +3604,11 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
         let data: Data
         let response: URLResponse
         do {
+            #if DEBUG || HANGAR_BENCHMARKS
+            (data, response) = try await session.data(for: request, delegate: PerformanceNetworkMetrics.shared.delegateIfEnabled())
+            #else
             (data, response) = try await session.data(for: request)
+            #endif
         } catch {
             throw LiveHangarRepositoryError.unexpectedMarkup(
                 directHTTPDiagnostics(
@@ -3800,6 +3818,9 @@ private nonisolated enum RSIAccountHTMLParser {
         statusCode: Int,
         cookieCount: Int
     ) throws -> RemotePledgePage {
+        let performanceInterval = PerformanceTrace.begin("ParsePledgeHTML")
+        defer { PerformanceTrace.end("ParsePledgeHTML", performanceInterval) }
+
         let title = firstText(in: html, selectors: ["title"])
         let accessDenied = isAccessDenied(html: html, title: title)
         let currentPage = currentPageNumber(from: pageURL)
@@ -3843,6 +3864,9 @@ private nonisolated enum RSIAccountHTMLParser {
         statusCode: Int,
         cookieCount: Int
     ) throws -> RemoteBuybackPage {
+        let performanceInterval = PerformanceTrace.begin("ParseBuybackHTML")
+        defer { PerformanceTrace.end("ParseBuybackHTML", performanceInterval) }
+
         let title = firstText(in: html, selectors: ["title"])
         let accessDenied = isAccessDenied(html: html, title: title)
         let currentPage = currentPageNumber(from: pageURL)
@@ -4673,6 +4697,34 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
         webView.navigationDelegate = self
+    }
+
+    func fetchGameEntitlements(using cookies: [SessionCookie], query: String) async throws -> Data {
+        guard var components = URLComponents(string: "https://robertsspaceindustries.com/graphql") else {
+            throw LiveHangarRepositoryError.unexpectedMarkup("Invalid RSI game access URL.")
+        }
+        components.queryItems = [URLQueryItem(name: "query", value: query)]
+        guard let url = components.url else {
+            throw LiveHangarRepositoryError.unexpectedMarkup("Invalid RSI game access query.")
+        }
+
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+        guard webView.url?.host == url.host,
+              webView.url?.path == url.path else {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        let result = try await webView.callAsyncJavaScript(
+            "return document.body ? document.body.innerText : '';",
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let body = result as? String, !body.isEmpty else {
+            throw LiveHangarRepositoryError.unexpectedMarkup("RSI returned an empty game access response.")
+        }
+        return Data(body.utf8)
     }
 
     fileprivate func extractPledges(

@@ -105,7 +105,10 @@ nonisolated struct HangarItemTranslationDictionary: Equatable, Sendable {
 
         for entry in entries {
             let source = entry.source.trimmingCharacters(in: .whitespacesAndNewlines)
-            let translation = entry.translation.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedTranslation = entry.translation.trimmingCharacters(in: .whitespacesAndNewlines)
+            let translation = normalizedLocale == "zh-Hans"
+                ? Self.normalizedChineseQuotes(trimmedTranslation)
+                : trimmedTranslation
             let kind = entry.kind.trimmingCharacters(in: .whitespacesAndNewlines)
             let aliases = entry.aliases.map {
                 $0.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -155,6 +158,13 @@ nonisolated struct HangarItemTranslationDictionary: Equatable, Sendable {
 
     func translation(for source: String) -> String? {
         translationsByKey[Self.normalizedLookupKey(source)]
+    }
+
+    nonisolated static func normalizedChineseQuotes(_ translation: String) -> String {
+        ["\"", "“", "”", "„", "＂", "‘", "’", "「", "」"]
+            .reduce(translation) { result, mark in
+                result.replacingOccurrences(of: mark, with: "'")
+            }
     }
 
     static func normalizedLookupKey(_ source: String) -> String {
@@ -419,9 +429,12 @@ nonisolated struct HangarItemTranslator: Equatable, Sendable {
     }
 
     func normalizedMachineTranslationSpacing(_ translatedText: String, source: String) -> String {
+        let translation = language == .simplifiedChinese
+            ? HangarItemTranslationDictionary.normalizedChineseQuotes(translatedText)
+            : translatedText
         let matches = protectedTermMatches(in: source)
         guard !matches.isEmpty else {
-            return MaskedHangarItemText.normalizedRestoredSpacing(translatedText)
+            return MaskedHangarItemText.normalizedRestoredSpacing(translation)
         }
 
         var seenProtectedTranslations = Set<String>()
@@ -436,7 +449,7 @@ nonisolated struct HangarItemTranslator: Equatable, Sendable {
                 return lhs.localizedStandardCompare(rhs) == .orderedAscending
             }
 
-        let paddedText = protectedTranslations.reduce(translatedText) { partialResult, protectedTranslation in
+        let paddedText = protectedTranslations.reduce(translation) { partialResult, protectedTranslation in
             partialResult.replacingOccurrences(
                 of: protectedTranslation,
                 with: " \(protectedTranslation) "
