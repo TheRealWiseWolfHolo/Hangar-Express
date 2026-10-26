@@ -48,7 +48,7 @@ struct FleetView: View {
 
     let appModel: AppModel
     let snapshot: HangarSnapshot
-    private let allShipGroups: [GroupedFleetShip]
+    private var allShipGroups: [GroupedFleetShip] { appModel.readyInventoryPresentation?.fleet ?? [] }
     @Environment(\.displayScale) private var displayScale
     @State private var searchText = ""
     @State private var sortMode: SortMode = .manufacturer
@@ -62,13 +62,13 @@ struct FleetView: View {
     @AppStorage("fleetDisplayMode") private var displayModeRawValue = DisplayMode.singleColumn.rawValue
     @State private var itemTranslationState = HangarItemTranslationViewState()
     @State private var translationService = OnDeviceHangarItemTranslationService.shared
-    @State private var searchHaystackCache = FleetSearchHaystackCache()
+    @State private var inventorySearchIndex: InventorySearchIndex?
+    @State private var queryCache = InventoryQueryCache<InventoryQuerySignature, [GroupedFleetShip]>()
     @State private var displaySectionCache = FleetDisplaySectionCache()
 
     init(appModel: AppModel, snapshot: HangarSnapshot) {
         self.appModel = appModel
         self.snapshot = snapshot
-        allShipGroups = snapshot.fleet.groupedForFleetDisplay
     }
 
     private var displayMode: DisplayMode {
@@ -132,6 +132,19 @@ struct FleetView: View {
                 id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
             ) {
                 await loadItemTranslationDictionary()
+            }
+            .task(id: searchIndexKey) { await warmSearchIndex() }
+            .overlay {
+                if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && activeSearchIndex == nil && !appModel.isPreparingInventoryPresentation {
+                    ProgressView("Preparing search...").padding(18)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .allowsHitTesting(false)
+                }
+            }
+            .onChange(of: appModel.readyInventoryPresentation?.key) { _, key in
+                if key != nil, let selected = selectedShipGroup {
+                    selectedShipGroup = appModel.readyInventoryPresentation?.fleetByGroupID[selected.id]
+                }
             }
             .task(id: fleetImagePrefetchID(for: displayedShipGroups)) {
                 await prefetchFleetImages(startingAt: 0, in: displayedShipGroups)
@@ -359,7 +372,7 @@ struct FleetView: View {
 
     private func pledgeSheetContext(for shipGroup: GroupedFleetShip) -> FleetShipPledgeSheetContext? {
         let sourcePackageIDs = Set(shipGroup.ships.map(\.sourcePackageID))
-        let packageGroups = snapshot.packages.groupedForInventoryDisplay.filter { packageGroup in
+        let packageGroups = (appModel.readyInventoryPresentation?.packages ?? []).filter { packageGroup in
             packageGroup.packages.contains { package in
                 sourcePackageIDs.contains(package.id)
             }
@@ -377,7 +390,8 @@ struct FleetView: View {
 
     private var displaySections: [FleetDisplaySection] {
         let signature = FleetDisplaySectionCache.Signature(
-            snapshotLastSyncedAt: snapshot.lastSyncedAt,
+            inventoryKey: appModel.readyInventoryPresentation?.key,
+            searchKey: searchText.isEmpty ? nil : activeSearchIndex?.key,
             query: searchText,
             sortMode: sortMode.rawValue,
             languageRawValue: itemTranslator.language.rawValue,
@@ -530,33 +544,14 @@ struct FleetView: View {
     }
 
     private var filteredShipGroups: [GroupedFleetShip] {
-        let performanceInterval = PerformanceTrace.begin("FleetSearch")
-        defer { PerformanceTrace.end("FleetSearch", performanceInterval) }
-
-        let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
-
-        guard !normalizedSearchText.isEmpty else {
-            return allShipGroups
-        }
-
-        let signature = FleetSearchHaystackCache.Signature(
-            snapshotLastSyncedAt: snapshot.lastSyncedAt,
-            languageRawValue: itemTranslator.language.rawValue,
-            dictionaryLocale: itemTranslator.dictionary?.locale,
-            dictionaryVersion: itemTranslator.dictionary?.version,
-            translationCacheGeneration: translationService.cacheGeneration
-        )
-
-        return allShipGroups.filter { shipGroup in
-            shipGroup.ships.contains {
-                searchHaystackCache
-                    .haystack(
-                        for: $0,
-                        signature: signature,
-                        itemTranslator: itemTranslator,
-                        translationService: translationService
-                    )
-                    .contains(normalizedSearchText)
+        let query = InventorySearchQuery(searchText)
+        guard !query.isEmpty else { return allShipGroups }
+        let index = activeSearchIndex
+        let signature = InventoryQuerySignature(presentation: appModel.readyInventoryPresentation?.key, search: index?.key,
+            query: query.value, requiredFlags: [])
+        return queryCache.result(for: signature) {
+            PerformanceTrace.measure("FleetSearch") {
+                allShipGroups.filter { group in index?.fleet[group.id]?.contains(where: { $0.contains(query) }) == true }
             }
         }
     }
@@ -579,30 +574,24 @@ struct FleetView: View {
         await warmSearchIndex()
     }
 
-    private func warmSearchIndex() async {
+    private var searchIndexKey: InventorySearchKey? {
+        guard let presentation = appModel.readyInventoryPresentation else { return nil }
         let translator = itemTranslator
-        let signature = FleetSearchHaystackCache.Signature(
-            snapshotLastSyncedAt: snapshot.lastSyncedAt,
-            languageRawValue: translator.language.rawValue,
-            dictionaryLocale: translator.dictionary?.locale,
-            dictionaryVersion: translator.dictionary?.version,
-            translationCacheGeneration: translationService.cacheGeneration
-        )
-
-        for (offset, ship) in allShipGroups.flatMap(\.ships).enumerated() {
-            guard !Task.isCancelled else {
-                return
-            }
-            _ = searchHaystackCache.haystack(
-                for: ship,
-                signature: signature,
-                itemTranslator: translator,
-                translationService: translationService
-            )
-            if offset.isMultiple(of: 20) {
-                await Task.yield()
-            }
-        }
+        return InventorySearchKey(presentation: presentation.key, language: translator.language.rawValue,
+            dictionaryLocale: translator.dictionary?.locale, dictionaryVersion: translator.dictionary?.version,
+            cacheGeneration: translationService.cacheGeneration, upgradedNames: false, section: .fleet)
+    }
+    private var activeSearchIndex: InventorySearchIndex? {
+        inventorySearchIndex?.key == searchIndexKey ? inventorySearchIndex : nil
+    }
+    private func warmSearchIndex() async {
+        guard let presentation = appModel.readyInventoryPresentation, let key = searchIndexKey else { return }
+        do {
+            let value = try await appModel.inventorySearchBuilder.index(presentation: presentation,
+                context: translationService.searchContext(using: itemTranslator), key: key)
+            guard !Task.isCancelled, key == searchIndexKey else { return }
+            inventorySearchIndex = value
+        } catch { }
     }
 
     private func cardSubtitle(for shipGroup: GroupedFleetShip) -> String? {
@@ -3387,46 +3376,10 @@ private struct FleetShipDetailPill: View {
 }
 
 @MainActor
-private final class FleetSearchHaystackCache {
-    struct Signature: Equatable {
-        let snapshotLastSyncedAt: Date
-        let languageRawValue: String
-        let dictionaryLocale: String?
-        let dictionaryVersion: Int?
-        let translationCacheGeneration: Int
-    }
-
-    private var activeSignature: Signature?
-    private var entries: [Int: String] = [:]
-
-    func haystack(
-        for ship: FleetShip,
-        signature: Signature,
-        itemTranslator: HangarItemTranslator,
-        translationService: OnDeviceHangarItemTranslationService
-    ) -> String {
-        if activeSignature != signature {
-            activeSignature = signature
-            entries.removeAll(keepingCapacity: true)
-        }
-
-        if let haystack = entries[ship.id] {
-            return haystack
-        }
-
-        let haystack = translationService.fleetSearchableText(
-            for: ship,
-            using: itemTranslator
-        )
-        entries[ship.id] = haystack
-        return haystack
-    }
-}
-
-@MainActor
 private final class FleetDisplaySectionCache {
     struct Signature: Equatable {
-        let snapshotLastSyncedAt: Date
+        let inventoryKey: InventoryPresentationKey?
+        let searchKey: InventorySearchKey?
         let query: String
         let sortMode: String
         let languageRawValue: String

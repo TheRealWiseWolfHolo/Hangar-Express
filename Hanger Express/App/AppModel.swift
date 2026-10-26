@@ -669,10 +669,71 @@ final class AppModel {
     var session: UserSession?
     var savedSessions: [UserSession] = []
     @ObservationIgnored private var snapshotRevision: UInt64 = 0
-    var loadState: LoadState = .idle { didSet { snapshotRevision &+= 1 } }
+    private var hangarLogContentEpoch: UInt64 = 0
+    private var hangarLogPreviewEpoch: UInt64 = 0
+    var loadState: LoadState = .idle {
+        didSet {
+            snapshotRevision &+= 1
+            let previousLogs: [HangarLogEntry]?
+            if case .loaded(let previous) = oldValue { previousLogs = previous.hangarLogs } else { previousLogs = nil }
+            if previousLogs != snapshot?.hangarLogs { hangarLogContentEpoch &+= 1 }
+            prepareInventoryPresentation(previous: oldValue)
+        }
+    }
+    @ObservationIgnored let inventorySearchBuilder = InventorySearchBuilder()
+    private(set) var inventoryPresentation: InventoryPresentation?
+    @ObservationIgnored private let inventoryPresentationBuilder = InventoryPresentationBuilder()
+    @ObservationIgnored private var inventoryPresentationTask: Task<Void, Never>?
+    private var requestedInventoryPresentationKey: InventoryPresentationKey?
+    @ObservationIgnored private var inventoryContentEpoch: UInt64 = 0
+
+    var readyInventoryPresentation: InventoryPresentation? {
+        guard inventoryPresentation?.key == requestedInventoryPresentationKey else { return nil }
+        return inventoryPresentation
+    }
+    var isPreparingInventoryPresentation: Bool { snapshot != nil && readyInventoryPresentation == nil }
+
+    private func prepareInventoryPresentation(previous: LoadState) {
+        guard let snapshot, let session else {
+            inventoryPresentationTask?.cancel(); inventoryPresentationTask = nil
+            requestedInventoryPresentationKey = nil; inventoryPresentation = nil
+            return
+        }
+        let old: HangarSnapshot?
+        if case .loaded(let value) = previous { old = value } else { old = nil }
+        // Buffer identity makes unchanged-section comparisons cheap. The content
+        // check also protects fixtures/legacy callers that reuse a revision.
+        if old?.packages != snapshot.packages || old?.fleet != snapshot.fleet || old?.buyback != snapshot.buyback {
+            inventoryContentEpoch &+= 1
+        }
+        let key = InventoryPresentationKey(accountID: session.id, hangarRevision: snapshot.sections.hangar.contentRevision,
+            buybackRevision: snapshot.sections.buyback.contentRevision, contentEpoch: inventoryContentEpoch)
+        if inventoryPresentation?.key == key || (requestedInventoryPresentationKey == key && inventoryPresentationTask != nil) { return }
+        inventoryPresentationTask?.cancel()
+        requestedInventoryPresentationKey = key
+        guard let owner = try? accountOperations.begin(session: session, mutation: false) else { return }
+        let jobID = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.accountOperations.finish(owner, session: session, succeeded: true)
+                self.accountOperations.finishedJob(jobID)
+                if self.requestedInventoryPresentationKey == key { self.inventoryPresentationTask = nil }
+            }
+            do {
+                let presentation = try await self.inventoryPresentationBuilder.build(snapshot: snapshot, key: key)
+                guard !Task.isCancelled, self.currentAccountOperationIsValid(owner), self.requestedInventoryPresentationKey == key else { return }
+                self.inventoryPresentation = presentation
+            } catch { /* Cancelled/obsolete presentation work never commits. */ }
+        }
+        inventoryPresentationTask = task
+        accountOperations.track(owner, id: jobID) { task.cancel() }
+    }
+
     var lastRefreshAt: Date?
     var lastRefreshErrorMessage: String?
     var sessionStorageErrorMessage: String?
+    var snapshotStorageErrorMessage: String?
     var lastRefreshErrorScope: RefreshScope?
     var activeRefreshScope: RefreshScope?
     let refreshPresentation = RefreshPresentation()
@@ -688,7 +749,9 @@ final class AppModel {
     var cloudItemTranslationUploadProgress: CloudItemTranslationUploadProgress?
     var itemTranslationPreloadLogEntries: [ItemTranslationPreloadLogEntry] = []
     var itemTranslationDictionaryRefreshGeneration = 0
-    private var hangarLogRefreshPreviewLogs: [HangarLogEntry] = []
+    private var hangarLogRefreshPreviewLogs: [HangarLogEntry] = [] {
+        didSet { if oldValue != hangarLogRefreshPreviewLogs { hangarLogPreviewEpoch &+= 1 } }
+    }
     var previewsTranslationLoadingBar = false
     private var startupActivityID: UUID?
     var startupActivity: StartupActivity?
@@ -706,7 +769,7 @@ final class AppModel {
     private var refreshOperationID: UUID?
     private var postRefreshImageTask: Task<Void, Never>?
     private let sessionStore: any SessionStore
-    private let snapshotStore: any SnapshotStore
+    private let snapshotPersistence: SnapshotPersistenceCoordinator
     private let imageCache: any RemoteImageCaching
     private let hangarRepository: any HangarRepository
     private let sensitiveActionAuthorizer: any SensitiveActionAuthorizing
@@ -788,7 +851,7 @@ final class AppModel {
     init(environment: AppEnvironment) {
         accountOperations = AccountOperationCoordinator(defaults: environment.userDefaults)
         sessionStore = environment.sessionStore
-        snapshotStore = environment.snapshotStore
+        snapshotPersistence = SnapshotPersistenceCoordinator(store: environment.snapshotStore)
         imageCache = environment.imageCache
         hangarRepository = environment.hangarRepository
         sensitiveActionAuthorizer = environment.sensitiveActionAuthorizer
@@ -812,20 +875,20 @@ final class AppModel {
         return snapshot
     }
 
-    var hangarLogPresentationSnapshot: HangarSnapshot? {
-        guard let snapshot else {
-            return nil
-        }
+    var hangarLogPresentationKey: HangarLogPresentationKey {
+        HangarLogPresentationKey(accountID: session?.id, accountContextID: authenticationFlowID,
+            hasSnapshot: snapshot != nil, logContentEpoch: hangarLogContentEpoch,
+            previewEpoch: hangarLogPreviewEpoch,
+            usesPreview: isRefreshing(.hangarLog) && !hangarLogRefreshPreviewLogs.isEmpty,
+            inventoryLookupID: readyInventoryPresentation?.hangarLogLookup.identity,
+            isPro: isPro, hangarLogEntryLimit: hangarLogEntryLimit,
+            imageReloadToken: hangarFleetImageReloadToken)
+    }
 
-        guard isRefreshing(.hangarLog),
-              !hangarLogRefreshPreviewLogs.isEmpty else {
-            return snapshot
-        }
-
-        return snapshot.updatingHangarLogs(
-            hangarLogs: hangarLogRefreshPreviewLogs,
-            lastSyncedAt: snapshot.lastSyncedAt
-        )
+    var hangarLogPresentationLogs: [HangarLogEntry] {
+        guard snapshot != nil else { return [] }
+        if isRefreshing(.hangarLog), !hangarLogRefreshPreviewLogs.isEmpty { return hangarLogRefreshPreviewLogs }
+        return snapshot?.hangarLogs ?? []
     }
 
     var isRefreshing: Bool {
@@ -1119,7 +1182,7 @@ final class AppModel {
         guard await changeStoredSessions(resetContent: true, operation: { try await self.sessionStore.clear() }) else { return }
         reauthenticationPrompt = nil
         pendingAuthenticationDraft = nil
-        await snapshotStore.clear()
+        await clearSnapshotStorage()
         selectedTab = .hangar
     }
 
@@ -1211,7 +1274,8 @@ final class AppModel {
         )
         guard await changeStoredSessions(resetContent: wasActiveSession, operation: { try await self.sessionStore.deleteSession(id: id) }) else { return }
         if let removedSession {
-            await snapshotStore.delete(for: removedSession)
+            do { try await snapshotPersistence.delete(for: removedSession) }
+            catch { snapshotStorageErrorMessage = error.localizedDescription }
         }
         if wasActiveSession {
             reauthenticationPrompt = nil
@@ -1333,8 +1397,8 @@ final class AppModel {
         }
 
         if resolvedScope == .full || resolvedScope == .hangar {
-            await HostedShipCatalogStore.shared.clear()
-            await HostedShipDetailCatalogStore.shared.clear()
+            await shipCatalogStore.invalidateFreshness()
+            await shipDetailCatalogStore.invalidateFreshness()
         }
         guard currentAccountOperationIsValid else { return }
 
@@ -1391,11 +1455,18 @@ final class AppModel {
                 diagnosticsStage: "refresh.complete",
                 diagnosticsSummary: "\(refreshScopeDisplayName(resolvedScope)) refresh finished successfully."
             )
+            if !snapshot.sections.failedSections.isEmpty {
+                lastRefreshErrorMessage = AppLocalizer.format("Some sections could not refresh: %@. Previously saved data is shown where available.", snapshot.sections.failedSections.map(\.title).joined(separator: ", "))
+                lastRefreshErrorScope = resolvedScope
+                if SnapshotSection.allCases.contains(where: { snapshot.sections[$0].requiresAuthentication }) {
+                    reauthenticationPrompt = ReauthenticationPrompt(title: AppLocalizer.string("Sign In Again"), message: AppLocalizer.string("Your saved RSI session expired. Sign in again to continue refreshing live data."))
+                }
+            }
             requestItemTranslationPreload(for: snapshot, promptsWhenCacheIsMissing: true)
             persistSnapshotInBackground(snapshot, for: session)
             await persistResolvedAccountIdentityIfNeeded(from: snapshot, baseSession: session)
             guard currentAccountOperationIsValid else { return }
-            if resolvedScope == .full || resolvedScope == .hangar {
+            if (resolvedScope == .full || resolvedScope == .hangar), snapshot.sections.hangar.failedAt == nil {
                 accountOperations.recordRecoveryRead(session, stamp: recoveryStamp)
             }
             schedulePostRefreshImageInvalidation(
@@ -1428,7 +1499,19 @@ final class AppModel {
                 ? (partialHangarLogSnapshot ?? snapshot ?? existingSnapshot)
                 : existingSnapshot
             if let fallbackSnapshot {
-                loadState = .loaded(fallbackSnapshot)
+                var states = fallbackSnapshot.sections
+                let failedSections: [SnapshotSection]
+                switch resolvedScope {
+                case .full: failedSections = SnapshotSection.allCases
+                case .hangar: failedSections = [.hangar]
+                case .buyback: failedSections = [.buyback]
+                case .account: failedSections = [.account]
+                case .hangarLog: failedSections = [.hangarLog]
+                }
+                for section in failedSections { states[section].failedAt = .now }
+                let retained = fallbackSnapshot.replacingSections(states)
+                loadState = .loaded(retained)
+                persistSnapshotInBackground(retained, for: session)
                 presentRefreshError(message, scope: resolvedScope, error: error)
             } else {
                 presentRefreshError(message, scope: resolvedScope, error: error)
@@ -1499,6 +1582,9 @@ final class AppModel {
     private func persistSnapshotInBackground(_ snapshot: HangarSnapshot, for session: UserSession) {
         guard currentAccountOperationIsValid, self.session?.id == session.id,
               let owner = try? accountOperations.begin(session: session, mutation: false) else { return }
+        // Reserve the write synchronously before creating a task. Task scheduling
+        // must not reorder the snapshots accepted by the UI owner.
+        let receipt = snapshotPersistence.submit(snapshot, for: session)
         let jobID = UUID()
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1506,24 +1592,30 @@ final class AppModel {
                 self.accountOperations.finish(owner, session: session, succeeded: true)
                 self.accountOperations.finishedJob(jobID)
             }
-            guard self.currentAccountOperationIsValid(owner), !Task.isCancelled else { return }
-            await AccountOperationContext.$owner.withValue(owner) {
-                await self.saveSnapshotOffMainActor(snapshot, for: session)
+            do { _ = try await receipt.value() }
+            catch {
+                if self.currentAccountOperationIsValid(owner) {
+                    self.snapshotStorageErrorMessage = error.localizedDescription
+                }
             }
         }
         accountOperations.track(owner, id: jobID) { task.cancel() }
     }
 
-    private func saveSnapshotOffMainActor(_ snapshot: HangarSnapshot, for session: UserSession) async {
-        // Preserve the original utility-executor persistence path. Ownership is
-        // checked before submission; #4 still owns ordering already-started I/O.
-        guard currentAccountOperationIsValid, self.session?.id == session.id else { return }
-        let store = snapshotStore
-        let io = Task.detached(priority: .utility) {
-            guard !Task.isCancelled else { return }
-            await store.save(snapshot, for: session)
+    @discardableResult
+    private func saveSnapshotOffMainActor(_ snapshot: HangarSnapshot, for session: UserSession) async -> Bool {
+        guard currentAccountOperationIsValid, self.session?.id == session.id else { return false }
+        let receipt = snapshotPersistence.submit(snapshot, for: session)
+        do { return try await receipt.value() == .persisted }
+        catch {
+            if currentAccountOperationIsValid { snapshotStorageErrorMessage = error.localizedDescription }
+            return false
         }
-        await withTaskCancellationHandler(operation: { await io.value }, onCancel: { io.cancel() })
+    }
+
+    private func clearSnapshotStorage() async {
+        do { try await snapshotPersistence.clear() }
+        catch { snapshotStorageErrorMessage = error.localizedDescription }
     }
 
     private func resetItemTranslationPreloadLogs() {
@@ -1619,6 +1711,20 @@ final class AppModel {
 
         guard !suspendedItemTranslationAutoPreloadLanguages.contains(language) else {
             appendItemTranslationPreloadLog("Automatic translation preload skipped while waiting for cache-clear rebuild confirmation.")
+            return
+        }
+
+        let cacheService = OnDeviceHangarItemTranslationService.shared
+        if !cacheService.isCacheReady {
+            let generation = accountOperations.generation
+            let accountID = session?.id
+            itemTranslationPreloadTask?.cancel()
+            itemTranslationPreloadTask = Task { @MainActor [weak self] in
+                await cacheService.prepareCache()
+                guard let self, !Task.isCancelled, generation == self.accountOperations.generation,
+                      accountID == self.session?.id, language == self.currentHangarItemLanguage else { return }
+                self.requestItemTranslationPreload(for: snapshot, promptsWhenCacheIsMissing: promptsWhenCacheIsMissing, presentation: presentation)
+            }
             return
         }
 
@@ -2170,7 +2276,7 @@ final class AppModel {
             }
         }
 
-        await snapshotStore.clear()
+        await clearSnapshotStorage()
         await ProfileBackgroundOptionsCache.shared.clear()
         responseCache.removeAllCachedResponses()
         await imageCache.clear()
@@ -3418,8 +3524,8 @@ final class AppModel {
                 stage: "refresh.hangar.background-complete",
                 summary: "The background post-action hangar refresh finished successfully."
             )
-            await saveSnapshotOffMainActor(refreshedSnapshot, for: session)
-            guard shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else { return }
+            let saved = await saveSnapshotOffMainActor(refreshedSnapshot, for: session)
+            guard saved, shouldContinueSilentHangarActionReconciliation(using: session, generation: generation) else { return }
             if let owner = AccountOperationContext.owner { accountOperations.completeReconciliation(owner, session: session) }
             schedulePostRefreshImageInvalidation(
                 for: .hangar,
@@ -3667,7 +3773,14 @@ final class AppModel {
     private func restoreCachedSnapshot(for session: UserSession) async -> Bool {
         let generation = accountOperations.generation
         let revision = snapshotRevision
-        let cachedSnapshot = await snapshotStore.load(for: session)
+        let cachedSnapshot: HangarSnapshot?
+        do { cachedSnapshot = try await snapshotPersistence.load(for: session) }
+        catch {
+            if generation == accountOperations.generation, self.session?.id == session.id {
+                snapshotStorageErrorMessage = error.localizedDescription
+            }
+            return false
+        }
         guard generation == accountOperations.generation, self.session?.id == session.id,
               !Task.isCancelled else { return false }
         guard revision == snapshotRevision, refreshOperationID == nil else { return snapshot != nil }
@@ -3743,7 +3856,7 @@ final class AppModel {
         }
 
         return SyncPreferences.shouldAutoRefreshInventory(
-            lastRefreshAt: lastRefreshAt,
+            lastRefreshAt: snapshot?.sections.hangar.refreshedAt,
             interval: SyncPreferences.resolvedInventoryAutoRefreshInterval(
                 from: userDefaults.string(forKey: SyncPreferences.inventoryAutoRefreshIntervalKey)
             )
@@ -3821,12 +3934,12 @@ final class AppModel {
         existingSnapshot: HangarSnapshot?,
         progressRelay: RefreshProgressDisplayRelay
     ) async throws -> HangarSnapshot {
-        var refreshedSnapshot = try await hangarRepository.fetchSnapshot(for: session) { progress in
+        var refreshedSnapshot = try await hangarRepository.fetchSnapshot(for: session, preserving: existingSnapshot) { progress in
             progressRelay.submit(progress)
         }
 
         if let existingSnapshot {
-            refreshedSnapshot = refreshedSnapshot.preservingUnavailableProfile(from: existingSnapshot)
+            refreshedSnapshot = refreshedSnapshot.preservingUnavailableProfile(from: existingSnapshot).replacingSections(refreshedSnapshot.sections)
         }
 
         guard refreshedSnapshot.hangarLogs.isEmpty,
@@ -3836,8 +3949,8 @@ final class AppModel {
         }
 
         return refreshedSnapshot.updatingHangarLogs(
-            hangarLogs: existingSnapshot.hangarLogs
-        )
+            hangarLogs: existingSnapshot.hangarLogs, lastSyncedAt: refreshedSnapshot.lastSyncedAt
+        ).replacingSections(refreshedSnapshot.sections)
     }
 
     private func persistResolvedAccountIdentityIfNeeded(
@@ -4612,63 +4725,35 @@ final class AppModel {
         refreshedSnapshot: HangarSnapshot
     ) async {
         guard currentAccountOperationIsValid else { return }
-        let urlsToInvalidate = imageURLsToInvalidate(
-            for: scope,
-            previousSnapshot: previousSnapshot,
-            refreshedSnapshot: refreshedSnapshot
-        )
-
-        guard !urlsToInvalidate.isEmpty || scope == .full else {
-            return
-        }
-
-        if !urlsToInvalidate.isEmpty {
-            await imageCache.clear(urls: Array(urlsToInvalidate))
-        }
-
+        let previousURLs = imageURLs(for: scope, in: previousSnapshot)
+        let refreshedURLs = imageURLs(for: scope, in: refreshedSnapshot)
+        let removed = previousURLs.subtracting(allImageURLs(in: refreshedSnapshot))
+        if !removed.isEmpty { await imageCache.clear(urls: Array(removed)) }
         guard currentAccountOperationIsValid else { return }
-        switch scope {
-        case .full:
+        let changed = await imageCache.revalidate(urls: Array(previousURLs.intersection(refreshedURLs)), force: false)
+        guard currentAccountOperationIsValid else { return }
+        let affected = removed.union(changed)
+        guard !affected.isEmpty else { return }
+
+        if !affected.isDisjoint(with: hangarAndFleetImageURLs(in: previousSnapshot).union(hangarAndFleetImageURLs(in: refreshedSnapshot))) {
             hangarFleetImageReloadToken = UUID()
+        }
+        if !affected.isDisjoint(with: buybackImageURLs(in: previousSnapshot).union(buybackImageURLs(in: refreshedSnapshot))) {
             buybackImageReloadToken = UUID()
+        }
+        if !affected.isDisjoint(with: accountImageURLs(in: previousSnapshot).union(accountImageURLs(in: refreshedSnapshot))) {
             accountImageReloadToken = UUID()
-        case .hangar:
-            hangarFleetImageReloadToken = UUID()
-        case .buyback:
-            buybackImageReloadToken = UUID()
-        case .account:
-            accountImageReloadToken = UUID()
-        case .hangarLog:
-            break
         }
     }
 
-    private func imageURLsToInvalidate(
-        for scope: RefreshScope,
-        previousSnapshot: HangarSnapshot?,
-        refreshedSnapshot: HangarSnapshot
-    ) -> Set<URL> {
-        let previousURLs: Set<URL>
-        let refreshedURLs: Set<URL>
-
+    private func imageURLs(for scope: RefreshScope, in snapshot: HangarSnapshot?) -> Set<URL> {
         switch scope {
-        case .full:
-            previousURLs = allImageURLs(in: previousSnapshot)
-            refreshedURLs = allImageURLs(in: refreshedSnapshot)
-        case .hangar:
-            previousURLs = hangarAndFleetImageURLs(in: previousSnapshot)
-            refreshedURLs = hangarAndFleetImageURLs(in: refreshedSnapshot)
-        case .buyback:
-            previousURLs = buybackImageURLs(in: previousSnapshot)
-            refreshedURLs = buybackImageURLs(in: refreshedSnapshot)
-        case .account:
-            previousURLs = accountImageURLs(in: previousSnapshot)
-            refreshedURLs = accountImageURLs(in: refreshedSnapshot)
-        case .hangarLog:
-            return []
+        case .full: allImageURLs(in: snapshot)
+        case .hangar: hangarAndFleetImageURLs(in: snapshot)
+        case .buyback: buybackImageURLs(in: snapshot)
+        case .account: accountImageURLs(in: snapshot)
+        case .hangarLog: []
         }
-
-        return previousURLs.union(refreshedURLs)
     }
 
     private func allImageURLs(in snapshot: HangarSnapshot?) -> Set<URL> {
@@ -4941,6 +5026,10 @@ extension AppModel {
         transientBanner = nil
         startupActivityID = nil; startupActivity = nil
         sessionStorageErrorMessage = nil
+        snapshotStorageErrorMessage = nil
+        inventoryPresentationTask?.cancel()
+        requestedInventoryPresentationKey = nil; inventoryPresentation = nil
+        Task { await inventorySearchBuilder.clear() }
         authenticationFlowID = UUID()
     }
     private func beginAccountTransition(invalidate: Bool = true) -> Bool {

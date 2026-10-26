@@ -547,6 +547,12 @@ protocol HangarRepository: Sendable {
         progress: @escaping RefreshProgressHandler
     ) async throws -> HangarSnapshot
 
+    func fetchSnapshot(
+        for session: UserSession,
+        preserving snapshot: HangarSnapshot?,
+        progress: @escaping RefreshProgressHandler
+    ) async throws -> HangarSnapshot
+
     func refreshHangarData(
         for session: UserSession,
         from snapshot: HangarSnapshot,
@@ -658,6 +664,10 @@ protocol HangarRepository: Sendable {
 }
 
 extension HangarRepository {
+    func fetchSnapshot(for session: UserSession, preserving snapshot: HangarSnapshot?, progress: @escaping RefreshProgressHandler) async throws -> HangarSnapshot {
+        try await fetchSnapshot(for: session, progress: progress)
+    }
+
     func prepareWBCCUCheckout(
         for _: UserSession,
         items _: [WBCCUCheckoutItem]

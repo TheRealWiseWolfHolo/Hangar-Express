@@ -14,6 +14,14 @@ struct DashboardTabView: View {
 
     var body: some View {
         content
+            .overlay {
+                if appModel.isPreparingInventoryPresentation && appModel.selectedTab != .account {
+                    ProgressView("Preparing inventory...")
+                        .padding(20)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .allowsHitTesting(false)
+                }
+            }
     }
 
     private var content: some View {

@@ -119,3 +119,32 @@ check the actual reported test count rather than treating an empty run as eviden
 Ownership and save-submission assertions do not promise ordered disk completion.
 The recorded older-write-finishes-last scenario is the next roadmap item (#4).
 See `docs/ACCOUNT_OPERATIONS.md` for the state transitions and boundary.
+
+## Snapshot and inventory optimization coverage
+
+`SnapshotPersistenceTests` forces old saves, coalesced pending writes, deletion
+barriers, write failures, migration and corrupt/future-format preservation.
+`SnapshotSectionTests` verifies independent freshness, no-op revisions and partial
+section merges. `ValidatedHostedFeedTests` covers shared loads, validators,
+validated offline data, cache restrictions and clear/configuration fencing.
+`InventoryCPUWorkerTests` verifies executor ownership, normalization/parser parity,
+cancellation and asynchronous translation-cache readiness. `ImageCacheTests`
+checks selective dependencies and same-URL changes. `InventoryPresentationTests`
+checks groups, stable IDs, filter flags, language/account invalidation, cache
+bounds and Unicode matching.
+
+The opt-in `PerformanceBaselineTests/testCPUIsolationWorkload` compares a
+synchronous reference with actor execution using offline data.
+`testPresentationIndexComparison` records one-time index build and distinct query
+costs at 1,000/10,000 items, including exact result-ID parity and observed process
+footprints. Both use the Benchmarks scheme; they are excluded from normal CI.
+Profiling source snapshots, measurements and traces stay private local artifacts.
+
+### Hangar Log events
+
+`HangarLogPresentationTests` covers latest-update buffering, explicit application,
+account/context resets and lookup reuse across unrelated content. Integration tests
+cover same-ID log edits, no-op freshness, incremental batches and rejected late
+batches after account switches. The opt-in Release UI test
+`testHangarLogSearchSurvivesRefreshAndKeyboardDismissal` uses the offline dashboard
+and preview log to verify refresh, search focus, keyboard dismissal and X reset.

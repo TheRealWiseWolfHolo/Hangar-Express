@@ -17,6 +17,7 @@ struct CachedRemoteImage<Content: View>: View {
 
     @Environment(\.displayScale) private var displayScale
     @State private var phase: CachedRemoteImagePhase = .empty
+    @State private var displayedResourceID: String?
 
     init(
         url: URL?,
@@ -69,7 +70,11 @@ struct CachedRemoteImage<Content: View>: View {
             return
         }
 
-        phase = .empty
+        let resourceID = [url.absoluteString, cacheSizeKey, trimsTransparentPadding ? "trim" : "raw"].joined(separator: "|")
+        if displayedResourceID != resourceID {
+            phase = .empty
+            displayedResourceID = resourceID
+        }
 
         do {
             let loadedImage = try await URLCachedImageStore.shared.image(
@@ -178,6 +183,7 @@ struct CachedUpgradeCompositeImage<Content: View>: View {
 
     @Environment(\.displayScale) private var displayScale
     @State private var phase: CachedRemoteImagePhase = .empty
+    @State private var displayedResourceID: String?
 
     init(
         sourceURL: URL?,
@@ -216,7 +222,11 @@ struct CachedUpgradeCompositeImage<Content: View>: View {
             return
         }
 
-        phase = .empty
+        let resourceID = [sourceURL?.absoluteString ?? "nil", targetURL?.absoluteString ?? "nil", "\(targetSize):\(displayScale)"].joined(separator: "|")
+        if displayedResourceID != resourceID {
+            phase = .empty
+            displayedResourceID = resourceID
+        }
 
         do {
             let image = try await URLCachedImageStore.shared.compositeImage(

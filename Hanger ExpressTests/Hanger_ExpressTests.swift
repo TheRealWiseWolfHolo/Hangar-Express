@@ -986,13 +986,13 @@ struct Hanger_ExpressTests {
         )
         let snapshot = PreviewHangarRepository.sampleSnapshot
 
-        await store.save(snapshot, for: session)
-        let restoredSnapshot = await store.load(for: session)
+        try await store.save(snapshot, for: session)
+        let restoredSnapshot = try await store.load(for: session)
 
         #expect(restoredSnapshot == snapshot)
 
-        await store.delete(for: session)
-        let deletedSnapshot = await store.load(for: session)
+        try await store.delete(for: session)
+        let deletedSnapshot = try await store.load(for: session)
 
         #expect(deletedSnapshot == nil)
     }
@@ -3382,7 +3382,7 @@ struct Hanger_ExpressTests {
         )
     }
 
-    @Test func shareAndHangarTextRespectSelectedTranslationMode() throws {
+    @Test func shareAndHangarTextRespectSelectedTranslationMode() async throws {
         let tempDirectory = resources.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempDirectory) }
         try FileManager.default.createDirectory(
@@ -3419,6 +3419,7 @@ struct Hanger_ExpressTests {
         )
         let translator = HangarItemTranslator(language: .simplifiedChinese, dictionary: dictionary)
         let service = OnDeviceHangarItemTranslationService(directoryURL: tempDirectory)
+        await service.prepareCache()
 
         #expect(
             HangarItemDisplayText.text(
@@ -4356,6 +4357,7 @@ struct Hanger_ExpressTests {
         #expect(progressUpdates.last?.totalUnitCount == 0)
 
         let reloadedService = OnDeviceHangarItemTranslationService(directoryURL: tempDirectory)
+        await reloadedService.prepareCache()
         #expect(reloadedService.hasAvailableCache(for: .simplifiedChinese))
     }
 
@@ -4425,7 +4427,7 @@ struct Hanger_ExpressTests {
         #expect(try String(contentsOf: cacheURL, encoding: .utf8) == "revision-1")
     }
 
-    @Test func onDeviceTranslationSearchTextIncludesEnglishAndCachedItemLanguageText() throws {
+    @Test func onDeviceTranslationSearchTextIncludesEnglishAndCachedItemLanguageText() async throws {
         let tempDirectory = resources.temporaryDirectory()
         defer {
             try? FileManager.default.removeItem(at: tempDirectory)
@@ -4479,6 +4481,7 @@ struct Hanger_ExpressTests {
         )
         let translator = HangarItemTranslator(language: .simplifiedChinese, dictionary: dictionary)
         let service = OnDeviceHangarItemTranslationService(directoryURL: tempDirectory)
+        await service.prepareCache()
         let haystack = service.searchableText(for: source, using: translator).localizedLowercase
 
         #expect(haystack.contains("upgrade - defender to railen standard edition"))
@@ -6162,7 +6165,8 @@ struct Hanger_ExpressTests {
             return false
         }
 
-        #expect(restoredSnapshot == cachedSnapshot)
+        #expect(restoredSnapshot?.replacingSections(cachedSnapshot.sections) == cachedSnapshot)
+        #expect(restoredSnapshot?.sections.failedSections.count == 4)
         #expect(stillLoaded)
         #expect(refreshErrorMessage == "Unable to refresh the full account snapshot. RSI refresh timed out.")
     }

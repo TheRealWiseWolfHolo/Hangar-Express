@@ -83,12 +83,13 @@ final class FakeAuthenticationWebSession: AuthenticationWebSessionProviding, @un
 @MainActor
 final class FakeRemoteImageCache: RemoteImageCaching {
     private var clearCalls = 0
+    private(set) var clearedURLs: Set<URL> = []
 
     func clear() async {
         clearCalls += 1
     }
 
-    func clear(urls _: [URL]) async {}
+    func clear(urls: [URL]) async { clearedURLs.formUnion(urls) }
 
     func clearCallCount() async -> Int {
         clearCalls
@@ -173,6 +174,7 @@ struct RecordedCharacterRepairRequest: Equatable, Sendable {
 @MainActor
 final class FakeHangarRepository: HangarRepository {
     var fetchOverride: (@MainActor (UserSession, @escaping RefreshProgressHandler) async throws -> HangarSnapshot)?
+    var hangarLogOverride: (@MainActor (UserSession, HangarSnapshot, HangarLogBatchHandler?) async throws -> HangarSnapshot)?
     var hangarOverride: (@MainActor (UserSession, HangarSnapshot) async throws -> HangarSnapshot)?
     var meltOverride: (@MainActor (UserSession, [Int]) async throws -> MeltPackagesResult)?
 
@@ -280,9 +282,10 @@ final class FakeHangarRepository: HangarRepository {
         from snapshot: HangarSnapshot,
         mode _: HangarLogFetchMode,
         progress: @escaping RefreshProgressHandler,
-        batchHandler _: HangarLogBatchHandler?
+        batchHandler: HangarLogBatchHandler?
     ) async throws -> HangarSnapshot {
         invokedScopes.append("hangarLog")
+        if let hangarLogOverride { return try await hangarLogOverride(session, snapshot, batchHandler) }
         return snapshot
     }
 

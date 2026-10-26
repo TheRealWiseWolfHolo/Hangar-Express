@@ -4,6 +4,8 @@
 
 ### English
 
+- Hangar Log updates now follow content changes instead of polling, including edits that retain their IDs. Updates stay buffered while scrolling or editing search, and account switches clear previous rows immediately.
+
 - Hangar share pictures now use the selected item translation mode and the same displayed pledge title as the Hangar list. In Cloud mode, new names remain in English until their translations are reviewed and published.
 - Cloud translation submissions now provide a premium appearance count in the private review database, helping prioritize terms seen by Pro subscribers.
 - Chinese catalog translations now consistently use straight single quotation marks, including reviewed entries and new machine suggestions.
@@ -25,7 +27,16 @@
 - Saved accounts now update in Keychain without deleting the previous entry first. Storage failures are shown explicitly and preserve the current account and cached content.
 - Refreshes and account actions now reject late results after an account change. Conflicting actions are serialized through authorization and reconciliation, and uncertain submitted actions require review before retrying.
 
+- Snapshot caches now serialize and coalesce writes, preserve recoverable damaged data, migrate legacy files, and report storage failures.
+- Refresh dates and content revisions are tracked per section. Full Refresh retains useful cached sections when another section fails.
+- Hosted ship feeds now share requests, revalidate with HTTP validators, and retain validated offline fallback data.
+- Inventory refresh preserves unchanged images and invalidates only affected source-dependent variants; same-URL changes can revalidate without clearing every image.
+- Inventory normalization, direct HTML parsing, and translation-cache loading now execute away from the UI actor.
+- Hangar, Fleet, and Buy Back reuse revision-owned groups, lookups, filter flags, and bounded background search indexes.
+
 ### 简体中文
+
+- 机库日志改为按内容变化更新，支持同一编号下的内容修改；滚动或编辑搜索时暂存更新，切换账户时立即清除旧账户条目。
 
 - 机库分享图片现在会遵循所选物品翻译方式，并使用与机库列表相同的商品名称。在云端模式下，新名称会保持英文，直到译文审核并发布。
 - 云端翻译提交现在会在私有审核数据库中记录 Pro 用户的条目出现次数，帮助确定译文审核优先顺序。
@@ -47,6 +58,13 @@
 - 新增可选的离线性能测试数据和处理阶段追踪，用于在优化前测量大型机库的性能。
 - 更新已保存账户时不再先删除原有钥匙串条目；安全存储失败时会明确提示，并保留当前账户与缓存内容。
 - 切换账户后会忽略刷新和账户操作的过期结果；有冲突的操作会从身份验证到结果核对全程互斥，已提交但结果不确定的操作须先检查确认，才能重试。
+
+- 快照缓存按顺序合并写入，保留可恢复的损坏数据，兼容旧格式，并明确提示存储失败。
+- 各数据区独立记录刷新时间和内容版本；全部刷新时，部分失败不会丢弃其他区域成功更新的数据。
+- 舰船云端目录共享并发请求，支持条件验证，并保留已验证的离线备用数据。
+- 刷新保留未变化的图片，仅使受影响的来源及其衍生图片失效；同一链接的图片变化也可重新验证，无需清空全部图片。
+- 物品标准化、直接 HTTP 页面的解析和翻译缓存读取移至 UI 执行器之外。
+- 机库、舰队与回购共享按内容版本管理的分组、查找表、筛选标记及有界的后台搜索索引。
 
 ## v1.0.10 (Release Candidate)
 

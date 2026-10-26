@@ -43,7 +43,7 @@ struct HangarDashboardView: View {
 
     let appModel: AppModel
     let snapshot: HangarSnapshot
-    private let allPackageGroups: [GroupedHangarPackage]
+    private var allPackageGroups: [GroupedHangarPackage] { appModel.readyInventoryPresentation?.packages ?? [] }
 
     @Environment(\.displayScale) private var displayScale
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
@@ -68,7 +68,8 @@ struct HangarDashboardView: View {
     @State private var isGeneratingSharePicture = false
     @State private var itemTranslationState = HangarItemTranslationViewState()
     @State private var translationService = OnDeviceHangarItemTranslationService.shared
-    @State private var searchHaystackCache = HangarPackageSearchHaystackCache()
+    @State private var inventorySearchIndex: InventorySearchIndex?
+    @State private var queryCache = InventoryQueryCache<InventoryQuerySignature, [GroupedHangarPackage]>()
     @State private var hangarImagePrefetchTask: Task<Void, Never>?
 
     private static let hangarImagePrefetchLookaheadCount = 10
@@ -77,7 +78,6 @@ struct HangarDashboardView: View {
     init(appModel: AppModel, snapshot: HangarSnapshot) {
         self.appModel = appModel
         self.snapshot = snapshot
-        allPackageGroups = snapshot.packages.groupedForInventoryDisplay
     }
 
     var body: some View {
@@ -246,6 +246,17 @@ struct HangarDashboardView: View {
                 id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
             ) {
                 await loadItemTranslationDictionary()
+            }
+            .task(id: searchIndexKey) { await warmSearchIndex() }
+            .overlay {
+                if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && activeSearchIndex == nil && !appModel.isPreparingInventoryPresentation {
+                    ProgressView("Preparing search...").padding(18)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .allowsHitTesting(false)
+                }
+            }
+            .onChange(of: appModel.readyInventoryPresentation?.key) { _, key in
+                if key != nil { pruneSelectionToVisibleGroups() }
             }
             .task(id: hangarImagePrefetchID(for: visiblePackageGroups)) {
                 await prefetchHangarImages(startingAt: 0, in: visiblePackageGroups)
@@ -497,45 +508,26 @@ struct HangarDashboardView: View {
     }
 
     private var filteredPackageGroups: [GroupedHangarPackage] {
-        let performanceInterval = PerformanceTrace.begin("HangarSearch")
-        defer { PerformanceTrace.end("HangarSearch", performanceInterval) }
-
-        let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
-        let currentItemTranslator = itemTranslator
-        let searchSignature = searchIndexSignature(for: currentItemTranslator)
-
-        return allPackageGroups.filter { packageGroup in
-            let package = packageGroup.representative
-            let matchesFilter: Bool
+        let presentation = appModel.readyInventoryPresentation
+        let index = activeSearchIndex
+        let query = InventorySearchQuery(searchText)
+        var flags: InventoryFilterFlags = []
+        switch filter { case .all: break; case .giftable: flags.insert(.giftable); case .reclaimable: flags.insert(.reclaimable) }
+        for filter in searchFilters {
             switch filter {
-            case .all:
-                matchesFilter = true
-            case .giftable:
-                matchesFilter = package.canGift
-            case .reclaimable:
-                matchesFilter = package.canReclaim
+            case .lti: flags.insert(.lifetimeInsurance)
+            case .upgrades: flags.insert(.upgrade)
+            case .packages: flags.insert(.package)
             }
-
-            guard matchesFilter else {
-                return false
+        }
+        let signature = InventoryQuerySignature(presentation: presentation?.key, search: index?.key, query: query.value, requiredFlags: flags)
+        return queryCache.result(for: signature) {
+            PerformanceTrace.measure("HangarSearch") {
+                allPackageGroups.filter { group in
+                    guard (presentation?.packageFlags[group.id] ?? []).isSuperset(of: flags) else { return false }
+                    return query.isEmpty || index?.packages[group.id]?.contains(query) == true
+                }
             }
-
-            guard matchesSearchFilters(for: package) else {
-                return false
-            }
-
-            guard !normalizedSearchText.isEmpty else {
-                return true
-            }
-
-            let haystack = searchHaystackCache.haystack(
-                for: packageGroup,
-                signature: searchSignature,
-                itemTranslator: currentItemTranslator,
-                translationService: translationService
-            )
-
-            return haystack.contains(normalizedSearchText)
         }
     }
 
@@ -557,50 +549,25 @@ struct HangarDashboardView: View {
         await warmSearchIndex()
     }
 
-    private func searchIndexSignature(
-        for translator: HangarItemTranslator
-    ) -> HangarPackageSearchHaystackCache.Signature {
-        HangarPackageSearchHaystackCache.Signature(
-            snapshotLastSyncedAt: snapshot.lastSyncedAt,
-            languageRawValue: translator.language.rawValue,
-            dictionaryLocale: translator.dictionary?.locale,
-            dictionaryVersion: translator.dictionary?.version,
-            translationCacheGeneration: translationService.cacheGeneration,
-            showsUpgradedShipInHangar: showsUpgradedShipInHangar
-        )
-    }
-
-    private func warmSearchIndex() async {
+    private var searchIndexKey: InventorySearchKey? {
+        guard let presentation = appModel.readyInventoryPresentation else { return nil }
         let translator = itemTranslator
-        let signature = searchIndexSignature(for: translator)
-
-        for (offset, packageGroup) in allPackageGroups.enumerated() {
-            guard !Task.isCancelled else {
-                return
-            }
-            _ = searchHaystackCache.haystack(
-                for: packageGroup,
-                signature: signature,
-                itemTranslator: translator,
-                translationService: translationService
-            )
-            if offset.isMultiple(of: 20) {
-                await Task.yield()
-            }
-        }
+        return InventorySearchKey(presentation: presentation.key, language: translator.language.rawValue,
+            dictionaryLocale: translator.dictionary?.locale, dictionaryVersion: translator.dictionary?.version,
+            cacheGeneration: translationService.cacheGeneration, upgradedNames: showsUpgradedShipInHangar, section: .hangar)
     }
-
-    private func matchesSearchFilters(for package: HangarPackage) -> Bool {
-        searchFilters.allSatisfy { searchFilter in
-            switch searchFilter {
-            case .lti:
-                return package.hasLifetimeInsurance
-            case .upgrades:
-                return package.hasUpgradeItems
-            case .packages:
-                return package.isMultiShipPackage
-            }
-        }
+    private var activeSearchIndex: InventorySearchIndex? {
+        inventorySearchIndex?.key == searchIndexKey ? inventorySearchIndex : nil
+    }
+    private func warmSearchIndex() async {
+        guard let presentation = appModel.readyInventoryPresentation, let key = searchIndexKey else { return }
+        do {
+            let value = try await appModel.inventorySearchBuilder.index(presentation: presentation,
+                context: translationService.searchContext(using: itemTranslator), key: key)
+            guard !Task.isCancelled, key == searchIndexKey else { return }
+            inventorySearchIndex = value
+            pruneSelectionToVisibleGroups()
+        } catch { }
     }
 
     private func toggle(_ searchFilter: SearchFilter) {
@@ -634,6 +601,8 @@ struct HangarDashboardView: View {
     }
 
     private func pruneSelectionToVisibleGroups() {
+        guard !appModel.isPreparingInventoryPresentation else { return }
+        if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, activeSearchIndex == nil { return }
         guard isSelectingPackages else {
             return
         }
@@ -1719,60 +1688,6 @@ struct HangarPackageDetailView: View {
 }
 
 @MainActor
-private final class HangarPackageSearchHaystackCache {
-    struct Signature: Equatable {
-        let snapshotLastSyncedAt: Date
-        let languageRawValue: String
-        let dictionaryLocale: String?
-        let dictionaryVersion: Int?
-        let translationCacheGeneration: Int
-        let showsUpgradedShipInHangar: Bool
-    }
-
-    private var activeSignature: Signature?
-    private var entries: [String: String] = [:]
-
-    func haystack(
-        for packageGroup: GroupedHangarPackage,
-        signature: Signature,
-        itemTranslator: HangarItemTranslator,
-        translationService: OnDeviceHangarItemTranslationService
-    ) -> String {
-        if activeSignature != signature {
-            activeSignature = signature
-            entries.removeAll(keepingCapacity: true)
-        }
-
-        let package = packageGroup.representative
-        if let haystack = entries[packageGroup.id] {
-            return haystack
-        }
-
-        let itemTitleSources = package.contents.flatMap { item -> [String] in
-            var titles = [item.title]
-            if let pricing = item.upgradePricing {
-                titles.append(pricing.sourceShipName)
-                titles.append(pricing.targetShipName)
-            }
-            return titles
-        }
-
-        let haystack = [
-            translationService.searchableText(for: package.title, using: itemTranslator),
-            translationService.searchableText(
-                for: package.debugDisplayTitle(showsUpgradedShipInHangar: signature.showsUpgradedShipInHangar),
-                using: itemTranslator
-            ),
-            package.status,
-            package.searchableInsuranceText,
-            translationService.searchableText(for: itemTitleSources, using: itemTranslator)
-        ].joined(separator: " ").localizedLowercase
-
-        entries[packageGroup.id] = haystack
-        return haystack
-    }
-}
-
 private struct HangarSharePicturePayload: Identifiable {
     let id = UUID()
     let fileURL: URL

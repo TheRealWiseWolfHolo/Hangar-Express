@@ -163,6 +163,26 @@ struct AccountView: View {
                         Text(appModel.isRefreshing(.full) ? LocalizedStringKey("Refreshing Everything...") : LocalizedStringKey("Full Refresh"))
                     }
                     .disabled(appModel.isRefreshing)
+
+                    ForEach(SnapshotSection.allCases, id: \.self) { section in
+                        HStack {
+                            Text(section.title)
+                            Spacer()
+                            let state = snapshot.sections[section]
+                            if state.failedAt != nil {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                    .accessibilityLabel("Refresh failed")
+                            }
+                            if let refreshedAt = state.refreshedAt {
+                                Text(refreshedAt, format: .dateTime.month().day().hour().minute())
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text("Not refreshed").foregroundStyle(.secondary)
+                            }
+                        }
+                        .font(.caption)
+                    }
                 } header: {
                     Text("Sync")
                 } footer: {

@@ -124,6 +124,37 @@ final class PerformanceUITests: XCTestCase {
     }
 
     @MainActor
+    func testHangarLogSearchSurvivesRefreshAndKeyboardDismissal() {
+        let app = application()
+        app.launch()
+        assertOfflineFixture(app)
+        let logButton = app.buttons["Log"].firstMatch
+        XCTAssertTrue(logButton.waitForExistence(timeout: 30))
+        logButton.tap()
+        let title = app.staticTexts["Polaris Expedition Pack"].firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 30))
+        let field = app.textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        field.typeText("Polaris")
+        XCTAssertEqual(field.value as? String, "Polaris")
+        app.buttons["Refresh"].firstMatch.tap()
+        XCTAssertTrue(title.waitForExistence(timeout: 15))
+        XCTAssertEqual(field.value as? String, "Polaris")
+        let dismiss = app.buttons["Hide Keyboard"].firstMatch
+        if dismiss.exists { dismiss.tap() }
+        XCTAssertEqual(field.value as? String, "Polaris")
+        field.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        app.buttons["Close Search"].firstMatch.tap()
+        let remaining = field.value as? String ?? ""
+        XCTAssertTrue(remaining.isEmpty || remaining == "Search log entries")
+        XCTAssertTrue(app.staticTexts["Zeus Mk II MR Patrol Build"].firstMatch.waitForExistence(timeout: 10))
+        app.buttons["Done"].firstMatch.tap()
+        XCTAssertTrue(logButton.waitForExistence(timeout: 10))
+    }
+
+    @MainActor
     func testScrolling() {
         let app = application()
         app.launch()

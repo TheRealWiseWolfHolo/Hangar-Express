@@ -30,6 +30,8 @@ struct BuybackView: View {
     let snapshot: HangarSnapshot
 
     @State private var searchText = ""
+    @State private var inventorySearchIndex: InventorySearchIndex?
+    @State private var queryCache = InventoryQueryCache<InventoryQuerySignature, [GroupedBuybackPledge]>()
     @State private var searchFilters: Set<SearchFilter> = []
     @State private var isSearchPresented = false
     @State private var pendingBuybackGroup: GroupedBuybackPledge?
@@ -84,7 +86,9 @@ struct BuybackView: View {
                 }
 
                 Section {
-                    if filteredItemGroups.isEmpty {
+                    if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && activeSearchIndex == nil {
+                        ProgressView("Preparing search...").frame(maxWidth: .infinity).padding()
+                    } else if filteredItemGroups.isEmpty {
                         ContentUnavailableView(
                             emptyStateTitle,
                             systemImage: emptyStateSystemImage,
@@ -128,6 +132,12 @@ struct BuybackView: View {
                 id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
             ) {
                 await loadItemTranslationDictionary()
+            }
+            .task(id: searchIndexKey) { await warmSearchIndex() }
+            .onChange(of: appModel.readyInventoryPresentation?.key) { _, key in
+                if key != nil, let pending = pendingBuybackGroup {
+                    pendingBuybackGroup = appModel.readyInventoryPresentation?.buybackByGroupID[pending.id]
+                }
             }
             .onChange(of: isSearchPresented) { _, isPresented in
                 guard !isPresented else {
@@ -207,26 +217,46 @@ struct BuybackView: View {
         }
     }
 
+    private var searchIndexKey: InventorySearchKey? {
+        guard let presentation = appModel.readyInventoryPresentation else { return nil }
+        let translator = itemTranslator
+        return InventorySearchKey(presentation: presentation.key, language: translator.language.rawValue,
+            dictionaryLocale: translator.dictionary?.locale, dictionaryVersion: translator.dictionary?.version,
+            cacheGeneration: translationService.cacheGeneration, upgradedNames: false, section: .buyback)
+    }
+    private var activeSearchIndex: InventorySearchIndex? {
+        inventorySearchIndex?.key == searchIndexKey ? inventorySearchIndex : nil
+    }
+    private func warmSearchIndex() async {
+        guard let presentation = appModel.readyInventoryPresentation, let key = searchIndexKey else { return }
+        do {
+            let value = try await appModel.inventorySearchBuilder.index(presentation: presentation,
+                context: translationService.searchContext(using: itemTranslator), key: key)
+            guard !Task.isCancelled, key == searchIndexKey else { return }
+            inventorySearchIndex = value
+        } catch { }
+    }
     private var filteredItemGroups: [GroupedBuybackPledge] {
-        let performanceInterval = PerformanceTrace.begin("BuybackSearch")
-        defer { PerformanceTrace.end("BuybackSearch", performanceInterval) }
-
-        _ = translationService.cacheGeneration
-
-        return snapshot.buyback.groupedForBuybackDisplay.filter { itemGroup in
-            let item = itemGroup.representative
-
-            guard matchesSearchFilters(for: item) else {
-                return false
+        let presentation = appModel.readyInventoryPresentation
+        let index = activeSearchIndex
+        let query = InventorySearchQuery(searchText)
+        var flags: InventoryFilterFlags = []
+        for filter in searchFilters {
+            switch filter {
+            case .standaloneShips: flags.insert(.standalone)
+            case .packages: flags.insert(.package)
+            case .upgrades: flags.insert(.upgrade)
+            case .gears: flags.insert(.gear)
             }
-
-            guard !searchText.isEmpty else {
-                return true
+        }
+        let signature = InventoryQuerySignature(presentation: presentation?.key, search: index?.key, query: query.value, requiredFlags: flags)
+        return queryCache.result(for: signature) {
+            PerformanceTrace.measure("BuybackSearch") {
+                (presentation?.buyback ?? []).filter { group in
+                    guard (presentation?.buybackFlags[group.id] ?? []).isSuperset(of: flags) else { return false }
+                    return query.isEmpty || index?.buyback[group.id]?.contains(query) == true
+                }
             }
-
-            return translationService
-                .buybackSearchableText(for: item, using: itemTranslator)
-                .contains(searchText.localizedLowercase)
         }
     }
 
@@ -245,21 +275,6 @@ struct BuybackView: View {
             for: hangarItemLanguageRawValue,
             refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
         )
-    }
-
-    private func matchesSearchFilters(for item: BuybackPledge) -> Bool {
-        searchFilters.allSatisfy { searchFilter in
-            switch searchFilter {
-            case .standaloneShips:
-                return item.isStandaloneShip
-            case .packages:
-                return item.isPackage
-            case .upgrades:
-                return item.isUpgrade
-            case .gears:
-                return item.isGear
-            }
-        }
     }
 
     private func toggle(_ searchFilter: SearchFilter) {

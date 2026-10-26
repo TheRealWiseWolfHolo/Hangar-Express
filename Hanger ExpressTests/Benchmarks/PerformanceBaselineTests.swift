@@ -16,6 +16,94 @@ final class PerformanceBaselineTests: XCTestCase {
         executionTimeAllowance = 600
     }
 
+    func testPresentationIndexComparison() async throws {
+        let resources = TestResources()
+        let service = OnDeviceHangarItemTranslationService(directoryURL: resources.temporaryDirectory())
+        await service.prepareCache()
+        let context = service.searchContext(using: .original)
+        let builder = InventoryPresentationBuilder()
+        let searches = InventorySearchBuilder()
+        var records: [[String: Any]] = []
+        for count in [1_000, 10_000] {
+            let workload = BenchmarkInventory.makeBuybackHeavy(pledgeCount: count)
+            let snapshot = workload.snapshot.updatingBuyback(buyback: Array(workload.snapshot.buyback.prefix(count)))
+            let key = InventoryPresentationKey(accountID: workload.session.id, hangarRevision: 1, buybackRevision: 1, contentEpoch: UInt64(count))
+            let before = footprint()
+            let buildStart = DispatchTime.now().uptimeNanoseconds
+            let presentation = try await builder.build(snapshot: snapshot, key: key)
+            let searchKey = InventorySearchKey(presentation: key, language: "original", dictionaryLocale: nil,
+                                               dictionaryVersion: nil, cacheGeneration: service.cacheGeneration, upgradedNames: false)
+            let index = try await searches.index(presentation: presentation, context: context, key: searchKey)
+            let buildMs = Double(DispatchTime.now().uptimeNanoseconds - buildStart) / 1e6
+            let indexedFootprint = footprint()
+            var oldTimes: [Double] = [], indexedTimes: [Double] = []
+            for query in ["lot 1", "lot 12", "lot 123", "lot 124", "lot 12"] {
+                let oldStart = DispatchTime.now().uptimeNanoseconds
+                let old = autoreleasepool {
+                    snapshot.buyback.groupedForBuybackDisplay.filter {
+                        service.buybackSearchableText(for: $0.representative, using: .original).contains(query)
+                    }.map(\.id)
+                }
+                oldTimes.append(Double(DispatchTime.now().uptimeNanoseconds - oldStart) / 1e6)
+                let compiledQuery = InventorySearchQuery(query)
+                let newStart = DispatchTime.now().uptimeNanoseconds
+                let result = presentation.buyback.filter { index.buyback[$0.id]?.contains(compiledQuery) == true }.map(\.id)
+                indexedTimes.append(Double(DispatchTime.now().uptimeNanoseconds - newStart) / 1e6)
+                XCTAssertEqual(result, old)
+                checksum += result.count
+            }
+            records.append(["inventoryPledges":count,"buybacks":snapshot.buyback.count,"buildMs":buildMs,
+                "legacyQueryMs":oldTimes,"indexedQueryMs":indexedTimes,"footprintBeforeBytes":before,
+                "footprintWithIndexBytes":indexedFootprint,"allResultIDsMatch":true])
+        }
+        let report: [String:Any] = ["schemaVersion":1,"workloads":records,
+            "limits":"One Release simulator diagnostic; five different warmed queries per workload. Legacy grouping/search paths use current stable IDs; new timings exclude the reported one-time index build. Footprints are process observations, not allocation attribution or physical-device ceilings."]
+        let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted,.sortedKeys]), uniformTypeIdentifier: "public.json")
+        attachment.name = "presentation-comparison.json"; attachment.lifetime = .keepAlways; add(attachment)
+        withExtendedLifetime(resources) {}
+    }
+
+    func testCPUIsolationWorkload() async throws {
+        let resources = TestResources()
+        let rows = 100
+        let html = CPUWorkerFixtures.html(rows: rows)
+        let url = URL(string: "https://robertsspaceindustries.com/en/account/pledges?page=1&pagesize=50")!
+        let remote = try (1...1_000).map { try CPUWorkerFixtures.pledge(id: $0) }
+        let worker = HangarInventoryNormalizer()
+        let engine = HangarInventoryNormalizationEngine()
+        let session = resources.session { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(html.utf8))
+        }
+        let client = RSIAccountHTTPPageClient(cookies: [], session: session)
+        if ProcessInfo.processInfo.environment["HANGAR_BENCHMARK_PROFILE_DELAY"] == "1" {
+            try await Task.sleep(for: .seconds(45))
+        }
+        let referenceInterval = PerformanceTrace.begin("CPUReferenceMain")
+        let referenceStart = DispatchTime.now().uptimeNanoseconds
+        var iterations = 0
+        repeat {
+            iterations += 1
+            let page = try RSIAccountHTMLParser.parsePledgePage(html: html, pageURL: url, requestedURL: url, statusCode: 200, cookieCount: 0)
+            checksum += page.items.count
+            checksum += try engine.hangar(remote, catalog: nil).fleet.count
+        } while DispatchTime.now().uptimeNanoseconds - referenceStart < 5_000_000_000
+        let referenceMs = Double(DispatchTime.now().uptimeNanoseconds - referenceStart) / 1e6
+        PerformanceTrace.end("CPUReferenceMain", referenceInterval)
+        let movedInterval = PerformanceTrace.begin("CPUWorker")
+        let workerStart = DispatchTime.now().uptimeNanoseconds
+        for _ in 0..<iterations {
+            let page = try await client.fetchPledgePage(page: 1, pageSize: 50)
+            checksum += page.items.count
+            checksum += try await worker.hangar(remote, catalog: nil).fleet.count
+        }
+        PerformanceTrace.end("CPUWorker", movedInterval)
+        let workerMs = Double(DispatchTime.now().uptimeNanoseconds - workerStart) / 1e6
+        XCTAssertGreaterThan(iterations, 0)
+        XCTAssertEqual(checksum, 2 * iterations * (100 + 1_000))
+        print("CPU_COMPARISON iterations=\(iterations) referenceMs=\(referenceMs) workerMs=\(workerMs)")
+        withExtendedLifetime(resources) {}
+    }
+
     func testInventoryStages() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("baseline-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -38,6 +126,7 @@ final class PerformanceBaselineTests: XCTestCase {
             let source = try XCTUnwrap(ships.first)
             let target = try XCTUnwrap(ships.last)
             let translationService = OnDeviceHangarItemTranslationService(directoryURL: root.appendingPathComponent("translation"))
+            await translationService.prepareCache()
             let sources = Array(Set(snapshot.buyback.map(\.title))).sorted()
             let dictionary = try HangarItemTranslationDictionary(
                 locale: "zh-Hans", version: 1, generatedAt: nil,
@@ -92,18 +181,18 @@ final class PerformanceBaselineTests: XCTestCase {
             }
             let model = makeModel(workload: workload, defaults: resources.defaults)
             for scope in [AppModel.RefreshScope.full, .hangar, .account] {
-                await recordAsync("fixture_refresh_\(scope)", count: count) {
+                try await recordAsync("fixture_refresh_\(scope)", count: count) {
                     await model.refresh(scope: scope)
                     return model.snapshot?.packages.count ?? 0
                 }
             }
             let store = FileSnapshotStore(directoryURL: root.appendingPathComponent("snapshot-\(count)"))
-            await recordAsync("snapshot_save", count: count) {
-                await store.save(snapshot, for: workload.session)
+            try await recordAsync("snapshot_save", count: count) {
+                try await store.save(snapshot, for: workload.session)
                 return snapshot.packages.count
             }
-            await recordAsync("snapshot_load_warm", count: count) {
-                await store.load(for: workload.session)?.packages.count ?? 0
+            try await recordAsync("snapshot_load_warm", count: count) {
+                try await store.load(for: workload.session)?.packages.count ?? 0
             }
             let files = try FileManager.default.contentsOfDirectory(
                 at: root.appendingPathComponent("snapshot-\(count)"), includingPropertiesForKeys: [.fileSizeKey]
@@ -116,7 +205,7 @@ final class PerformanceBaselineTests: XCTestCase {
                 "physicalFootprintBeforeBytes": footprintBefore, "physicalFootprintAfterBytes": footprint(),
                 "syntheticAccounts": 2, "catalogShips": ships.count, "networkRequests": 0
             ])
-            let restored = await store.load(for: workload.session)
+            let restored = try await store.load(for: workload.session)
             XCTAssertEqual(restored?.packages.count, count)
         }
         let report: [String: Any] = [
@@ -255,7 +344,7 @@ final class PerformanceBaselineTests: XCTestCase {
         let encoded = try encoder().encode(snapshot)
         let snapshotDirectory = resources.temporaryDirectory()
         let snapshotStore = FileSnapshotStore(directoryURL: snapshotDirectory)
-        await snapshotStore.save(snapshot, for: workload.session)
+        try await snapshotStore.save(snapshot, for: workload.session)
         let report: [String: Any] = [
             "schemaVersion": 1, "fixtureVersion": BenchmarkInventory.version,
             "workloadVariant": "buyback-heavy-unique-and-generated-images-v1",
@@ -334,8 +423,8 @@ final class PerformanceBaselineTests: XCTestCase {
             decoder.dateDecodingStrategy = .iso8601
             let decoded = try decoder.decode(HangarSnapshot.self, from: encoded)
             let store = FileSnapshotStore(directoryURL: resources.temporaryDirectory())
-            await store.save(first.snapshot, for: first.session)
-            let restored = await store.load(for: first.session)
+            try await store.save(first.snapshot, for: first.session)
+            let restored = try await store.load(for: first.session)
             XCTAssertEqual(decoded.packages.count, 10_000)
             XCTAssertEqual(restored?.packages.count, 10_000)
             XCTAssertEqual(projected.count, first.snapshot.fleet.count)
@@ -493,12 +582,12 @@ final class PerformanceBaselineTests: XCTestCase {
         append(stage, count: count, timings: timings)
     }
 
-    private func recordAsync(_ stage: String, count: Int, operation: () async -> Int) async {
-        checksum &+= await operation()
+    private func recordAsync(_ stage: String, count: Int, operation: () async throws -> Int) async throws {
+        checksum &+= try await operation()
         var timings: [Double] = []
         for _ in 0..<samples {
             let start = DispatchTime.now().uptimeNanoseconds
-            let value = await operation()
+            let value = try await operation()
             timings.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
             checksum &+= value
         }

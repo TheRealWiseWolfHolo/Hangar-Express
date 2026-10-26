@@ -49,14 +49,22 @@ gift, melt or repeated mutation is part of recovery.
 
 ## Persistence boundary
 
-New snapshot-save submissions are account-owned and remain on the utility
-executor. The ownership checks do not serialize disk writes already accepted by
-`SnapshotStore`, guarantee their completion order, report their write failures,
-or add deletion epochs/schema migrations. Those are optimization #4. Its race
-was reproduced during validation: the current UI kept the confirmed snapshot,
-but an older accepted optimistic/log write finished later in the test backend.
-A save request accepted from the correct owner is not proof of ordered durable
-storage. The current `SnapshotStore.save` API returns no failure status.
+Snapshot saves reserve an account revision synchronously on the UI owner before
+any task is scheduled. A persistence coordinator runs one backend operation at a
+time and coalesces pending saves for the same account. Delete/clear barriers
+supersede queued older saves and follow an active write, preventing later write
+completion from recreating deleted data. A flush waits for work accepted before
+its barrier; each receipt reports its own success, supersession or error. Accepted
+writes survive caller cancellation. The queue is in process; abrupt OS termination
+can still interrupt pending work, so it is not a transactional server outbox.
+
+The file backend is an actor with synchronous filesystem/JSON work on its own
+executor. It uses atomic replacement and a versioned envelope, reads legacy JSON,
+retains damaged originals before replacing them after a successful refresh, and
+refuses to overwrite unknown future schemas. Missing files are distinguished from
+unreadable/corrupt data. Storage failures surface in the UI, and reconciliation
+clears its recovery marker only after a successful persistence receipt. Explicit
+cache/account deletion also removes retained damaged-cache backups.
 
 ## Validation
 

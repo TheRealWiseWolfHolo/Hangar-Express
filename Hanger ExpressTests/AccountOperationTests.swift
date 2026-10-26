@@ -422,13 +422,141 @@ extension Hanger_ExpressTests {
         try await f.model.melt(packageGroup: group, quantity: 1)
         await f.model.waitForAccountOperationJobs(accountID: f.a.id)
         #expect(f.model.snapshot == confirmed)
-        // #4 owns ordering of writes already accepted by SnapshotStore. Verify
-        // this operation submitted the confirmed state, not a disk-ordering claim.
-        #expect(f.snapshots.savedSnapshots.map(\.lastSyncedAt).contains(confirmed.lastSyncedAt))
+        #expect(f.snapshots.values[f.a.id] == confirmed)
         #expect(!f.model.requiresMutationReview)
         // Invalid input reaches validation only if the mutation gate is released;
         // it sends no checkout request and must not produce AccountOperationError.busy.
         await #expect(throws: HangarAccountActionError.self) { try await f.model.prepareWBCCUCheckout(items: []) }
+    }
+
+    @Test func incrementalLogBatchesEmitEventsAndLateOldAccountBatchIsRejected() async throws {
+        let f = operationFixture()
+        defer { f.repository.hangarLogOverride = nil }
+        let arrived = TestGate(), release = TestGate()
+        let sample = try #require(PreviewHangarRepository.sampleSnapshot.hangarLogs.first)
+        var capturedBatch: HangarLogBatchHandler?
+        f.repository.hangarLogOverride = { _, snapshot, batch in
+            capturedBatch = batch
+            batch?([sample])
+            await arrived.open()
+            try await release.wait()
+            return snapshot.updatingHangarLogs(hangarLogs: [sample])
+        }
+        let refresh = Task { await f.model.refresh(scope: .hangarLog) }
+        try await arrived.wait()
+        let previewKey = f.model.hangarLogPresentationKey
+        #expect(previewKey.usesPreview)
+        #expect(f.model.hangarLogPresentationLogs == [sample])
+        let edited = HangarLogEntry(id: sample.id, occurredAt: sample.occurredAt, action: sample.action,
+            itemName: "Edited incremental entry", operatorName: nil, priceUSD: nil,
+            sourcePledgeID: nil, targetPledgeID: nil, orderCode: nil, reason: nil, rawText: "Edited")
+        capturedBatch?([edited])
+        #expect(f.model.hangarLogPresentationKey != previewKey)
+        #expect(f.model.hangarLogPresentationLogs == [edited])
+        await f.model.switchAccount(to: f.b.id)
+        await f.model.waitForAccountOperationJobs(accountID: f.b.id)
+        let currentKey = f.model.hangarLogPresentationKey
+        capturedBatch?([sample])
+        #expect(f.model.hangarLogPresentationKey == currentKey)
+        #expect(f.model.hangarLogPresentationLogs.isEmpty)
+        await release.open()
+        await refresh.value
+    }
+
+    @Test func logPresentationEventsTrackSameIDEditsAndIgnoreNoOpFreshness() async throws {
+        let f = operationFixture()
+        await f.model.waitForAccountOperationJobs(accountID: f.a.id)
+        let initial = f.model.hangarLogPresentationKey
+        f.model.loadState = .loaded(f.aSnapshot.updatingHangarLogs(hangarLogs: [], lastSyncedAt: .now))
+        await f.model.waitForAccountOperationJobs(accountID: f.a.id)
+        #expect(f.model.hangarLogPresentationKey == initial)
+        let sample = try #require(PreviewHangarRepository.sampleSnapshot.hangarLogs.first)
+        f.model.loadState = .loaded(f.aSnapshot.updatingHangarLogs(hangarLogs: [sample]))
+        let before = f.model.hangarLogPresentationKey
+        let edited = HangarLogEntry(id: sample.id, occurredAt: sample.occurredAt, action: sample.action,
+            itemName: "Updated same-ID log entry", operatorName: sample.operatorName, priceUSD: sample.priceUSD,
+            sourcePledgeID: sample.sourcePledgeID, targetPledgeID: sample.targetPledgeID, orderCode: sample.orderCode,
+            reason: sample.reason, rawText: sample.rawText, upgradeContext: sample.upgradeContext)
+        f.model.loadState = .loaded(f.aSnapshot.updatingHangarLogs(hangarLogs: [edited]))
+        #expect(f.model.hangarLogPresentationKey != before)
+        #expect(f.model.hangarLogPresentationKey.inventoryLookupID == initial.inventoryLookupID)
+        #expect(f.model.hangarLogPresentationLogs.first?.itemName == edited.itemName)
+        f.model.loadState = .idle
+        #expect(!f.model.hangarLogPresentationKey.hasSnapshot && f.model.hangarLogPresentationLogs.isEmpty)
+        await f.model.switchAccount(to: f.b.id)
+        await f.model.waitForAccountOperationJobs(accountID: f.b.id)
+        #expect(f.model.hangarLogPresentationKey.accountID == f.b.id)
+        #expect(f.model.hangarLogPresentationKey.accountContextID != initial.accountContextID)
+    }
+
+    @Test func presentationReusesInventoryAcrossLogUpdatesButSeesSameIDContentChanges() async throws {
+        let f = operationFixture()
+        await f.model.waitForAccountOperationJobs(accountID: f.a.id)
+        let original = try #require(f.model.readyInventoryPresentation)
+        f.model.loadState = .loaded(f.aSnapshot.updatingHangarLogs(hangarLogs: [], lastSyncedAt: Date(timeIntervalSince1970: 100)))
+        await f.model.waitForAccountOperationJobs(accountID: f.a.id)
+        #expect(f.model.readyInventoryPresentation?.identity == original.identity)
+        let pledge = try #require(f.aSnapshot.buyback.first)
+        let changed = BuybackPledge(id: pledge.id, title: pledge.title + " changed", recoveredValueUSD: pledge.recoveredValueUSD,
+                                   addedToBuybackAt: pledge.addedToBuybackAt, notes: pledge.notes)
+        let buybacks = f.aSnapshot.buyback.map { $0.id == pledge.id ? changed : $0 }
+        f.model.loadState = .loaded(f.aSnapshot.updatingBuyback(buyback: buybacks))
+        await f.model.waitForAccountOperationJobs(accountID: f.a.id)
+        let updated = try #require(f.model.readyInventoryPresentation)
+        #expect(updated.identity != original.identity)
+        #expect(updated.buyback.flatMap(\.pledges).first(where: { $0.id == pledge.id })?.title == changed.title)
+        await f.model.switchAccount(to: f.b.id)
+        await f.model.waitForAccountOperationJobs(accountID: f.b.id)
+        #expect(f.model.readyInventoryPresentation?.key.accountID == f.b.id)
+    }
+
+    @Test func unchangedFullRefreshKeepsImageTokensAndDoesNotEvictSources() async {
+        let f = operationFixture()
+        let hangarToken = f.model.hangarFleetImageReloadToken
+        let buybackToken = f.model.buybackImageReloadToken
+        let accountToken = f.model.accountImageReloadToken
+        await f.model.refresh()
+        await f.model.waitForAccountOperationJobs(accountID: f.a.id)
+        #expect(f.model.hangarFleetImageReloadToken == hangarToken)
+        #expect(f.model.buybackImageReloadToken == buybackToken)
+        #expect(f.model.accountImageReloadToken == accountToken)
+        #expect(f.images.clearedURLs.isEmpty)
+    }
+
+    @Test func partialFullRefreshCommitsSuccessAndShowsRetainedSectionFailure() async throws {
+        let f = operationFixture()
+        let changed = f.aSnapshot.updatingBuyback(buyback: [])
+        let mixed = SnapshotRefreshMerger.merge(base: f.aSnapshot, outcomes: [
+            .hangar: .failure(requiresAuthentication: false), .buyback: .success(changed)
+        ], at: Date(timeIntervalSince1970: 500))
+        f.repository.fetchOverride = { _, _ in mixed }
+        defer { f.repository.fetchOverride = nil }
+        await f.model.refresh()
+        await f.model.waitForAccountOperationJobs(accountID: f.a.id)
+        #expect(f.model.snapshot?.packages == f.aSnapshot.packages)
+        #expect(f.model.snapshot?.fleet == f.aSnapshot.fleet)
+        #expect(f.model.snapshot?.buyback.isEmpty == true)
+        #expect(f.model.lastRefreshErrorMessage != nil)
+        #expect(f.snapshots.values[f.a.id]?.sections.hangar.failedAt != nil)
+        let recovered = SnapshotRefreshMerger.merge(base: mixed, outcomes: [.hangar: .success(f.aSnapshot)], at: Date(timeIntervalSince1970: 600))
+        f.repository.fetchOverride = { _, _ in recovered }
+        await f.model.refresh()
+        #expect(f.model.lastRefreshErrorMessage == nil)
+    }
+
+    @Test func failedReconciliationSaveKeepsRecoveryMarkerAndReportsStorageFailure() async throws {
+        let f = operationFixture()
+        let group = try #require(f.aSnapshot.packages.groupedForInventoryDisplay.first)
+        let removed = try #require(group.packages.first?.id)
+        let confirmed = f.aSnapshot.removingPackages(withIDs: [removed], lastSyncedAt: Date(timeIntervalSince1970: 500))
+        f.repository.hangarOverride = { _, _ in confirmed }
+        f.snapshots.saveError = SnapshotStorageError.unavailable
+        defer { f.repository.hangarOverride = nil }
+        try await f.model.melt(packageGroup: group, quantity: 1)
+        await f.model.waitForAccountOperationJobs(accountID: f.a.id)
+        #expect(f.model.snapshot == confirmed)
+        #expect(f.model.requiresMutationReview)
+        #expect(f.model.snapshotStorageErrorMessage != nil)
     }
 
     @Test func authenticationTransitionCannotBypassAnAccountSwitchInProgress() async throws {
@@ -464,11 +592,12 @@ extension Hanger_ExpressTests {
         let sessions = FakeSessionStore(storedSnapshot: .init(activeSession: a, savedSessions: [b, a]))
         let snapshots = OperationSnapshotStore(values: [a.id: aSnapshot, b.id: bSnapshot])
         let repository = FakeHangarRepository(snapshot: aSnapshot)
+        let images = FakeRemoteImageCache()
         let model = AppModel(environment: makeTestAppEnvironment(sessionStore: sessions, snapshotStore: snapshots,
-                                                                hangarRepository: repository, actionAuthorizer: authorizer, authenticationService: authentication))
+                                                                hangarRepository: repository, imageCache: images, actionAuthorizer: authorizer, authenticationService: authentication))
         model.session = a; model.savedSessions = [b, a]; model.loadState = .loaded(aSnapshot)
         return OperationFixture(a: a, b: b, aSnapshot: aSnapshot, bSnapshot: bSnapshot,
-                                model: model, sessions: sessions, snapshots: snapshots, repository: repository)
+                                model: model, sessions: sessions, snapshots: snapshots, repository: repository, images: images)
     }
 }
 
@@ -479,6 +608,7 @@ extension Hanger_ExpressTests {
     let sessions: FakeSessionStore
     let snapshots: OperationSnapshotStore
     let repository: FakeHangarRepository
+    let images: FakeRemoteImageCache
 }
 
 @MainActor private func operationSession(_ name: String) -> UserSession {
@@ -492,6 +622,7 @@ extension Hanger_ExpressTests {
     var values: [UUID: HangarSnapshot]
     var savedIDs: [UUID] = []
     var savedSnapshots: [HangarSnapshot] = []
+    var saveError: Error?
     var beforeLoad: ((UserSession) async -> Void)?
     init(values: [UUID: HangarSnapshot]) { self.values = values }
     func load(for session: UserSession) async -> HangarSnapshot? {
@@ -499,7 +630,7 @@ extension Hanger_ExpressTests {
         await beforeLoad?(session)
         return captured
     }
-    func save(_ snapshot: HangarSnapshot, for session: UserSession) async { savedIDs.append(session.id); savedSnapshots.append(snapshot); values[session.id] = snapshot }
+    func save(_ snapshot: HangarSnapshot, for session: UserSession) async throws { if let saveError { throw saveError }; savedIDs.append(session.id); savedSnapshots.append(snapshot); values[session.id] = snapshot }
     func delete(for session: UserSession) async { values.removeValue(forKey: session.id) }
     func clear() async { values.removeAll() }
 }

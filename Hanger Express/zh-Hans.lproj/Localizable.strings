@@ -967,3 +967,18 @@
 "Refresh for Review" = "刷新以供检查";
 "Review RSI Account" = "检查 RSI 账户";
 "I Reviewed RSI — Allow New Actions" = "已检查 RSI，允许新的操作";
+
+"Local Storage" = "本机存储";
+"Local snapshot storage is unavailable. The latest changes may not be saved. Please try again." = "本机快照存储暂时不可用，最新更改可能尚未保存，请重试。";
+"The local snapshot could not be read. The original file has been preserved." = "无法读取本机快照，原始文件已保留。";
+"This snapshot was saved by a newer app version. The original file has been preserved." = "此快照由较新版本的应用保存，原始文件已保留。";
+
+"Some sections could not refresh: %@. Previously saved data is shown where available." = "部分数据刷新失败：%@。如有已保存的数据，将继续显示。";
+"Not refreshed" = "尚未刷新";
+"Refresh failed" = "刷新失败";
+
+"Unable to refresh account information." = "无法刷新账户信息。";
+
+"Preparing inventory..." = "正在整理物品...";
+
+"Preparing search..." = "正在准备搜索...";

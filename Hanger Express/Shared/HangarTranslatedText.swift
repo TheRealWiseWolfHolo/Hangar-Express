@@ -429,6 +429,7 @@ struct IMEAwareSearchRow: View {
     @State private var pendingCommitTask: Task<Void, Never>?
 
     private let prompt: String
+    private let onEditingChanged: (Bool) -> Void
     private let onCommittedTextChange: () -> Void
     private let debounceDuration: Duration
 
@@ -437,11 +438,13 @@ struct IMEAwareSearchRow: View {
         isActive: Binding<Bool> = .constant(false),
         prompt: String,
         debounceDuration: Duration = .milliseconds(200),
+        onEditingChanged: @escaping (Bool) -> Void = { _ in },
         onCommittedTextChange: @escaping () -> Void = {}
     ) {
         _text = text
         _isActive = isActive
         _draftText = State(initialValue: text.wrappedValue)
+        self.onEditingChanged = onEditingChanged
         self.prompt = prompt
         self.debounceDuration = debounceDuration
         self.onCommittedTextChange = onCommittedTextChange
@@ -458,6 +461,7 @@ struct IMEAwareSearchRow: View {
                 placeholder: prompt,
                 onEditingChanged: { isEditing in
                     self.isEditing = isEditing
+                    onEditingChanged(isEditing)
                     if isEditing {
                         isActive = true
                     }
@@ -511,6 +515,7 @@ struct IMEAwareSearchRow: View {
         draftText = ""
         text = ""
         isEditing = false
+        onEditingChanged(false)
         isActive = false
         onCommittedTextChange()
     }

@@ -4,7 +4,9 @@ import WebKit
 @MainActor
 final class LiveHangarRepository: HangarRepository {
     private let browser = RSIAccountPageBrowser()
-    private let shipCatalogClient = HostedShipCatalogClient()
+    private let inventoryNormalizer = HangarInventoryNormalizer()
+    private let shipCatalogClient: HostedShipCatalogClient
+    private let shipCatalogStore: HostedShipCatalogStore
     private let limitedShipSaleClient = HostedLimitedShipSaleClient()
     private let previewRepository = PreviewHangarRepository()
     private let refreshDiagnostics: RefreshDiagnosticsStore
@@ -14,8 +16,10 @@ final class LiveHangarRepository: HangarRepository {
     private let maxBuybackPages = 100
     private let hangarLogBatchSize = 10
 
-    init(diagnostics: RefreshDiagnosticsStore) {
+    init(diagnostics: RefreshDiagnosticsStore, shipCatalogClient: HostedShipCatalogClient = HostedShipCatalogClient(), shipCatalogStore: HostedShipCatalogStore = .shared) {
         refreshDiagnostics = diagnostics
+        self.shipCatalogClient = shipCatalogClient
+        self.shipCatalogStore = shipCatalogStore
     }
 
     private var syncWorkerCount: Int {
@@ -45,6 +49,8 @@ final class LiveHangarRepository: HangarRepository {
     }
 
     private struct FullAccountRefreshPayload {
+        let didRefreshAccountOverview: Bool
+        let didRefreshReferralStats: Bool
         let accountHandle: String?
         let avatarURL: URL?
         let primaryOrganization: AccountOrganization?
@@ -56,54 +62,59 @@ final class LiveHangarRepository: HangarRepository {
         let gameAccess: RSIGameAccessSummary?
     }
 
-    func fetchSnapshot(
-        for session: UserSession,
-        progress: @escaping RefreshProgressHandler
-    ) async throws -> HangarSnapshot {
+    func fetchSnapshot(for session: UserSession, progress: @escaping RefreshProgressHandler) async throws -> HangarSnapshot {
+        try await fetchSnapshot(for: session, preserving: nil, progress: progress)
+    }
+
+    func fetchSnapshot(for session: UserSession, preserving previous: HangarSnapshot?, progress: @escaping RefreshProgressHandler) async throws -> HangarSnapshot {
         if session.authMode == .developerPreview {
             return try await previewRepository.fetchSnapshot(for: session, progress: progress)
         }
-
         try validate(session: session)
-        let hangarBrowser = RSIAccountPageBrowser()
-        let buybackBrowser = RSIAccountPageBrowser()
-        let accountBrowser = RSIAccountPageBrowser()
+        let base = previous ?? HangarSnapshot(accountHandle: session.handle, lastSyncedAt: .distantPast,
+            avatarURL: session.avatarURL, storeCreditUSD: nil, packages: [], fleet: [], buyback: [], sections: .empty)
+        let hangarBrowser = RSIAccountPageBrowser(), buybackBrowser = RSIAccountPageBrowser(), accountBrowser = RSIAccountPageBrowser()
+        async let hangar = sectionResult {
+            let value = try await self.fetchFullHangarRefreshPayload(using: session.cookies, browser: hangarBrowser, progress: progress)
+            return base.updatingHangar(packages: value.packages, fleet: value.fleet)
+        }
+        async let buyback = sectionResult {
+            let value = try await self.fetchFullBuybackRefreshPayload(using: session.cookies, browser: buybackBrowser, progress: progress)
+            return base.updatingBuyback(buyback: value)
+        }
+        async let account = sectionResult {
+            let value = try await self.fetchFullAccountRefreshPayload(for: session, browser: accountBrowser, progress: progress)
+            guard value.didRefreshAccountOverview || value.didRefreshReferralStats else {
+                throw LiveHangarRepositoryError.unexpectedMarkup(AppLocalizer.string("Unable to refresh account information."))
+            }
+            return base.updatingAccount(accountHandle: value.accountHandle ?? base.accountHandle,
+                avatarURL: value.avatarURL ?? base.avatarURL,
+                primaryOrganization: value.didRefreshPrimaryOrganization ? value.primaryOrganization : base.primaryOrganization,
+                didRefreshPrimaryOrganization: value.didRefreshPrimaryOrganization || base.didRefreshPrimaryOrganization,
+                storeCreditUSD: value.storeCreditUSD ?? base.storeCreditUSD, totalSpendUSD: value.totalSpendUSD ?? base.totalSpendUSD,
+                referralStats: value.didRefreshReferralStats ? value.referralStats : base.referralStats, gameAccess: value.gameAccess)
+        }
+        async let logs = sectionResult {
+            try await self.refreshHangarLogData(for: session, from: base, mode: .initial, progress: { _ in })
+        }
+        let resolved = await [SnapshotSection.hangar: hangar, .buyback: buyback, .account: account, .hangarLog: logs]
+        try Task.checkCancellation()
+        let successes = resolved.values.filter { if case .success = $0 { return true }; return false }.count
+        if successes == 0, let error = resolved.values.compactMap({ if case .failure(let error) = $0 { return error }; return nil }).first {
+            throw error
+        }
+        let outcomes = resolved.mapValues { result -> SnapshotSectionOutcome in
+            switch result {
+            case .success(let snapshot): .success(snapshot)
+            case .failure(let error): .failure(requiresAuthentication: (error as? LiveHangarRepositoryError)?.requiresReauthentication == true)
+            }
+        }
+        return SnapshotRefreshMerger.merge(base: base, outcomes: outcomes, at: .now)
+    }
 
-        async let hangarPayload = fetchFullHangarRefreshPayload(
-            using: session.cookies,
-            browser: hangarBrowser,
-            progress: progress
-        )
-        async let buybackPayload = fetchFullBuybackRefreshPayload(
-            using: session.cookies,
-            browser: buybackBrowser,
-            progress: progress
-        )
-        async let accountPayload = fetchFullAccountRefreshPayload(
-            for: session,
-            browser: accountBrowser,
-            progress: progress
-        )
-
-        let resolvedHangarPayload = try await hangarPayload
-        let resolvedBuyback = try await buybackPayload
-        let resolvedAccountPayload = try await accountPayload
-
-        return HangarSnapshot(
-            accountHandle: resolvedAccountPayload.accountHandle ?? session.handle,
-            lastSyncedAt: .now,
-            avatarURL: resolvedAccountPayload.avatarURL ?? session.avatarURL,
-            primaryOrganization: resolvedAccountPayload.primaryOrganization,
-            didRefreshPrimaryOrganization: resolvedAccountPayload.didRefreshPrimaryOrganization,
-            storeCreditUSD: resolvedAccountPayload.storeCreditUSD,
-            totalSpendUSD: resolvedAccountPayload.totalSpendUSD,
-            packages: resolvedHangarPayload.packages,
-            fleet: resolvedHangarPayload.fleet,
-            buyback: resolvedBuyback,
-            hangarLogs: resolvedAccountPayload.hangarLogs,
-            referralStats: resolvedAccountPayload.referralStats,
-            gameAccess: resolvedAccountPayload.gameAccess
-        )
+    private func sectionResult(_ operation: () async throws -> HangarSnapshot) async -> Result<HangarSnapshot, Error> {
+        do { return .success(try await operation()) }
+        catch { return .failure(error) }
     }
 
     func refreshHangarData(
@@ -133,8 +144,9 @@ final class LiveHangarRepository: HangarRepository {
             stepNumber: 3,
             stepCount: 3
         )
-        let packages = PerformanceTrace.measure("NormalizeHangar") { remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) } }
-        let fleet = FleetProjector.project(packages: packages, shipCatalog: shipCatalog)
+        let normalized = try await inventoryNormalizer.hangar(remotePledges, catalog: shipCatalog)
+        let packages = normalized.packages
+        let fleet = normalized.fleet
 
         progress(
             makeProgress(
@@ -209,13 +221,9 @@ final class LiveHangarRepository: HangarRepository {
 
             return sourcePage < partialRefreshStartPage
         }
-        let refreshedPackages = unaffectedPrefix + refreshedRemotePledgeTail.map {
-            normalize(package: $0, shipCatalog: resolvedShipCatalog)
-        }
-        let fleet = FleetProjector.project(
-            packages: refreshedPackages,
-            shipCatalog: resolvedShipCatalog
-        )
+        let normalized = try await inventoryNormalizer.hangar(refreshedRemotePledgeTail, catalog: resolvedShipCatalog, prefix: unaffectedPrefix)
+        let refreshedPackages = normalized.packages
+        let fleet = normalized.fleet
 
         progress(
             makeProgress(
@@ -265,7 +273,7 @@ final class LiveHangarRepository: HangarRepository {
 
         let resolvedRemoteBuyback = try await remoteBuyback
         let resolvedShipCatalog = await shipCatalog
-        let buyback = PerformanceTrace.measure("NormalizeBuyback") { resolvedRemoteBuyback.map { normalize(buyback: $0, shipCatalog: resolvedShipCatalog) } }
+        let buyback = try await inventoryNormalizer.buyback(resolvedRemoteBuyback, catalog: resolvedShipCatalog)
         progress(
             makeProgress(
                 stage: .finalizing,
@@ -388,8 +396,9 @@ final class LiveHangarRepository: HangarRepository {
             trackerID: FullRefreshTracker.hangar,
             trackerTitle: "Hangar"
         )
-        let packages = PerformanceTrace.measure("NormalizeHangar") { remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) } }
-        let fleet = FleetProjector.project(packages: packages, shipCatalog: shipCatalog)
+        let normalized = try await inventoryNormalizer.hangar(remotePledges, catalog: shipCatalog)
+        let packages = normalized.packages
+        let fleet = normalized.fleet
         emitFullRefreshCompletion(
             progress: progress,
             trackerID: FullRefreshTracker.hangar,
@@ -429,7 +438,7 @@ final class LiveHangarRepository: HangarRepository {
 
         let resolvedRemoteBuyback = try await remoteBuyback
         let resolvedShipCatalog = await shipCatalog
-        let buyback = PerformanceTrace.measure("NormalizeBuyback") { resolvedRemoteBuyback.map { normalize(buyback: $0, shipCatalog: resolvedShipCatalog) } }
+        let buyback = try await inventoryNormalizer.buyback(resolvedRemoteBuyback, catalog: resolvedShipCatalog)
         emitFullRefreshCompletion(
             progress: progress,
             trackerID: FullRefreshTracker.buyback,
@@ -467,6 +476,8 @@ final class LiveHangarRepository: HangarRepository {
         )
 
         return FullAccountRefreshPayload(
+            didRefreshAccountOverview: accountContext.didRefreshAccountOverview,
+            didRefreshReferralStats: accountContext.didRefreshReferralStats,
             accountHandle: accountContext.accountHandle,
             avatarURL: accountContext.avatarURL,
             primaryOrganization: accountContext.primaryOrganization,
@@ -972,7 +983,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         }
 
-        let warmedCookies = directClient.currentCookies
+        let warmedCookies = await directClient.currentCookies
         let remainingPages = Array(2 ... totalPages)
         let orderedResults: [RemotePledgePage]
         do {
@@ -1203,7 +1214,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         }
 
-        let warmedCookies = directClient.currentCookies
+        let warmedCookies = await directClient.currentCookies
         let remainingPages = Array((startPage + 1) ... totalPages)
         let orderedResults: [RemotePledgePage]
         do {
@@ -1420,7 +1431,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         }
 
-        let warmedCookies = directClient.currentCookies
+        let warmedCookies = await directClient.currentCookies
         let remainingPages = Array(2 ... totalPages)
         let orderedResults: [RemoteBuybackPage]
         do {
@@ -2190,7 +2201,7 @@ final class LiveHangarRepository: HangarRepository {
 
         let shipCatalog: RSIShipCatalog?
         do {
-            shipCatalog = try await shipCatalogClient.fetchCatalog()
+            shipCatalog = try await shipCatalogStore.catalog(using: shipCatalogClient)
         } catch {
             shipCatalog = nil
         }
@@ -2566,469 +2577,7 @@ final class LiveHangarRepository: HangarRepository {
         )
     }
 
-    private func normalize(package remote: RemotePledge, shipCatalog: RSIShipCatalog?) -> HangarPackage {
-        let containsSummary = remote.containsText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let packageValueUSD = parseMoney(remote.valueText)
-        let packageThumbnailURL = mirroredCatalogImageURL(
-            remote.thumbnailImageURL.flatMap(URL.init(string:)),
-            shipCatalog: shipCatalog
-        )
-        let insuranceOptions = inferInsuranceOptions(
-            from: remote.alsoContains,
-            containsSummary: containsSummary,
-            items: remote.items
-        )
-        let contents = normalizeContents(
-            for: remote,
-            containsSummary: containsSummary,
-            packageValueUSD: packageValueUSD,
-            shipCatalog: shipCatalog,
-            packageThumbnailURL: packageThumbnailURL
-        )
 
-        return HangarPackage(
-            id: remote.id ?? stableNumericID(from: remote.title),
-            title: normalizePackageTitle(remote.title),
-            status: remote.statusText.nilIfEmpty ?? "Unknown",
-            insurance: insuranceOptions.first ?? "Unknown",
-            insuranceOptions: insuranceOptions.isEmpty ? nil : insuranceOptions,
-            acquiredAt: parseRSIDate(remote.dateText) ?? .now,
-            originalValueUSD: packageValueUSD,
-            currentValueUSD: inferredCurrentValueUSD(contents: contents, shipCatalog: shipCatalog, fallbackValueUSD: packageValueUSD),
-            canGift: remote.canGift,
-            canReclaim: remote.canReclaim,
-            canUpgrade: remote.canUpgrade,
-            isUpgradedStatusFlag: remote.isUpgradedStatusFlag,
-            upgradeMetadata: remote.upgradeMetadata?.domainModel,
-            sourcePage: remote.sourcePage,
-            sourcePageIndex: remote.sourcePageIndex,
-            packageThumbnailURL: packageThumbnailURL,
-            contents: contents
-        )
-    }
-
-    private func normalizeContents(
-        for remote: RemotePledge,
-        containsSummary: String,
-        packageValueUSD: Decimal,
-        shipCatalog: RSIShipCatalog?,
-        packageThumbnailURL: URL?
-    ) -> [PackageItem] {
-        let renderableRemoteItems = remote.items.filter {
-            HangarPledgeSummaryParser.shouldRenderContentTitle($0.title)
-        }
-        let upgradeMeltValueUSD = inferredUpgradeMeltValue(
-            items: renderableRemoteItems,
-            packageValueUSD: packageValueUSD
-        )
-        let shouldUsePackageThumbnailFallback = renderableRemoteItems.count <= 1
-
-        let liveItems = renderableRemoteItems.enumerated().map { offset, item in
-            let itemCategory = category(for: item.kind, title: item.title, detail: item.detail)
-            let upgradePath = itemCategory == .upgrade ? UpgradeTitleParser.parse(item.title) : nil
-            let sourceShip = upgradePath.flatMap { shipCatalog?.matchShip(named: $0.sourceShipName) }
-            let targetShip = upgradePath.flatMap { shipCatalog?.matchShip(named: $0.targetShipName) }
-
-            return PackageItem(
-                id: "\(remote.id ?? stableNumericID(from: remote.title))-\(offset)",
-                title: item.title.nilIfEmpty ?? "Untitled Item",
-                detail: item.detail.nilIfEmpty ?? item.kind.nilIfEmpty ?? "Unknown",
-                category: itemCategory,
-                imageURL: itemImageURL(
-                    for: item,
-                    category: itemCategory,
-                    shipCatalog: shipCatalog,
-                    targetShip: targetShip,
-                    packageThumbnailURL: packageThumbnailURL,
-                    usePackageThumbnailFallback: shouldUsePackageThumbnailFallback
-                ),
-                upgradePricing: upgradePricing(
-                    path: upgradePath,
-                    sourceShip: sourceShip,
-                    targetShip: targetShip,
-                    meltValueUSD: upgradeMeltValueUSD
-                )
-            )
-        }
-
-        let supplementalTitles = HangarPledgeSummaryParser.supplementalTitles(
-            from: containsSummary,
-            alsoContains: remote.alsoContains,
-            excluding: [remote.title, normalizePackageTitle(remote.title)] + liveItems.map(\.title)
-        )
-        let supplementalItems = supplementalTitles.enumerated().map { offset, title in
-            let detail = supplementalDetail(for: title)
-            return PackageItem(
-                id: "\(remote.id ?? stableNumericID(from: remote.title))-\(liveItems.count + offset)",
-                title: title,
-                detail: detail,
-                category: category(for: "", title: title, detail: detail),
-                imageURL: liveItems.isEmpty && offset == 0 ? packageThumbnailURL : nil,
-                upgradePricing: nil
-            )
-        }
-
-        if !liveItems.isEmpty {
-            return liveItems + supplementalItems
-        }
-
-        if !supplementalItems.isEmpty {
-            return supplementalItems
-        }
-
-        guard !containsSummary.isEmpty else {
-            return []
-        }
-
-        return [
-            PackageItem(
-                id: "\(remote.id ?? stableNumericID(from: remote.title))-0",
-                title: containsSummary,
-                detail: "Extracted from the RSI pledge summary",
-                category: .perk,
-                imageURL: packageThumbnailURL,
-                upgradePricing: nil
-            )
-        ]
-    }
-
-    private func supplementalDetail(for title: String) -> String {
-        let lowercasedTitle = title.localizedLowercase
-
-        if lowercasedTitle.contains("hangar") {
-            return "Hangar entitlement"
-        }
-
-        if lowercasedTitle.contains("insurance")
-            || HangarPackage.containsLifetimeInsuranceToken(lowercasedTitle) {
-            return "Insurance"
-        }
-
-        return "RSI pledge entitlement"
-    }
-
-    private func itemImageURL(
-        for item: RemotePledgeItem,
-        category: PackageItem.Category,
-        shipCatalog: RSIShipCatalog?,
-        targetShip: RSIShipCatalog.Ship?,
-        packageThumbnailURL: URL?,
-        usePackageThumbnailFallback: Bool
-    ) -> URL? {
-        if let directURL = item.imageURL.flatMap(URL.init(string:)) {
-            return mirroredCatalogImageURL(directURL, shipCatalog: shipCatalog)
-        }
-
-        if let specialEditionURL = specialEditionImageURL(
-            for: item.title,
-            packageThumbnailURL: packageThumbnailURL
-        ) {
-            return specialEditionURL
-        }
-
-        switch category {
-        case .upgrade:
-            return nil
-        case .ship, .vehicle:
-            return shipCatalog?.matchShip(named: item.title)?.imageURL ?? (usePackageThumbnailFallback ? packageThumbnailURL : nil)
-        case .gamePackage, .flair, .perk:
-            return usePackageThumbnailFallback ? packageThumbnailURL : nil
-        }
-    }
-
-    private func specialEditionImageURL(
-        for itemTitle: String,
-        packageThumbnailURL: URL?
-    ) -> URL? {
-        if itemTitle.localizedCaseInsensitiveContains("Dragonfly Star Kitten Edition") {
-            return packageThumbnailURL
-        }
-
-        return nil
-    }
-
-    private func upgradePricing(
-        path: ShipUpgradePath?,
-        sourceShip: RSIShipCatalog.Ship?,
-        targetShip: RSIShipCatalog.Ship?,
-        meltValueUSD: Decimal?
-    ) -> PackageItem.UpgradePricing? {
-        guard let path else {
-            return nil
-        }
-
-        let actualValueUSD: Decimal?
-        if let sourceMSRP = sourceShip?.msrpUSD, let targetMSRP = targetShip?.msrpUSD {
-            actualValueUSD = targetMSRP - sourceMSRP
-        } else {
-            actualValueUSD = nil
-        }
-
-        return PackageItem.UpgradePricing(
-            sourceShipName: path.sourceShipName,
-            sourceShipMSRPUSD: sourceShip?.msrpUSD,
-            sourceShipImageURL: sourceShip?.imageURL,
-            targetShipName: path.targetShipName,
-            targetShipMSRPUSD: targetShip?.msrpUSD,
-            targetShipImageURL: targetShip?.imageURL,
-            actualValueUSD: actualValueUSD,
-            meltValueUSD: meltValueUSD
-        )
-    }
-
-    private func inferredCurrentValueUSD(
-        contents: [PackageItem],
-        shipCatalog: RSIShipCatalog?,
-        fallbackValueUSD: Decimal
-    ) -> Decimal {
-        let shipLikeItems = contents.filter(\.isShipLike)
-        let shipLikeValueUSD = shipLikeItems.reduce(into: Decimal.zero) { partialResult, item in
-            partialResult += shipCatalog?.matchShip(named: item.title)?.msrpUSD ?? .zero
-        }
-
-        if !shipLikeItems.isEmpty, shipLikeValueUSD > 0 {
-            return shipLikeValueUSD
-        }
-
-        let upgradeValueUSD = contents.reduce(into: Decimal.zero) { partialResult, item in
-            partialResult += item.upgradePricing?.actualValueUSD ?? .zero
-        }
-
-        if upgradeValueUSD > 0 {
-            return upgradeValueUSD
-        }
-
-        return fallbackValueUSD
-    }
-
-    private func inferredUpgradeMeltValue(items: [RemotePledgeItem], packageValueUSD: Decimal) -> Decimal? {
-        guard packageValueUSD > 0 else {
-            return nil
-        }
-
-        let upgradeItems = items.filter {
-            category(for: $0.kind, title: $0.title, detail: $0.detail) == .upgrade
-        }
-
-        guard !upgradeItems.isEmpty else {
-            return nil
-        }
-
-        let nonUpgradeCategories = items
-            .map { category(for: $0.kind, title: $0.title, detail: $0.detail) }
-            .filter { $0 != .upgrade && $0 != .perk && $0 != .flair }
-
-        return nonUpgradeCategories.isEmpty ? packageValueUSD : nil
-    }
-
-    private func normalize(buyback remote: RemoteBuybackPledge, shipCatalog: RSIShipCatalog?) -> BuybackPledge {
-        let title = remote.title.nilIfEmpty ?? "Untitled Buy Back"
-        let notes = remote.containsText.nilIfEmpty ?? ""
-
-        return BuybackPledge(
-            id: remote.id ?? stableNumericID(from: title),
-            title: title,
-            recoveredValueUSD: parseMoney(remote.valueText),
-            addedToBuybackAt: parseRSIDate(remote.dateText) ?? BuybackPledge.unknownAddedToBuybackDate,
-            notes: notes,
-            imageURL: mirroredCatalogImageURL(
-                remote.imageURL.flatMap(URL.init(string:)),
-                shipCatalog: shipCatalog
-            ),
-            upgradeContext: remote.upgradeContext,
-            sourceRawInfo: remote.sourceRawInfo
-        )
-    }
-
-    private func mirroredCatalogImageURL(_ originalURL: URL?, shipCatalog: RSIShipCatalog?) -> URL? {
-        guard let originalURL else {
-            return nil
-        }
-
-        return shipCatalog?.mirroredAssetURL(for: originalURL) ?? originalURL
-    }
-
-    private func normalizePackageTitle(_ title: String) -> String {
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if trimmed.localizedCaseInsensitiveContains("contains"),
-           trimmed.localizedCaseInsensitiveContains("nameable ship"),
-           let prefix = trimmed.components(separatedBy: " Contains ").first {
-            return prefix
-        }
-
-        return trimmed.isEmpty ? "Untitled Pledge" : trimmed
-    }
-
-    private func category(for kind: String, title: String, detail: String) -> PackageItem.Category {
-        let haystack = [kind, title, detail]
-            .joined(separator: " ")
-            .localizedLowercase
-
-        if haystack.contains("upgrade") || title.contains(" to ") {
-            return .upgrade
-        }
-
-        if haystack.contains("game package") || haystack.contains("digital download") {
-            return .gamePackage
-        }
-
-        if haystack.contains("vehicle") || haystack.contains("ground vehicle") || haystack.contains("bike") {
-            return .vehicle
-        }
-
-        if haystack.contains("ship") || haystack.contains("gunboat") || haystack.contains("fighter") || haystack.contains("freighter") {
-            return .ship
-        }
-
-        if haystack.contains("paint") || haystack.contains("skin") || haystack.contains("hangar") || haystack.contains("flair") {
-            return .flair
-        }
-
-        if haystack.contains("perk") || haystack.contains("reward") || haystack.contains("token") || haystack.contains("coin") {
-            return .perk
-        }
-
-        return .perk
-    }
-
-    private func inferInsuranceOptions(
-        from alsoContains: [String],
-        containsSummary: String,
-        items: [RemotePledgeItem]
-    ) -> [String] {
-        let itemCandidates = items.flatMap { item in
-            [item.title, item.kind, item.detail]
-        }
-        let candidates = alsoContains + containsSummary.components(separatedBy: "#") + itemCandidates
-        let extractedOptions = candidates.flatMap(extractInsuranceOptions(from:))
-
-        return HangarPackage.normalizedInsuranceLevels(extractedOptions)
-    }
-
-    private func extractInsuranceOptions(from rawValue: String) -> [String] {
-        let value = rawValue
-            .replacingOccurrences(of: "-", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !value.isEmpty else {
-            return []
-        }
-
-        var results: [String] = []
-        let lowercased = value.localizedLowercase
-
-        if HangarPackage.containsLifetimeInsuranceToken(lowercased) {
-            results.append("LTI")
-        }
-
-        results.append(contentsOf: allMatches(in: lowercased, pattern: #"(\d+)\s*(month|months|mo)\b"#).map { "\($0) months" })
-        results.append(contentsOf: allMatches(in: lowercased, pattern: #"(\d+)\s*(year|years|yr)\b"#).map { "\($0 * 12) months" })
-
-        return results
-    }
-
-    private func parseMoney(_ value: String) -> Decimal {
-        let normalized = value
-            .replacingOccurrences(of: ",", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !normalized.isEmpty, !normalized.localizedCaseInsensitiveContains("uec") else {
-            return .zero
-        }
-
-        if let direct = Decimal(string: normalized.filter { $0.isNumber || $0 == "." || $0 == "-" }) {
-            return direct
-        }
-
-        return .zero
-    }
-
-    private func parseRSIDate(_ value: String) -> Date? {
-        let normalized = value
-            .replacingOccurrences(
-                of: #"(?i)\b(?:created|date|added|reclaimed|recovered)\s*:"#,
-                with: "",
-                options: .regularExpression
-            )
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(
-                of: #"\b(\d{1,2})(st|nd|rd|th)\b"#,
-                with: "$1",
-                options: [.regularExpression, .caseInsensitive]
-            )
-
-        guard !normalized.isEmpty else {
-            return nil
-        }
-
-        for formatter in Self.dateFormatters {
-            if let date = formatter.date(from: normalized) {
-                return date
-            }
-        }
-
-        return nil
-    }
-
-    private func firstMatch(in text: String, pattern: String) -> Int? {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return nil
-        }
-
-        let range = NSRange(text.startIndex..., in: text)
-        guard let match = regex.firstMatch(in: text, range: range),
-              let captureRange = Range(match.range(at: 1), in: text) else {
-            return nil
-        }
-
-        return Int(text[captureRange])
-    }
-
-    private func allMatches(in text: String, pattern: String) -> [Int] {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return []
-        }
-
-        let range = NSRange(text.startIndex..., in: text)
-        return regex.matches(in: text, range: range).compactMap { match in
-            guard let captureRange = Range(match.range(at: 1), in: text) else {
-                return nil
-            }
-
-            return Int(text[captureRange])
-        }
-    }
-
-    private func stableNumericID(from text: String) -> Int {
-        var value = 0
-        for scalar in text.unicodeScalars {
-            value = (value &* 31 &+ Int(scalar.value)) & 0x7fffffff
-        }
-        return max(value, 1)
-    }
-
-    private static let dateFormatters: [DateFormatter] = {
-        let formats = [
-            "MMM d, yyyy",
-            "MMM dd, yyyy",
-            "MMMM d, yyyy",
-            "MMMM dd, yyyy",
-            "MMM d yyyy",
-            "MMM dd yyyy",
-            "MMMM d yyyy",
-            "MMMM dd yyyy",
-            "yyyy-MM-dd"
-        ]
-
-        return formats.map { format in
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.timeZone = TimeZone(secondsFromGMT: 0)
-            formatter.dateFormat = format
-            return formatter
-        }
-    }()
 }
 
 nonisolated enum LiveHangarRepositoryError: Error, LocalizedError, Equatable {
@@ -3443,7 +2992,7 @@ private struct RemoteAuthorizedDeviceBulkRemoval: Decodable {
     let debugSummary: String?
 }
 
-private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
+actor RSIAccountHTTPPageClient {
     private var cookies: [SessionCookie]
     private let session: URLSession
     private let timeoutSeconds: TimeInterval = 25
@@ -3452,7 +3001,7 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
         cookies
     }
 
-    init(cookies: [SessionCookie]) {
+    init(cookies: [SessionCookie], session: URLSession? = nil) {
         self.cookies = cookies
 
         let configuration = URLSessionConfiguration.ephemeral
@@ -3461,11 +3010,13 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = timeoutSeconds
         configuration.timeoutIntervalForResource = max(timeoutSeconds * 2, 45)
-        session = URLSession(configuration: configuration)
+        self.session = session ?? URLSession(configuration: configuration)
     }
 
     func fetchPledgePage(page: Int, pageSize: Int) async throws -> RemotePledgePage {
         let payload = try await fetchHTML(path: "/en/account/pledges", page: page, pageSize: pageSize)
+        try Task.checkCancellation()
+        assert(!Thread.isMainThread)
         return try RSIAccountHTMLParser.parsePledgePage(
             html: payload.html,
             pageURL: payload.finalURL,
@@ -3477,6 +3028,8 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
 
     func fetchBuybackPage(page: Int, pageSize: Int) async throws -> RemoteBuybackPage {
         let payload = try await fetchHTML(path: "/en/account/buy-back-pledges", page: page, pageSize: pageSize)
+        try Task.checkCancellation()
+        assert(!Thread.isMainThread)
         return try RSIAccountHTMLParser.parseBuybackPage(
             html: payload.html,
             pageURL: payload.finalURL,
@@ -3486,7 +3039,7 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
         )
     }
 
-    static func loadPledgeChunk(
+    nonisolated static func loadPledgeChunk(
         using cookies: [SessionCookie],
         pages: [Int],
         pageSize: Int,
@@ -3529,7 +3082,7 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
         return results
     }
 
-    static func loadBuybackChunk(
+    nonisolated static func loadBuybackChunk(
         using cookies: [SessionCookie],
         pages: [Int],
         pageSize: Int,
@@ -3610,6 +3163,7 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
             (data, response) = try await session.data(for: request)
             #endif
         } catch {
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
             throw LiveHangarRepositoryError.unexpectedMarkup(
                 directHTTPDiagnostics(
                     summary: "Direct RSI HTTP page load failed.",
@@ -3810,7 +3364,7 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
     }
 }
 
-private nonisolated enum RSIAccountHTMLParser {
+nonisolated enum RSIAccountHTMLParser {
     static func parsePledgePage(
         html: String,
         pageURL: URL,
@@ -11502,7 +11056,7 @@ nonisolated enum HangarPledgeSummaryParser {
     }
 }
 
-private nonisolated struct RemotePledgePage: Decodable {
+nonisolated struct RemotePledgePage: Decodable, Sendable {
     let accessDenied: Bool
     let title: String
     let totalPages: Int?
@@ -11516,7 +11070,7 @@ private nonisolated struct RemotePledgePage: Decodable {
     }
 }
 
-private nonisolated struct RemotePledge: Decodable {
+nonisolated struct RemotePledge: Decodable, Sendable {
     let id: Int?
     let title: String
     let statusText: String
@@ -11560,7 +11114,7 @@ private nonisolated struct RemotePledge: Decodable {
     }
 }
 
-private nonisolated struct RemotePledgeUpgradeMetadata: Decodable {
+nonisolated struct RemotePledgeUpgradeMetadata: Decodable, Sendable {
     let id: Int?
     let name: String?
     let upgradeType: String?
@@ -11586,7 +11140,7 @@ private nonisolated struct RemotePledgeUpgradeMetadata: Decodable {
     }
 }
 
-private nonisolated struct RemotePledgeUpgradeMatchItem: Decodable {
+nonisolated struct RemotePledgeUpgradeMatchItem: Decodable, Sendable {
     let id: Int?
     let name: String?
 
@@ -11598,7 +11152,7 @@ private nonisolated struct RemotePledgeUpgradeMatchItem: Decodable {
     }
 }
 
-private nonisolated struct RemotePledgeItem: Decodable {
+nonisolated struct RemotePledgeItem: Decodable, Sendable {
     let title: String
     let kind: String
     let detail: String
@@ -11715,7 +11269,7 @@ private nonisolated struct RemoteStoreShip: Decodable {
     let imageURL: String?
 }
 
-private nonisolated struct RemoteBuybackPage: Decodable {
+nonisolated struct RemoteBuybackPage: Decodable, Sendable {
     let accessDenied: Bool
     let title: String
     let totalPages: Int?
@@ -11729,7 +11283,7 @@ private nonisolated struct RemoteBuybackPage: Decodable {
     }
 }
 
-private nonisolated struct RemoteBuybackPledge: Decodable {
+nonisolated struct RemoteBuybackPledge: Decodable, Sendable {
     let id: Int?
     let title: String
     let dateText: String
