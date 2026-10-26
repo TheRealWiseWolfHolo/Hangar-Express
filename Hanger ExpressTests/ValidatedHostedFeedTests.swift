@@ -16,7 +16,7 @@ struct ValidatedHostedFeedTests {
         ValidatedHostedFeedStore(directory: directory ?? resources.temporaryDirectory())
     }
 
-    @Test func concurrentConsumersShareOneRequestAndClearFencesCompletion() async throws {
+    @Test func concurrentConsumersShareOneRequest() async throws {
         let probe = FeedProbe()
         let session = resources.session { try await probe.respond($0) }
         let store = loader()
@@ -30,15 +30,26 @@ struct ValidatedHostedFeedTests {
                 return values
             }
         }
+        defer {
+            all.cancel()
+            Task { await probe.release.open() }
+        }
         try await probe.started.wait()
         await probe.release.open()
         let results = try await all.value
         #expect(results.count == 16 && results.allSatisfy { $0.values == [1] })
         #expect(await probe.count == 1)
+    }
 
+    @Test func clearFencesAnInFlightCompletionAndNextLoadStartsFresh() async throws {
+        let store = loader()
         let blocked = FeedProbe()
         let blockedSession = resources.session { try await blocked.respond($0) }
-        let obsolete = Task { try await store.load(urls: [url], session: blockedSession, forceRefresh: true, decode: Self.decode) }
+        let obsolete = Task { try await store.load(urls: [url], session: blockedSession, decode: Self.decode) }
+        defer {
+            obsolete.cancel()
+            Task { await blocked.release.open() }
+        }
         try await blocked.started.wait()
         await store.clear()
         await blocked.release.open()
