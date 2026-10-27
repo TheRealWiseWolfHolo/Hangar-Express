@@ -653,10 +653,12 @@ private struct BuybackGroupRow: View {
                         itemTranslator: itemTranslator
                     )
                         .font(.headline)
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
                     if itemGroup.quantity > 1 {
                         Text("x\(itemGroup.quantity)")
                             .font(.caption.weight(.semibold))
+                            .fixedSize()
                             .foregroundStyle(Color.accentColor)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
@@ -675,6 +677,7 @@ private struct BuybackGroupRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 4)
     }

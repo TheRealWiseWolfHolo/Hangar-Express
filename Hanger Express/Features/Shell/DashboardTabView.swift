@@ -839,6 +839,9 @@ enum RefreshDebugReportBuilder {
 
         var sections: [String] = [
             "Hangar Express Refresh Debug Report",
+            "Diagnostic Format: 2",
+            "Generated UTC: \(ISO8601DateFormatter().string(from: Date()))",
+            "Device time-zone offset seconds: \(TimeZone.current.secondsFromGMT())",
             "Generated: \(Date().formatted(date: .complete, time: .standard))",
             "App: \(appVersionIdentifier())",
             "Device: \(UIDevice.current.model)",

@@ -4,6 +4,9 @@
 
 ### English
 
+- Connection problems are easier to investigate with more detailed support logs. Sensitive login details are filtered out.
+- Buy Back quantity badges stay aligned when translated names wrap onto multiple lines.
+
 - Hangar Log updates now follow content changes instead of polling, including edits that retain their IDs. Updates stay buffered while scrolling or editing search, and account switches clear previous rows immediately.
 
 - Hangar share pictures now use the selected item translation mode and the same displayed pledge title as the Hangar list. In Cloud mode, new names remain in English until their translations are reviewed and published.
@@ -35,6 +38,9 @@
 - Hangar, Fleet, and Buy Back reuse revision-owned groups, lookups, filter flags, and bounded background search indexes.
 
 ### 简体中文
+
+- 连接出现问题时，诊断日志会提供更多信息，方便排查原因，并过滤敏感登录信息。
+- 翻译后的名称换行时，回购数量标记仍会保持对齐。
 
 - 机库日志改为按内容变化更新，支持同一编号下的内容修改；滚动或编辑搜索时暂存更新，切换账户时立即清除旧账户条目。
 

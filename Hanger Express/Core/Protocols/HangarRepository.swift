@@ -163,8 +163,10 @@ final class RefreshDiagnosticsStore {
     }
 
     private(set) var entries: [Entry] = []
+    private(set) var generation = UUID()
 
     func reset(context: String? = nil) {
+        generation = UUID()
         entries.removeAll()
 
         if let context, !context.isEmpty {

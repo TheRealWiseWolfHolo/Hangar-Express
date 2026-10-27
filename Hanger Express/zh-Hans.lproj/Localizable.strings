@@ -9,6 +9,17 @@
 "App Updated" = "应用已更新";
 "Hangar Express was updated from %@ to %@. Run a full refresh so your cached hangar, fleet, buy-back, and log data stay in sync with this build." = "机库通已从 %@ 更新到 %@。请执行一次完整刷新，以确保缓存的机库、舰队、回购和日志数据与当前版本保持同步。";
 "What's New" = "更新内容";
+"Connection problems are easier to investigate with more detailed support logs." = "连接出现问题时，诊断日志会提供更多信息，方便排查原因。";
+"Your profile now shows your access to Star Citizen and Squadron 42." = "个人资料卡片现在会显示您是否拥有星际公民和42中队的游戏权限。";
+"Hide the keyboard without losing your search results. Tap the search box to type again, or tap X to close search." = "收起键盘后仍会保留搜索结果。轻点搜索框可继续输入，轻点 X 可关闭搜索。";
+"Paste email verification codes with one tap. Picture verification codes stay visible while you type." = "邮件验证码可一键粘贴。输入图形验证码时，验证码图片会保持可见。";
+"Hangar share pictures now use the same item names and language as your Hangar list." = "机库分享图片现在会使用与机库列表一致的物品名称和语言。";
+"Chinese names use consistent quotation marks. Translation animations are smoother, and Buy Back counts line up correctly." = "中文名称的引号更加统一，翻译动画更加平滑，回购数量标记也已对齐。";
+"Fixed missing ship details for renamed Constellation ships, including the Phoenix Emerald." = "修复了星座系列舰船改名后资料缺失的问题，包括凤凰翡翠版。";
+"Search and browsing are smoother in large hangars. Unchanged pictures stay visible during refresh." = "大型机库的搜索和浏览更加流畅。刷新时，未变化的图片会继续显示。";
+"See when each part of your account was last refreshed. If part of a refresh fails, your saved information stays available." = "现在可查看各项内容上次刷新的时间。部分内容刷新失败时，仍会保留已保存的信息。";
+"More reliable account saving and switching, with clearer messages when information cannot be saved." = "保存和切换账户更加可靠，无法保存信息时会明确提示。";
+"Hangar Log waits until you stop scrolling or typing before showing new updates." = "机库日志会等您停止滚动或输入后，再更新列表。";
 "Added Character Reset, allowing eligible users to request an RSI character repair from within Hangar Express." = "新增“角色重置”功能，支持符合条件的用户在机库通内请求 RSI 角色修复。";
 "Improved Simplified Chinese localization across app flows." = "优化了应用各流程中的简体中文本地化。";
 "Resolved visual inconsistencies across multiple screens for a more consistent interface." = "修复了多个界面的视觉不一致问题，使整体界面更加统一。";

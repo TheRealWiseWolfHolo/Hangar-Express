@@ -872,7 +872,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         )
 
-        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies, diagnostics: directHTTPDiagnosticsHandler())
         let firstPage: RemotePledgePage
         do {
             firstPage = try await directClient.fetchPledgePage(
@@ -1102,7 +1102,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         )
 
-        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies, diagnostics: directHTTPDiagnosticsHandler())
         let firstPage: RemotePledgePage
         do {
             firstPage = try await directClient.fetchPledgePage(
@@ -1322,7 +1322,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         )
 
-        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies, diagnostics: directHTTPDiagnosticsHandler())
         let firstPage: RemoteBuybackPage
         do {
             firstPage = try await directClient.fetchBuybackPage(
@@ -1511,7 +1511,7 @@ final class LiveHangarRepository: HangarRepository {
         var pledgeTotalPages = knownTotalPages
         var previousSignature = previousPageSignature
         var didReachEndOfPledges = false
-        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies, diagnostics: directHTTPDiagnosticsHandler())
 
         for page in startPage ... maxPledgePages {
             progress(
@@ -1621,7 +1621,7 @@ final class LiveHangarRepository: HangarRepository {
         var buybackTotalPages = knownTotalPages
         var previousSignature = previousPageSignature
         var didReachEndOfBuyback = false
-        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies, diagnostics: directHTTPDiagnosticsHandler())
 
         for page in startPage ... maxBuybackPages {
             progress(
@@ -1729,13 +1729,15 @@ final class LiveHangarRepository: HangarRepository {
         )
         var resultsByPage: [Int: RemotePledgePage] = [:]
 
+        let networkDiagnostics = directHTTPDiagnosticsHandler()
         try await withThrowingTaskGroup(of: [(Int, RemotePledgePage)].self) { group in
             for chunk in chunks {
                 group.addTask {
                     try await RSIAccountHTTPPageClient.loadPledgeChunk(
                         using: cookies,
                         pages: chunk,
-                        pageSize: pageSize
+                        pageSize: pageSize,
+                        diagnostics: networkDiagnostics
                     ) { _, itemCount in
                         let totals = await progressTracker.record(
                             completedPages: 1,
@@ -1795,13 +1797,15 @@ final class LiveHangarRepository: HangarRepository {
         )
         var resultsByPage: [Int: RemoteBuybackPage] = [:]
 
+        let networkDiagnostics = directHTTPDiagnosticsHandler()
         try await withThrowingTaskGroup(of: [(Int, RemoteBuybackPage)].self) { group in
             for chunk in chunks {
                 group.addTask {
                     try await RSIAccountHTTPPageClient.loadBuybackChunk(
                         using: cookies,
                         pages: chunk,
-                        pageSize: pageSize
+                        pageSize: pageSize,
+                        diagnostics: networkDiagnostics
                     ) { _, itemCount in
                         let totals = await progressTracker.record(
                             completedPages: 1,
@@ -2339,6 +2343,16 @@ final class LiveHangarRepository: HangarRepository {
             throw error
         } catch {
             return nil
+        }
+    }
+
+    private func directHTTPDiagnosticsHandler() -> RSIHTTPDiagnosticsHandler {
+        let generation = refreshDiagnostics.generation
+        return { [weak self] detail, failed in
+            guard let self, self.refreshDiagnostics.generation == generation else { return }
+            self.recordRefreshDiagnostics(stage: "network.directHTTP",
+                summary: failed ? "RSI direct HTTP request failed." : "RSI direct HTTP request completed.",
+                detail: detail, level: failed ? .error : .info)
         }
     }
 
@@ -2996,13 +3010,15 @@ actor RSIAccountHTTPPageClient {
     private var cookies: [SessionCookie]
     private let session: URLSession
     private let timeoutSeconds: TimeInterval = 25
+    private let diagnostics: RSIHTTPDiagnosticsHandler?
 
     var currentCookies: [SessionCookie] {
         cookies
     }
 
-    init(cookies: [SessionCookie], session: URLSession? = nil) {
+    init(cookies: [SessionCookie], session: URLSession? = nil, diagnostics: RSIHTTPDiagnosticsHandler? = nil) {
         self.cookies = cookies
+        self.diagnostics = diagnostics
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false
@@ -3043,13 +3059,14 @@ actor RSIAccountHTTPPageClient {
         using cookies: [SessionCookie],
         pages: [Int],
         pageSize: Int,
+        diagnostics: RSIHTTPDiagnosticsHandler? = nil,
         onPageLoaded: @escaping @Sendable (_ page: Int, _ itemCount: Int) async -> Void
     ) async throws -> [(Int, RemotePledgePage)] {
         guard !pages.isEmpty else {
             return []
         }
 
-        let client = RSIAccountHTTPPageClient(cookies: cookies)
+        let client = RSIAccountHTTPPageClient(cookies: cookies, diagnostics: diagnostics)
         var results: [(Int, RemotePledgePage)] = []
         var previousSignature: String?
 
@@ -3086,13 +3103,14 @@ actor RSIAccountHTTPPageClient {
         using cookies: [SessionCookie],
         pages: [Int],
         pageSize: Int,
+        diagnostics: RSIHTTPDiagnosticsHandler? = nil,
         onPageLoaded: @escaping @Sendable (_ page: Int, _ itemCount: Int) async -> Void
     ) async throws -> [(Int, RemoteBuybackPage)] {
         guard !pages.isEmpty else {
             return []
         }
 
-        let client = RSIAccountHTTPPageClient(cookies: cookies)
+        let client = RSIAccountHTTPPageClient(cookies: cookies, diagnostics: diagnostics)
         var results: [(Int, RemoteBuybackPage)] = []
         var previousSignature: String?
 
@@ -3154,25 +3172,39 @@ actor RSIAccountHTTPPageClient {
             request.setValue(rsiDevice, forHTTPHeaderField: "x-rsi-device")
         }
 
+        let requestID = UUID().uuidString
+        let started = DispatchTime.now().uptimeNanoseconds
+        #if DEBUG || HANGAR_BENCHMARKS
+        let collector = RSIRequestMetricsDelegate(profilingDelegate: PerformanceNetworkMetrics.shared.delegateIfEnabled())
+        #else
+        let collector = RSIRequestMetricsDelegate()
+        #endif
+        func context() -> String {
+            (["requestID=\(requestID)",
+              "elapsedMs=\(String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000))",
+              "taskCancelled=\(Task.isCancelled)", "serverTrust=systemDefault",
+              "resourceTimeoutSeconds=\(session.configuration.timeoutIntervalForResource)",
+              "allowsCellular=\(session.configuration.allowsCellularAccess), allowsExpensive=\(session.configuration.allowsExpensiveNetworkAccess), allowsConstrained=\(session.configuration.allowsConstrainedNetworkAccess)"]
+              + collector.lines()).joined(separator: "\n")
+        }
         let data: Data
         let response: URLResponse
         do {
-            #if DEBUG || HANGAR_BENCHMARKS
-            (data, response) = try await session.data(for: request, delegate: PerformanceNetworkMetrics.shared.delegateIfEnabled())
-            #else
-            (data, response) = try await session.data(for: request)
-            #endif
+            (data, response) = try await session.data(for: request, delegate: collector)
         } catch {
+            let detail = directHTTPDiagnostics(summary: "Direct RSI HTTP page load failed.",
+                requestedURL: requestedURL, response: nil, data: nil, underlyingError: error) + "\n" + context()
+            await diagnostics?(detail, true)
             if Task.isCancelled || error is CancellationError { throw CancellationError() }
-            throw LiveHangarRepositoryError.unexpectedMarkup(
-                directHTTPDiagnostics(
-                    summary: "Direct RSI HTTP page load failed.",
-                    requestedURL: requestedURL,
-                    response: nil,
-                    data: nil,
-                    underlyingError: error
-                )
-            )
+            throw LiveHangarRepositoryError.unexpectedMarkup(detail)
+        }
+        // Successful first pages establish connection context without recording
+        // every successful inventory page in the bounded support log.
+        if page == 1 || (response as? HTTPURLResponse).map({ !(200..<300).contains($0.statusCode) }) == true {
+            let failed = (response as? HTTPURLResponse).map { !(200..<300).contains($0.statusCode) } ?? true
+            let detail = directHTTPDiagnostics(summary: "Direct RSI HTTP response received.",
+                requestedURL: requestedURL, response: response, data: data, underlyingError: nil) + "\n" + context()
+            await diagnostics?(detail, failed)
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -3304,30 +3336,42 @@ actor RSIAccountHTTPPageClient {
             "",
             "Direct HTTP Diagnostics",
             "transport=URLSession.directHTML",
-            "requestedURL=\(requestedURL.absoluteString)",
-            "finalURL=\(response?.url?.absoluteString ?? "unknown")",
+            "requestedURL=\(RSINetworkDiagnostics.safeURL(requestedURL))",
+            "finalURL=\(RSINetworkDiagnostics.safeURL(response?.url))",
             "timeoutSeconds=\(Int(timeoutSeconds))",
             "httpStatus=\(httpResponse.map { String($0.statusCode) } ?? "unknown")",
             "mimeType=\(response?.mimeType ?? "unknown")",
             "expectedContentLength=\(response?.expectedContentLength ?? -1)",
-            "responseBytes=\(data?.count ?? 0)",
+            "responseBytes=\(data.map { String($0.count) } ?? "unavailable")",
             "cookieCount=\(cookies.count)",
             "cookieNames=\(cookieNamesSummary())",
             "authCookies=\(authCookieSummary())"
         ]
 
+        let secrets = cookies.filter {
+            ["rsi-token", "_rsi_device"].contains($0.name.lowercased()) || $0.value.count >= 8
+        }.map(\.value)
         if let underlyingError {
-            let nsError = underlyingError as NSError
-            lines.append("errorType=\(String(reflecting: type(of: underlyingError)))")
-            lines.append("errorDomain=\(nsError.domain)")
-            lines.append("errorCode=\(nsError.code)")
-            lines.append("errorDescription=\(underlyingError.localizedDescription)")
+            let error = underlyingError as NSError
+            lines += ["failureCategory=\(RSINetworkDiagnostics.category(underlyingError))",
+                "errorDomain=\(RSINetworkDiagnostics.text(error.domain, secrets: secrets))", "errorCode=\(error.code)"]
+            lines += RSINetworkDiagnostics.errorLines(underlyingError, secrets: secrets)
         }
-
-        if let data,
-           let body = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) {
-            lines.append("bodyPreview=\(RSIAccountHTMLParser.previewText(from: body, limit: 700))")
+        if let ray = httpResponse?.value(forHTTPHeaderField: "CF-Ray"),
+           ray.range(of: #"^[A-Fa-f0-9]{8,64}-[A-Z]{3}$"#, options: .regularExpression) != nil {
+            lines.append("cfRay=\(ray)")
         }
+        if let rawDate = httpResponse?.value(forHTTPHeaderField: "Date") {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+            if let serverDate = formatter.date(from: rawDate) {
+                lines.append("serverDateUTC=\(ISO8601DateFormatter().string(from: serverDate))")
+                lines.append("deviceClockOffsetEstimateSeconds=\(Int(Date().timeIntervalSince(serverDate))) (includes response transit time)")
+            }
+        }
+        if data != nil { lines.append("responseBody=omitted (account HTML)") }
 
         return lines.joined(separator: "\n")
     }
@@ -5594,12 +5638,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     private func navigationErrorSummary(_ error: Error) -> String {
-        let nsError = error as NSError
-        return [
-            "domain=\(nsError.domain)",
-            "code=\(nsError.code)",
-            "description=\(error.localizedDescription)"
-        ].joined(separator: ", ")
+        RSINetworkDiagnostics.errorLines(error).joined(separator: ", ")
     }
 
     private func evaluate<Value: Decodable>(script: String, as type: Value.Type) async throws -> Value {

@@ -824,6 +824,19 @@ final class AppModel {
     private static let itemTranslationPreloadMaximumLogEntries = 80
     private static let itemTranslationPendingPreloadLanguageDefaultsKey = "hangar.itemTranslation.pendingPreloadLanguage"
     private static let versionUpdateNoteKeysByShortVersion: [String: [String]] = [
+        "1.1.0": [
+            "Your profile now shows your access to Star Citizen and Squadron 42.",
+            "Hide the keyboard without losing your search results. Tap the search box to type again, or tap X to close search.",
+            "Paste email verification codes with one tap. Picture verification codes stay visible while you type.",
+            "Hangar share pictures now use the same item names and language as your Hangar list.",
+            "Chinese names use consistent quotation marks. Translation animations are smoother, and Buy Back counts line up correctly.",
+            "Fixed missing ship details for renamed Constellation ships, including the Phoenix Emerald.",
+            "Search and browsing are smoother in large hangars. Unchanged pictures stay visible during refresh.",
+            "See when each part of your account was last refreshed. If part of a refresh fails, your saved information stays available.",
+            "More reliable account saving and switching, with clearer messages when information cannot be saved.",
+            "Hangar Log waits until you stop scrolling or typing before showing new updates.",
+            "Connection problems are easier to investigate with more detailed support logs."
+        ],
         "1.0.8": [
             "Request an RSI character repair from Hangar Express when your account is eligible.",
             "The CCU calculator feels smoother when choosing ships.",
