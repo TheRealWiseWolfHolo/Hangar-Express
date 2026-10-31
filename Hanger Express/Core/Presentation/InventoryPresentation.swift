@@ -29,6 +29,7 @@ nonisolated struct InventoryPresentation: Sendable {
     let packageFlags: [String: InventoryFilterFlags]
     let buybackFlags: [String: InventoryFilterFlags]
     let fleetByGroupID: [String: GroupedFleetShip]
+    let gameAccessPackages: [RSIGame: [RSIGamePackageMatch]]
     let hangarLogLookup: HangarLogInventoryLookup
     let buybackByGroupID: [String: GroupedBuybackPledge]
 
@@ -78,6 +79,7 @@ nonisolated struct InventoryPresentation: Sendable {
         return Self(key: key, packages: packages, fleet: fleet, buyback: buyback, packagesByID: packagesByID,
                     fleetByID: fleetByID, packageFlags: packageFlags, buybackFlags: buybackFlags,
                     fleetByGroupID: Dictionary(fleet.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }),
+                    gameAccessPackages: try RSIGamePackageResolver.index(packages: snapshot.packages),
                     hangarLogLookup: hangarLogLookup,
                     buybackByGroupID: Dictionary(buyback.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }))
     }

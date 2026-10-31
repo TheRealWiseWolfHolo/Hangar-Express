@@ -21,6 +21,10 @@ struct BenchmarkDashboardView: View {
         defaults.removePersistentDomain(forName: "HangarExpress.OfflineBenchmark")
         defaults.set("english", forKey: AppLanguage.storageKey)
         defaults.set("never", forKey: SyncPreferences.inventoryAutoRefreshIntervalKey)
+        if ReferralRewardsBenchmark.enabled,
+           ProcessInfo.processInfo.environment["HANGAR_REFERRAL_STANDARD_ACCESS"] != "1" {
+            defaults.set(true, forKey: ProSubscriptionConfiguration.isProDefaultsKey)
+        }
         let preview = AppEnvironment.preview
         let environment = AppEnvironment(
             sessionStore: preview.sessionStore, snapshotStore: preview.snapshotStore,
@@ -47,7 +51,7 @@ struct BenchmarkDashboardView: View {
             .accessibilityIdentifier("OfflineBenchmark-\(snapshot.packages.count)")
             .defaultAppStorage(defaults)
             .environment(\.locale, Locale(identifier: "en"))
-            .preferredColorScheme(.dark)
+            .preferredColorScheme(ProcessInfo.processInfo.environment["HANGAR_BENCHMARK_LIGHT_MODE"] == "1" ? .light : .dark)
     }
 }
 #endif

@@ -38,6 +38,8 @@
 	<string>$(REMOTE_IP_REGION_URL)</string>
 	<key>RemotePrimaryBaseURL</key>
 	<string>$(REMOTE_PRIMARY_BASE_URL)</string>
+	<key>RemoteReferralRewardsBaseURL</key>
+	<string>$(REMOTE_REFERRAL_REWARDS_BASE_URL)</string>
 	<key>RemoteTranslationBaseURL</key>
 	<string>$(REMOTE_TRANSLATION_BASE_URL)</string>
 	<key>UIApplicationSceneManifest</key>

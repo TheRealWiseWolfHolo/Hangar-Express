@@ -1607,6 +1607,7 @@ struct HangarPackageDetailView: View {
                     HangarUpgradeTargetPickerView(
                         appModel: appModel,
                         packageGroup: packageGroup,
+                        itemTranslator: itemTranslator,
                         reloadToken: reloadToken,
                         completionHandler: HangarActionCompletionHandler {
                             presentedActionSheet = nil
@@ -4185,6 +4186,7 @@ private struct HangarUpgradeTargetPickerView: View {
 
     let appModel: AppModel
     let packageGroup: GroupedHangarPackage
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
     let completionHandler: HangarActionCompletionHandler
 
@@ -4205,8 +4207,9 @@ private struct HangarUpgradeTargetPickerView: View {
         let needle = searchText.localizedLowercase
         return targets.filter { target in
             [
-                target.title,
+                itemTranslator.searchableText(for: target.title),
                 target.status ?? "",
+                target.status.map(AppLocalizer.string) ?? "",
                 target.insurance ?? ""
             ]
             .joined(separator: " ")
@@ -4218,11 +4221,14 @@ private struct HangarUpgradeTargetPickerView: View {
     var body: some View {
         List {
             Section {
-                Text(package.title)
+                HangarTranslatedText(source: package.title, itemTranslator: itemTranslator)
                     .font(.headline)
 
                 if packageGroup.containsMultipleCopies {
-                    Text("This grouped stack contains \(packageGroup.quantity) identical copies. Hangar Express will apply one copy in this first release.")
+                    Text(AppLocalizer.format(
+                        "This grouped stack contains %lld identical copies. Hangar Express will apply one copy in this first release.",
+                        packageGroup.quantity
+                    ))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -4262,11 +4268,12 @@ private struct HangarUpgradeTargetPickerView: View {
                                 appModel: appModel,
                                 packageGroup: packageGroup,
                                 target: target,
+                                itemTranslator: itemTranslator,
                                 reloadToken: reloadToken,
                                 completionHandler: completionHandler
                             )
                         } label: {
-                            UpgradeTargetRow(target: target, reloadToken: reloadToken)
+                            UpgradeTargetRow(target: target, itemTranslator: itemTranslator, reloadToken: reloadToken)
                         }
                     }
                 } header: {
@@ -4315,6 +4322,7 @@ private struct HangarUpgradeTargetPickerView: View {
 
 private struct UpgradeTargetRow: View {
     let target: UpgradeTargetCandidate
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
 
     var body: some View {
@@ -4327,12 +4335,12 @@ private struct UpgradeTargetRow: View {
             )
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(target.title)
+                HangarTranslatedText(source: target.title, itemTranslator: itemTranslator)
                     .font(.headline)
 
                 if let status = target.status,
                    !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text(status)
+                    Text(AppLocalizer.string(status))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -4368,6 +4376,7 @@ private struct HangarUpgradeConfirmationView: View {
     let appModel: AppModel
     let packageGroup: GroupedHangarPackage
     let target: UpgradeTargetCandidate
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
     let completionHandler: HangarActionCompletionHandler
 
@@ -4397,11 +4406,14 @@ private struct HangarUpgradeConfirmationView: View {
     var body: some View {
         List {
             Section {
-                Text(package.title)
+                HangarTranslatedText(source: package.title, itemTranslator: itemTranslator)
                     .font(.headline)
 
                 if packageGroup.containsMultipleCopies {
-                    Text("Hangar Express will consume one copy from this grouped stack of \(packageGroup.quantity) identical upgrades.")
+                    Text(AppLocalizer.format(
+                        "Hangar Express will consume one copy from this grouped stack of %lld identical upgrades.",
+                        packageGroup.quantity
+                    ))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -4412,12 +4424,16 @@ private struct HangarUpgradeConfirmationView: View {
             Section {
                 if let fromShip = upgradePath.from,
                    !fromShip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    LabeledContent("From", value: fromShip)
+                    LabeledContent("From") {
+                        HangarTranslatedText(source: fromShip, itemTranslator: itemTranslator)
+                    }
                 }
 
                 if let toShip = upgradePath.to,
                    !toShip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    LabeledContent("To", value: toShip)
+                    LabeledContent("To") {
+                        HangarTranslatedText(source: toShip, itemTranslator: itemTranslator)
+                    }
                 }
             } header: {
                 Text("Upgrade Path")
@@ -4433,12 +4449,12 @@ private struct HangarUpgradeConfirmationView: View {
                     )
 
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(target.title)
+                        HangarTranslatedText(source: target.title, itemTranslator: itemTranslator)
                             .font(.headline)
 
                         if let status = target.status,
                            !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            Text(status)
+                            Text(AppLocalizer.string(status))
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }

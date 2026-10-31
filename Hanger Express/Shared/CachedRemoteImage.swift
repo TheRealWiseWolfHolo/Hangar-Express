@@ -13,6 +13,7 @@ struct CachedRemoteImage<Content: View>: View {
     let reloadToken: UUID?
     let maxRetryCount: Int
     let trimsTransparentPadding: Bool
+    let onImageSize: ((CGSize) -> Void)?
     let content: (CachedRemoteImagePhase) -> Content
 
     @Environment(\.displayScale) private var displayScale
@@ -25,6 +26,7 @@ struct CachedRemoteImage<Content: View>: View {
         reloadToken: UUID? = nil,
         maxRetryCount: Int = 5,
         trimsTransparentPadding: Bool = false,
+        onImageSize: ((CGSize) -> Void)? = nil,
         @ViewBuilder content: @escaping (CachedRemoteImagePhase) -> Content
     ) {
         self.url = url
@@ -32,6 +34,7 @@ struct CachedRemoteImage<Content: View>: View {
         self.reloadToken = reloadToken
         self.maxRetryCount = maxRetryCount
         self.trimsTransparentPadding = trimsTransparentPadding
+        self.onImageSize = onImageSize
         self.content = content
     }
 
@@ -91,6 +94,7 @@ struct CachedRemoteImage<Content: View>: View {
                 return
             }
 
+            onImageSize?(image.size)
             phase = .success(Image(uiImage: image))
         } catch {
             guard !Task.isCancelled else {

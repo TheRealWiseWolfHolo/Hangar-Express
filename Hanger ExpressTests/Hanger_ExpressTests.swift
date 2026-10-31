@@ -10,13 +10,13 @@ import WebKit
 struct Hanger_ExpressTests {
     let resources = TestResources()
 
-    @Test func onlyWBCCUDealsRequiresEarlyAccess() {
+    @Test func wbccuDealsAndReferralsRequireEarlyAccess() {
         let earlyAccessTools = Set(
             FleetTool.allCases.filter(\.requiresEarlyAccess)
         )
 
         #expect(
-            earlyAccessTools == Set([FleetTool.wbccuDeals])
+            earlyAccessTools == Set([FleetTool.wbccuDeals, FleetTool.referrals])
         )
     }
 
@@ -435,6 +435,13 @@ struct Hanger_ExpressTests {
         #expect(SyncPreferences.constrainedWorkerCount(0, isPro: false) == 1)
         #expect(SyncPreferences.constrainedWorkerCount(10, isPro: true) == 10)
         #expect(SyncPreferences.constrainedWorkerCount(11, isPro: true) == 10)
+        #expect(SyncPreferences.resolvedWorkerCount(configuredCount: 0, isPro: false, wasCustomized: false) == 2)
+        #expect(SyncPreferences.resolvedWorkerCount(configuredCount: 0, isPro: true, wasCustomized: false) == 5)
+        #expect(SyncPreferences.resolvedWorkerCount(configuredCount: 0, isPro: true, wasCustomized: true) == 5)
+        #expect(SyncPreferences.resolvedWorkerCount(configuredCount: 2, isPro: true, wasCustomized: false) == 5)
+        #expect(SyncPreferences.resolvedWorkerCount(configuredCount: 2, isPro: true, wasCustomized: true) == 2)
+        #expect(SyncPreferences.resolvedWorkerCount(configuredCount: 7, isPro: true, wasCustomized: false) == 7)
+        #expect(SyncPreferences.resolvedWorkerCount(configuredCount: 7, isPro: false, wasCustomized: false) == 2)
         #expect(ProSubscriptionConfiguration.savedAccountLimit(isPro: false) == 1)
         #expect(ProSubscriptionConfiguration.savedAccountLimit(isPro: true) == 10)
 
@@ -2582,13 +2589,21 @@ struct Hanger_ExpressTests {
                     manufacturer: "Aegis",
                     msrpUSD: 1900,
                     storeAvailable: true
+                ),
+                makeCCUTestCatalogShip(
+                    id: 8,
+                    name: "Aegis Idris-M Frigate",
+                    manufacturer: "Aegis",
+                    msrpUSD: 1000,
+                    storeAvailable: true
                 )
             ]
         )
         let names = Set(CCUUpgradeCatalogShip.makeShips(from: catalog).map(\.name))
 
         #expect(!names.contains("Pioneer"))
-        #expect(names.contains("Idris-M"))
+        #expect(!names.contains("Idris-M"))
+        #expect(!names.contains("Aegis Idris-M Frigate"))
         #expect(!names.contains("Idris-P"))
     }
 

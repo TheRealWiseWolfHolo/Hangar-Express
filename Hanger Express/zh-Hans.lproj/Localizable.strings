@@ -407,6 +407,8 @@
 "Standard keeps your current saved account. Early Access unlocks multiple account switching while the feature is in Labs." = "标准版只保留当前账户。多账户切换仍在实验室阶段时，抢先体验可解锁该功能。";
 "Early Access Labs can refresh up to 10 pages in parallel." = "抢先体验实验室最多可并行刷新 10 个页面。";
 "Standard refreshes up to 2 pages in parallel. Early Access unlocks up to 10 while the feature is in Labs." = "标准版最多可并行刷新 2 个页面。该功能仍在实验室阶段时，抢先体验可提升到 10 个。";
+"Early Access defaults to 5 refresh workers and can use up to 10." = "抢先体验默认使用 5 个刷新并发任务，最多可设为 10 个。";
+"Standard defaults to 2 refresh workers. Early Access defaults to 5 and can use up to 10." = "标准版默认使用 2 个刷新并发任务；抢先体验默认使用 5 个，最多可设为 10 个。";
 "Manage Early Access" = "管理抢先体验";
 "Preferences" = "偏好设置";
 "Access verified" = "访问权限已验证";
@@ -507,11 +509,17 @@
 "Choose source" = "选择来源";
 "Choose destination" = "选择目标";
 "Ships" = "舰船";
+"Source Ship Value" = "来源舰船价值";
+"Choose melt value" = "选择回收价值";
+"Using MSRP because this ship is not in your hangar." = "机库中没有此舰船，因此使用建议售价。";
+"Using the melt value of your owned ship." = "使用你拥有的舰船回收价值。";
 "Store availability comes from the hosted Star Citizen ship feed." = "商店可用性来自托管的 Star Citizen 舰船数据。";
 "Refresh hosted ship catalog" = "刷新托管舰船目录";
 "Loading hosted ship catalog..." = "正在加载托管舰船目录...";
 "Select Ships" = "选择舰船";
 "Choose both ships to calculate the chain." = "请选择来源舰船和目标舰船以计算 CCU 链。";
+"Choose Source Value" = "选择来源舰船价值";
+"You own this ship at multiple melt values. Choose which one to use." = "你拥有的这款舰船有多个回收价值，请选择要使用的一个。";
 "Destination Too Low" = "目标价值过低";
 "The destination ship must have a higher MSRP than the source ship." = "目标舰船的 MSRP 必须高于来源舰船。";
 "No CCU Path" = "没有可用的 CCU 路径";
@@ -521,11 +529,15 @@
 "Try a different ship name or manufacturer." = "请尝试其他舰船名称或制造商。";
 "Search ships" = "搜索舰船";
 "%@ • MSRP %@" = "%@ • MSRP %@";
+"MSRP %@" = "MSRP %@";
 "Best CCU Chain" = "最佳 CCU 链";
+"Cost details" = "费用明细";
+"Total Cost" = "总成本";
 "Total Savings" = "总节省";
 "Destination MSRP" = "目标舰船 MSRP";
 "Melt Value" = "可溶价值";
 "Save to Photos" = "存储到照片";
+"Save Image" = "保存图片";
 "Share" = "分享";
 "Creating image..." = "正在生成图片…";
 "Saved to Photos" = "已存储到照片";
@@ -547,6 +559,10 @@
 "This chain includes at least one CCU that is not purchasable right now." = "此链包含至少一个当前无法购买的 CCU。";
 "Cost" = "成本";
 "Saving" = "节省";
+"Exclude" = "排除此 CCU";
+"Excluded CCUs" = "已排除的 CCU";
+"Restore" = "恢复";
+"Restoring a CCU recalculates the path and allows it to be used again." = "恢复 CCU 后会重新计算升级路径，并允许再次使用。";
 "Purchase %@" = "购买 %@";
 "Store credit %@ • New money %@" = "商店信用点 %@ • 新资金 %@";
 "Already in hangar %@" = "已在机库中 %@";
@@ -759,6 +775,25 @@
 "This package contains Squadron 42. Type I understand before Hangar Express can continue to Face ID and submit the melt request." = "此组合包包含 Squadron 42。在机库通继续进行 Face ID 验证并提交回收请求之前，请输入 I understand。";
 "Loading eligible RSI target pledges..." = "正在加载可用的 RSI 目标项目...";
 "Search target pledges" = "搜索目标项目";
+"Choose Target" = "选择目标项目";
+"Selected Upgrade" = "所选升级";
+"This grouped stack contains %lld identical copies. Hangar Express will apply one copy in this first release." = "这组共有 %lld 个相同的升级。机库通本次仅应用其中一个。";
+"Unable to Load Upgrade Targets" = "无法加载升级目标";
+"Eligible Target Pledges" = "可用的目标项目";
+"No target pledges match your search." = "没有符合搜索条件的目标项目。";
+"RSI decides which pledges are eligible. Hangar Express shows the live target list returned by RSI, then enriches it with your cached hangar data when available." = "哪些项目可以升级由 RSI 决定。机库通显示 RSI 实时返回的目标列表，并在可用时补充已缓存的机库信息。";
+"Attributed" = "已归属";
+"Upgrade Item" = "升级物品";
+"Hangar Express will consume one copy from this grouped stack of %lld identical upgrades." = "机库通将从这组 %lld 个相同升级中消耗一个。";
+"Upgrade Path" = "升级路径";
+"Selected Target" = "所选目标";
+"This action cannot be undone. RSI will permanently consume the stored upgrade and apply it to the selected pledge." = "此操作无法撤销。RSI 将永久消耗所拥有的升级，并将其应用到所选项目。";
+"Hangar Express will reuse the saved RSI password for this account after Face ID or device passcode confirmation." = "通过 Face ID 或设备密码确认后，机库通将使用此账户保存的 RSI 密码。";
+"Warning" = "警告";
+"Applying Upgrade..." = "正在应用升级...";
+"Apply Upgrade" = "应用升级";
+"Confirm Upgrade" = "确认升级";
+"Unable to Apply Upgrade" = "无法应用升级";
 "Not separable from this package" = "无法从此组合包中单独分离";
 "Choose Background" = "选择背景";
 "Actual Value" = "实际价值";
@@ -993,3 +1028,87 @@
 "Preparing inventory..." = "正在整理物品...";
 
 "Preparing search..." = "正在准备搜索...";
+
+"Game Access" = "游戏权限";
+
+"Game Packages" = "游戏组合包";
+
+"Shows packages that include this game." = "查看包含此游戏权限的组合包。";
+
+"Access status comes from your last Account refresh." = "权限状态来自上次账户刷新。";
+
+"No matching game packages" = "未找到匹配的游戏组合包";
+
+"RSI confirms access, but no matching package was found in your saved Hangar." = "RSI 已确认您拥有游戏权限，但在已保存的机库中未找到匹配的组合包。";
+
+"No package with this game was found in your saved Hangar." = "在已保存的机库中未找到包含此游戏的组合包。";
+
+"Refresh Hangar to find packages that include this game." = "刷新机库以查找包含此游戏权限的组合包。";
+
+"Packages are matched from your saved Hangar contents. Refresh Hangar to update this list." = "此列表根据已保存的机库内容匹配。刷新机库可更新列表。";
+
+"Pledge #%lld" = "商品编号 #%lld";
+
+"Tap Star Citizen or Squadron 42 on your profile to see which Hangar packages include game access." = "轻点个人资料中的星际公民或42中队，即可查看哪些机库组合包包含游戏权限。";
+
+"New Ladder" = "新阶梯";
+
+"Legacy Ladder" = "旧阶梯";
+
+"Referral Ladder" = "推荐奖励阶梯";
+
+"%lld referrals" = "%lld 位推荐玩家";
+
+"%lld more to the next reward" = "再推荐 %lld 位玩家即可达到下一奖励";
+
+"All milestones reached" = "已达到所有奖励里程碑";
+
+"View Only" = "仅供查看";
+
+"The legacy ladder is not available for this account. You can still browse its rewards." = "此账户无法参与旧阶梯，但仍可浏览奖励。";
+
+"Referral count unavailable" = "暂时无法获取推荐人数";
+
+"Use Refresh Account to update your referral progress." = "请使用“刷新账户”更新推荐进度。";
+
+"Unable to Load Rewards" = "无法加载奖励";
+
+"Rewards shown are from RSI's referral program. Your progress updates with Refresh Account." = "奖励来自 RSI 推荐计划。推荐进度随“刷新账户”更新。";
+
+"Milestone Reached" = "已达到";
+
+"Not Yet Reached" = "未达到";
+
+"Browse referral rewards with pictures in Tools, switch between the new and legacy ladders, and see your saved referral progress." = "在工具中查看推荐奖励图片、切换新旧阶梯，并查看已保存的推荐进度。";
+
+"Check your connection and try again." = "请检查网络连接后重试。";
+
+"%lld referral" = "%lld 位推荐玩家";
+
+"View matching item in Hangar" = "查看机库中的对应物品";
+
+"Hangar item unavailable" = "暂时无法查看机库物品";
+
+"Your saved Hangar is being prepared. Try again in a moment, or refresh Hangar if it has not been loaded yet." = "正在准备已保存的机库。请稍后重试；如果尚未加载机库，请先刷新机库。";
+
+"This milestone is reached, but its reward was not found in your saved Hangar. Refresh Hangar and try again." = "已达到此里程碑，但在已保存的机库中未找到对应奖励。请刷新机库后重试。";
+
+"Choose a Hangar item" = "选择机库物品";
+
+"More than one saved Hangar entry matches this reward." = "已保存的机库中有多个条目与此奖励对应。";
+
+"Browse referral rewards with pictures in Tools, switch between the new and legacy ladders, and tap reached rewards to see matching Hangar items." = "在工具中浏览推荐奖励图片、切换新旧阶梯，并轻点已达到的奖励查看机库中的对应物品。";
+
+
+"Early Access: browse referral reward pictures in Tools, switch between the new and legacy ladders, and tap reached rewards to see matching Hangar items." = "抢先体验：在工具中浏览推荐奖励图片、切换新旧阶梯，并轻点已达到的奖励查看机库中的对应物品。";
+
+"Idris-M no longer appears in the CCU calculator because it cannot be upgraded." = "Idris-M 无法升级，现已从 CCU 计算器的舰船选项中移除。";
+"Gift and Apply Upgrade are available again for eligible Hangar pledges after RSI's page update." = "适配 RSI 页面更新后，符合条件的机库物品现可再次使用“赠送”和“应用升级”。";
+"Early Access refresh now defaults to five parallel workers; Standard stays at two." = "抢先体验现在默认使用 5 个并行刷新任务；标准版仍为 2 个。";
+"The CCU calculator is easier to use, with clearer ship choices and expandable cost details." = "CCU 计算器更易使用，舰船选项更清晰，费用明细可按需展开。";
+"Upgrade target selection and confirmation now have Chinese text and show available Hangar item translations." = "升级目标选择和确认页面现已补齐中文界面文字，并在有译名时显示机库物品的中文名称。";
+
+"Expected release" = "预计发布版本";
+"TBD" = "待定";
+
+"Entries" = "条记录";

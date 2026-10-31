@@ -103,8 +103,7 @@ struct CCUUpgradeCalculatorView: View {
                         CCUUpgradeShipSelectionRow(
                             title: AppLocalizer.string("Source Ship"),
                             ship: selectedSourceShip,
-                            placeholder: AppLocalizer.string("Choose source"),
-                            reloadToken: reloadToken
+                            placeholder: AppLocalizer.string("Choose source")
                         )
                     }
                     .disabled(catalogShips.isEmpty)
@@ -113,8 +112,7 @@ struct CCUUpgradeCalculatorView: View {
                         CCUUpgradeShipSelectionRow(
                             title: AppLocalizer.string("Destination Ship"),
                             ship: selectedDestinationShip,
-                            placeholder: AppLocalizer.string("Choose destination"),
-                            reloadToken: reloadToken
+                            placeholder: AppLocalizer.string("Choose destination")
                         )
                     }
                     .disabled(catalogShips.isEmpty)
@@ -126,42 +124,15 @@ struct CCUUpgradeCalculatorView: View {
                                 Text(value.usdString).tag(value as Decimal?)
                             }
                         }
-                    } else if let resolvedSourceValueUSD {
-                        LabeledContent(
-                            "Source Ship Value",
-                            value: resolvedSourceValueUSD.usdString
-                        )
-                        Text(sourceMeltValueOptions.isEmpty ? "Using MSRP because this ship is not in your hangar." : "Using the melt value of your owned ship.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        .pickerStyle(.menu)
+                    } else if let resolvedSourceValueUSD, !sourceMeltValueOptions.isEmpty {
+                        LabeledContent("Melt Value", value: resolvedSourceValueUSD.usdString)
                     }
-                } header: {
-                    Text("Ships")
                 }
 
                 catalogStatusSection
                 calculationSection
                 excludedCCUsSection
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if let displayedRoute {
-                    CCUCalculationExportButtons(
-                        isExporting: isExportingCalculation,
-                        onSave: {
-                            Task { await saveCalculationToPhotos(displayedRoute) }
-                        },
-                        onShare: {
-                            Task { await shareCalculation(displayedRoute) }
-                        }
-                    )
-                    .padding(.horizontal, 16)
-                    .padding(.top, 10)
-                    .padding(.bottom, 8)
-                    .background(.bar)
-                    .overlay(alignment: .top) {
-                        Divider()
-                    }
-                }
             }
             .navigationTitle("CCU Calculator")
             .navigationBarTitleDisplayMode(.inline)
@@ -266,30 +237,30 @@ struct CCUUpgradeCalculatorView: View {
         Section {
             if case .loaded = loadState {
                 if selectedSourceShip == nil || selectedDestinationShip == nil {
-                    ContentUnavailableView(
+                    CCUCalculatorStatusRow(
                         "Select Ships",
                         systemImage: "arrow.left.arrow.right",
-                        description: Text("Choose both ships to calculate the chain.")
+                        message: "Choose both ships to calculate the chain."
                     )
                 } else if sourceMeltValueOptions.count > 1 && resolvedSourceValueUSD == nil {
-                    ContentUnavailableView(
+                    CCUCalculatorStatusRow(
                         "Choose Source Value",
                         systemImage: "dollarsign.circle",
-                        description: Text("You own this ship at multiple melt values. Choose which one to use.")
+                        message: "You own this ship at multiple melt values. Choose which one to use."
                     )
                 } else if let selectedSourceShip,
                           let selectedDestinationShip,
                           !selectedSourceShip.msrpUSD.isLessThan(selectedDestinationShip.msrpUSD) {
-                    ContentUnavailableView(
+                    CCUCalculatorStatusRow(
                         "Destination Too Low",
                         systemImage: "exclamationmark.triangle",
-                        description: Text("The destination ship must have a higher MSRP than the source ship.")
+                        message: "The destination ship must have a higher MSRP than the source ship."
                     )
                 } else if let routeCalculationRequest {
                     switch routeCalculationState {
                     case let .loaded(loadedRequest, route) where loadedRequest == routeCalculationRequest:
                         if let route {
-                            CCUUpgradeRouteSummaryCard(route: route)
+                            CCUUpgradeRouteSummary(route: route)
 
                             if route.hasUnavailableStoreStep {
                                 CCUUpgradeRouteWarningView()
@@ -300,21 +271,20 @@ struct CCUUpgradeCalculatorView: View {
                                     number: offset + 1,
                                     step: step,
                                     paymentRequirement: route.paymentRequirement(for: step),
-                                    reloadToken: reloadToken
+                                    onExclude: { exclude(step) }
                                 )
-                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                    Button(role: .destructive) {
-                                        exclude(step)
-                                    } label: {
-                                        Label("Exclude", systemImage: "minus.circle")
-                                    }
-                                }
                             }
+
+                            CCUCalculationExportButtons(
+                                isExporting: isExportingCalculation,
+                                onSave: { Task { await saveCalculationToPhotos(route) } },
+                                onShare: { Task { await shareCalculation(route) } }
+                            )
                         } else {
-                            ContentUnavailableView(
+                            CCUCalculatorStatusRow(
                                 "No CCU Path",
                                 systemImage: "link.badge.plus",
-                                description: Text("No valid upgrade chain was found for these ships.")
+                                message: "No valid upgrade chain was found for these ships."
                             )
                         }
                     default:
@@ -326,15 +296,15 @@ struct CCUUpgradeCalculatorView: View {
                         }
                     }
                 } else {
-                    ContentUnavailableView(
+                    CCUCalculatorStatusRow(
                         "No CCU Path",
                         systemImage: "link.badge.plus",
-                        description: Text("No valid upgrade chain was found for these ships.")
+                        message: "No valid upgrade chain was found for these ships."
                     )
                 }
             }
         } header: {
-            Text("Calculation")
+            Text(displayedRoute == nil ? "Calculation" : "Best CCU Chain")
         }
     }
 
@@ -471,6 +441,19 @@ struct CCUUpgradeCalculatorView: View {
             return
         }
 
+#if DEBUG || HANGAR_BENCHMARKS
+        if ProcessInfo.processInfo.environment["HANGAR_BENCHMARK_UI_SIZE"] != nil,
+           ProcessInfo.processInfo.environment["HANGAR_CCU_UI_FIXTURE"] == "1" {
+            let catalog = Self.uiFixtureCatalog()
+            let ships = CCUUpgradeCatalogShip.makeShips(from: catalog)
+            loadState = .loaded(CCUUpgradeCalculatorCatalog(
+                id: UUID(), ships: ships, storeUpgradeOffers: catalog.storeUpgradeOffers
+            ))
+            reconcileSelections(with: ships)
+            return
+        }
+#endif
+
         if showsLoadingState {
             loadState = .loading
         }
@@ -493,6 +476,27 @@ struct CCUUpgradeCalculatorView: View {
             loadState = .failed(error.localizedDescription)
         }
     }
+
+#if DEBUG || HANGAR_BENCHMARKS
+    private static func uiFixtureCatalog() -> RSIShipCatalog {
+        RSIShipCatalog(
+            ships: [
+                .init(id: 1001, name: "Aurora MR", manufacturer: "RSI", msrpUSD: 30,
+                      storeAvailable: true, imageURL: nil),
+                .init(id: 1002, name: "Cutlass Black", manufacturer: "Drake", msrpUSD: 110,
+                      storeAvailable: true, imageURL: nil),
+                .init(id: 1003, name: "Zeus Mk II MR", manufacturer: "RSI", msrpUSD: 190,
+                      storeAvailable: true, imageURL: nil)
+            ],
+            storeUpgradeOffers: [
+                .init(id: "ccu-ui-war-bond", skuID: 9001, title: "Warbond Edition",
+                      targetShipID: 1002, targetShipName: "Cutlass Black",
+                      targetShipMSRPUSD: 110, priceUSD: 95, savingsUSD: 15,
+                      available: true, unlimitedStock: true, availableStock: 0)
+            ]
+        )
+    }
+#endif
 
     private func reconcileSelections(with ships: [CCUUpgradeCatalogShip]) {
         let validKeys = Set(ships.map(\.key))
@@ -604,45 +608,27 @@ private struct CCUUpgradeShipSelectionRow: View {
     let title: String
     let ship: CCUUpgradeCatalogShip?
     let placeholder: String
-    let reloadToken: UUID?
-
     var body: some View {
-        HStack(spacing: 12) {
-            if let ship {
-                RemoteThumbnailView(
-                    url: ship.imageURL,
-                    reloadToken: reloadToken,
-                    fallbackSystemImage: "airplane",
-                    size: 48
-                )
-            } else {
-                Image(systemName: "airplane")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 48, height: 48)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color(.tertiarySystemGroupedBackground))
-                    )
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.caption)
                     .foregroundStyle(.secondary)
 
                 Text(ship?.name ?? placeholder)
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(ship == nil ? .secondary : .primary)
+            }
 
-                if let ship {
-                    Text(AppLocalizer.format("%@ • MSRP %@", ship.manufacturer, ship.displayPrice))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+            Spacer(minLength: 4)
+
+            if let ship {
+                Text(AppLocalizer.format("MSRP %@", ship.displayPrice))
+                    .font(.subheadline)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding(.vertical, 4)
     }
 }
 
@@ -654,6 +640,7 @@ private struct CCUUpgradeShipPickerView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var searchText = ""
+    @State private var isSearchPresented = false
 
     private var filteredShips: [CCUUpgradeCatalogShip] {
         let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
@@ -676,6 +663,8 @@ private struct CCUUpgradeShipPickerView: View {
                 ForEach(filteredShips) { ship in
                     Button {
                         selectedKey = ship.key
+                        isSearchPresented = false
+                        searchText = ""
                         dismiss()
                     } label: {
                         CCUUpgradeShipPickerRow(
@@ -690,7 +679,12 @@ private struct CCUUpgradeShipPickerView: View {
         }
         .navigationTitle(role.title)
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $searchText, prompt: "Search ships")
+        .searchable(
+            text: $searchText,
+            isPresented: $isSearchPresented,
+            placement: .navigationBarDrawer(displayMode: .always),
+            prompt: "Search ships"
+        )
     }
 }
 
@@ -708,107 +702,139 @@ private struct CCUUpgradeShipPickerRow: View {
                 size: 50
             )
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text(ship.name)
                     .font(.headline)
                     .foregroundStyle(.primary)
 
-                Text("\(ship.manufacturer) • \(ship.displayPrice)")
+                Text(ship.manufacturer)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-
-                Text(ship.displayAvailability)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(ship.isStoreUpgradeAvailable ? .green : .orange)
             }
 
             Spacer(minLength: 8)
 
-            if isSelected {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(Color.accentColor)
+            VStack(alignment: .trailing, spacing: 5) {
+                Text(ship.displayPrice)
+                    .font(.subheadline.weight(.semibold))
+                    .monospacedDigit()
+
+                Text(ship.displayAvailability)
+                    .font(.caption)
+                    .foregroundStyle(ship.isStoreUpgradeAvailable ? .green : .secondary)
+
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                        .accessibilityHidden(true)
+                }
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 }
 
-private struct CCUUpgradeRouteSummaryCard: View {
-    let route: CCUUpgradeRoute
+private struct CCUCalculatorStatusRow: View {
+    let title: String
+    let systemImage: String
+    let message: String
+
+    init(_ title: String, systemImage: String, message: String) {
+        self.title = title
+        self.systemImage = systemImage
+        self.message = message
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 10) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Best CCU Chain")
-                        .font(.headline)
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .frame(width: 28)
 
-                    Text(AppLocalizer.format("%@ to %@", route.sourceShip.name, route.destinationShip.name))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 8)
-
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("Total Savings")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-
-                    Text(route.totalSavingsUSD.usdString)
-                        .font(.title3.weight(.bold))
-                        .foregroundStyle(route.totalSavingsUSD.isNegative ? .orange : .green)
-                }
-            }
-
-            Divider()
-
-            VStack(spacing: 10) {
-                CCUUpgradeSummaryRow(
-                    title: "Destination MSRP",
-                    value: route.standardUpgradeValueUSD.usdString,
-                    emphasized: true
-                )
-
-                CCUUpgradeSummaryRow(
-                    title: "Melt Value",
-                    value: route.totalEffectiveCostUSD.usdString,
-                    emphasized: true
-                )
-            }
-
-            Divider()
-
-            HStack(alignment: .top, spacing: 12) {
-                CCUUpgradeMetricLabel(title: "CCU Purchases", value: route.totalNewPurchaseCostUSD.usdString)
-                CCUUpgradeMetricLabel(title: "Store Credit", value: route.totalStoreCreditNeededUSD.usdString)
-                CCUUpgradeMetricLabel(title: "New Money", value: route.totalNewMoneyNeededUSD.usdString)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(AppLocalizer.string(title))
+                    .font(.subheadline.weight(.semibold))
+                Text(AppLocalizer.string(message))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(.secondarySystemGroupedBackground))
-        )
+        .padding(.vertical, 8)
+    }
+}
+
+private struct CCUUpgradeRouteSummary: View {
+    let route: CCUUpgradeRoute
+    @State private var showsCostDetails = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 12) {
+                    primaryMetric("Total Savings", value: route.totalSavingsUSD.usdString,
+                                  color: route.totalSavingsUSD.isNegative ? .orange : .green)
+                    primaryMetric("New Money", value: route.totalNewMoneyNeededUSD.usdString,
+                                  color: .primary)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    primaryMetric("Total Savings", value: route.totalSavingsUSD.usdString,
+                                  color: route.totalSavingsUSD.isNegative ? .orange : .green)
+                    primaryMetric("New Money", value: route.totalNewMoneyNeededUSD.usdString,
+                                  color: .primary)
+                }
+            }
+
+            DisclosureGroup("Cost details", isExpanded: $showsCostDetails) {
+                VStack(spacing: 7) {
+                    CCUUpgradeSummaryRow(title: "Destination MSRP", value: route.standardUpgradeValueUSD.usdString)
+                    CCUUpgradeSummaryRow(title: "Total Cost", value: route.totalEffectiveCostUSD.usdString)
+                    CCUUpgradeSummaryRow(title: "CCU Purchases", value: route.totalNewPurchaseCostUSD.usdString)
+                    CCUUpgradeSummaryRow(title: "Store Credit", value: route.totalStoreCreditNeededUSD.usdString)
+                }
+                .padding(.top, 5)
+            }
+            .font(.subheadline)
+        }
+        .padding(.vertical, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func primaryMetric(_ title: String, value: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(AppLocalizer.string(title))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.title3.weight(.semibold))
+                .monospacedDigit()
+                .foregroundStyle(color)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
 private struct CCUUpgradeSummaryRow: View {
     let title: String
     let value: String
-    let emphasized: Bool
 
     var body: some View {
         HStack {
             Text(AppLocalizer.string(title))
-                .font(emphasized ? .subheadline.weight(.semibold) : .subheadline)
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
 
             Spacer()
 
             Text(value)
-                .font(emphasized ? .headline : .subheadline.weight(.semibold))
+                .font(.subheadline.weight(.semibold))
+                .monospacedDigit()
                 .foregroundStyle(.primary)
         }
     }
@@ -841,7 +867,7 @@ private struct CCUUpgradeRouteWarningView: View {
             Image(systemName: "exclamationmark.triangle.fill")
         }
         .foregroundStyle(.orange)
-        .padding(12)
+        .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -854,41 +880,24 @@ private struct CCUUpgradeStepRow: View {
     let number: Int
     let step: CCUUpgradeCandidate
     let paymentRequirement: CCUUpgradePaymentRequirement?
-    let reloadToken: UUID?
+    let onExclude: () -> Void
+
+    @State private var showsDetails = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text("\(number)")
-                .font(.caption.weight(.bold))
-                .foregroundStyle(.secondary)
-                .frame(width: 26, height: 26)
-                .background(
-                    Circle()
-                        .fill(Color(.tertiarySystemGroupedBackground))
-                )
+        DisclosureGroup(isExpanded: $showsDetails) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(step.title)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(step.routeValueText)
-                            .font(.headline)
-                            .foregroundStyle(.primary)
-                            .fixedSize(horizontal: false, vertical: true)
+                Text(step.kind.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
-                        Text(step.title)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    Spacer(minLength: 8)
-
-                    CCUUpgradeSourcePill(kind: step.kind)
-                }
-
-                HStack(spacing: 10) {
+                HStack(spacing: 12) {
                     CCUUpgradeStepValue(title: "Current", value: step.currentValueUSD.usdString)
-                    CCUUpgradeStepValue(title: "Cost", value: step.effectiveCostUSD.usdString)
                     CCUUpgradeStepValue(title: "Saving", value: step.savingsUSD.usdString)
                 }
 
@@ -913,12 +922,45 @@ private struct CCUUpgradeStepRow: View {
                         AppLocalizer.format("Already in hangar %@", referenceID),
                         systemImage: "shippingbox"
                     )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                Button(role: .destructive, action: onExclude) {
+                    Label("Exclude", systemImage: "minus.circle")
+                }
+                .buttonStyle(.borderless)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .padding(.top, 5)
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                Text("\(number)")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 17, alignment: .leading)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(step.routeValueText)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 6) {
+                        Text(step.kind.title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Spacer(minLength: 4)
+
+                        Text(step.effectiveCostUSD.usdString)
+                            .font(.caption.weight(.semibold))
+                            .monospacedDigit()
+                    }
                 }
             }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 1)
     }
 
     private var purchaseCostText: String {
@@ -931,49 +973,6 @@ private struct CCUUpgradeStepRow: View {
 
     private var newMoneyText: String {
         paymentRequirement?.newMoneyUSD.usdString ?? step.newPurchaseCostUSD.usdString
-    }
-}
-
-private struct CCUUpgradeSourcePill: View {
-    let kind: CCUUpgradeSourceKind
-
-    var body: some View {
-        VStack(alignment: .trailing, spacing: 3) {
-            Text(kind.title)
-                .font(.caption.weight(.bold))
-                .lineLimit(2)
-                .multilineTextAlignment(.trailing)
-
-            Text(kind.detail)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .multilineTextAlignment(.trailing)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(
-            Capsule()
-                .fill(pillColor.opacity(0.14))
-        )
-        .foregroundStyle(pillColor)
-    }
-
-    private var pillColor: Color {
-        switch kind {
-        case .hangarWarbond:
-            return .green
-        case .hangarStandardMeltAboveCurrent, .hangarStandardMeltMatchesCurrent:
-            return .blue
-        case .buyback:
-            return .purple
-        case .storeWarbond:
-            return .green
-        case .store:
-            return .teal
-        case .unavailableStore:
-            return .orange
-        }
     }
 }
 
@@ -1001,21 +1000,22 @@ private struct CCUCalculationExportButtons: View {
     let onShare: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             Button(action: onSave) {
-                Label("Save to Photos", systemImage: "square.and.arrow.down")
-                    .frame(maxWidth: .infinity)
+                Label("Save Image", systemImage: "square.and.arrow.down")
+                    .frame(maxWidth: .infinity, minHeight: 36)
             }
             .buttonStyle(.bordered)
+            .accessibilityLabel(AppLocalizer.string("Save to Photos"))
 
             Button(action: onShare) {
                 Label("Share", systemImage: "square.and.arrow.up")
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, minHeight: 36)
             }
             .buttonStyle(.borderedProminent)
         }
+        .controlSize(.small)
         .disabled(isExporting)
-        .padding(.vertical, 4)
     }
 }
 
@@ -1115,7 +1115,7 @@ private struct CCUCalculationExportView: View {
 
             VStack(spacing: 12) {
                 exportSummaryRow("Destination MSRP", route.standardUpgradeValueUSD.usdString)
-                exportSummaryRow("Melt Value", route.totalEffectiveCostUSD.usdString)
+                exportSummaryRow("Total Cost", route.totalEffectiveCostUSD.usdString)
             }
 
             HStack(alignment: .top, spacing: 18) {

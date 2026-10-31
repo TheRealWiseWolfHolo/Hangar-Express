@@ -155,6 +155,257 @@ final class PerformanceUITests: XCTestCase {
     }
 
     @MainActor
+    func testGameAccessTilesShowMatchingPackagesAndEmptyState() {
+        let app = application()
+        app.launch()
+        assertOfflineFixture(app)
+        let account = app.buttons["Account"].firstMatch
+        XCTAssertTrue(account.waitForExistence(timeout: 30))
+        account.tap()
+        let sc = app.buttons["GameAccess-starCitizen"]
+        XCTAssertTrue(sc.waitForExistence(timeout: 15))
+        sc.tap()
+        XCTAssertTrue(app.staticTexts["Game Packages"].firstMatch.waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["Star Citizen Digital Download"].firstMatch.waitForExistence(timeout: 15))
+        let scImage = XCTAttachment(screenshot: app.screenshot())
+        scImage.name = "Star Citizen game packages"
+        scImage.lifetime = .keepAlways
+        add(scImage)
+        app.buttons["Done"].firstMatch.tap()
+        app.buttons["GameAccess-squadron42"].tap()
+        XCTAssertTrue(app.staticTexts["No matching game packages"].firstMatch.waitForExistence(timeout: 15))
+        XCTAssertFalse(app.staticTexts["Star Citizen Digital Download"].firstMatch.exists)
+        let sqImage = XCTAttachment(screenshot: app.screenshot())
+        sqImage.name = "Squadron 42 no matching package"
+        sqImage.lifetime = .keepAlways
+        add(sqImage)
+        app.buttons["Done"].firstMatch.tap()
+        XCTAssertTrue(sc.waitForExistence(timeout: 10))
+    }
+
+    @MainActor
+    func testCCUCalculatorShowsSimpleRouteAndStepActions() {
+        let app = application()
+        app.launchEnvironment["HANGAR_CCU_UI_FIXTURE"] = "1"
+        app.launch()
+        assertOfflineFixture(app)
+
+        app.buttons["Account"].firstMatch.tap()
+        let calculator = app.buttons["CCU Calculator"].firstMatch
+        for _ in 0..<4 where !calculator.exists {
+            app.scrollViews.firstMatch.swipeUp()
+        }
+        XCTAssertTrue(calculator.waitForExistence(timeout: 10))
+        calculator.tap()
+        XCTAssertTrue(app.staticTexts["Select Ships"].firstMatch.waitForExistence(timeout: 15))
+
+        app.staticTexts["Choose source"].firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Aurora MR")).firstMatch.tap()
+        app.staticTexts["Choose destination"].firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Zeus Mk II MR")).firstMatch.tap()
+
+        XCTAssertTrue(app.staticTexts["Best CCU Chain"].firstMatch.waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["Total Savings"].firstMatch.exists)
+        XCTAssertTrue(app.staticTexts["New Money"].firstMatch.exists)
+        XCTAssertFalse(app.staticTexts["Source MSRP"].firstMatch.exists)
+        let summary = XCTAttachment(screenshot: app.screenshot())
+        summary.name = "CCU calculator compact route"
+        summary.lifetime = .keepAlways
+        add(summary)
+
+        app.buttons["Cost details"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["Destination MSRP"].firstMatch.waitForExistence(timeout: 5))
+        let firstStep = app.buttons.matching(NSPredicate(
+            format: "label CONTAINS %@", "Aurora MR -> Cutlass Black"
+        )).firstMatch
+        for _ in 0..<3 where !firstStep.exists {
+            app.swipeUp()
+        }
+        XCTAssertTrue(firstStep.waitForExistence(timeout: 5))
+        firstStep.tap()
+        let exclude = app.buttons["Exclude"].firstMatch
+        XCTAssertTrue(exclude.waitForExistence(timeout: 5))
+        app.swipeUp()
+        for _ in 0..<3 where !exclude.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(exclude.isHittable)
+        let expanded = XCTAttachment(screenshot: app.screenshot())
+        expanded.name = "CCU calculator expanded step"
+        expanded.lifetime = .keepAlways
+        add(expanded)
+        exclude.tap()
+        XCTAssertTrue(app.staticTexts["Excluded CCUs"].firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Restore"].firstMatch.exists)
+    }
+
+    @MainActor
+    func testReferralRewardsLaddersAndLegacyViewOnly() throws {
+        try verifyReferralRewards(lightMode: false)
+    }
+
+    @MainActor
+    func testReferralRewardsLightAppearance() throws {
+        try verifyReferralRewards(lightMode: true)
+    }
+
+    @MainActor
+    private func verifyReferralRewards(lightMode: Bool) throws {
+        let app = application()
+        app.launchEnvironment["HANGAR_REFERRAL_UI_FIXTURE"] = "1"
+        app.launchEnvironment["HANGAR_BENCHMARK_LIGHT_MODE"] = lightMode ? "1" : "0"
+        for (key, name) in [("current_1", "referral-current-1"), ("current_2", "referral-current-2"), ("current_3", "referral-current-3"), ("current_10", "referral-current-10"), ("legacy_1", "referral-legacy-1"), ("legacy_25", "referral-legacy-25"), ("legacy_200", "referral-legacy-200")] {
+            let url = try XCTUnwrap(Bundle(for: PerformanceUITests.self).url(forResource: name, withExtension: "jpg"))
+            app.launchEnvironment["HANGAR_REFERRAL_ARTWORK_\(key)"] = try Data(contentsOf: url).base64EncodedString()
+        }
+        app.launch()
+        assertOfflineFixture(app)
+        app.buttons["Account"].firstMatch.tap()
+        let tool = app.buttons["Referrals, Early Access"].firstMatch
+        for _ in 0..<5 {
+            if tool.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(tool.waitForExistence(timeout: 15))
+        tool.tap()
+        XCTAssertTrue(app.staticTexts["9 referrals"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["1 more to the next reward"].exists)
+        let firstReward = app.descendants(matching: .any)["referrals.reward.current.1"].firstMatch
+        XCTAssertTrue(firstReward.exists)
+        XCTAssertTrue(firstReward.label.contains("CDS GCD-Army Medium Armor Set"))
+        XCTAssertTrue(firstReward.label.contains("Milestone Reached"))
+        let current = XCTAttachment(screenshot: app.screenshot())
+        current.name = "New referral ladder — \(lightMode ? "light" : "dark")"
+        current.lifetime = .keepAlways
+        add(current)
+        let legacyButton = app.buttons["referrals.ladder.legacy"]
+        let currentButton = app.buttons["referrals.ladder.current"]
+        // Hit empty space near each segment's edge, away from the centered text.
+        legacyButton.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.5)).tap()
+        XCTAssertTrue(app.staticTexts["View Only"].waitForExistence(timeout: 10))
+        let legacyReward = app.descendants(matching: .any)["referrals.reward.legacy.1"].firstMatch
+        XCTAssertTrue(legacyReward.exists)
+        XCTAssertTrue(legacyReward.label.contains("Badger and Badges"))
+        XCTAssertFalse(legacyReward.label.contains("Milestone Reached"))
+        XCTAssertFalse(app.staticTexts["9 referrals"].exists)
+        XCTAssertFalse(app.staticTexts["Milestone Reached"].exists)
+        assertLegacyPictureRatio(app, threshold: 1, title: "Badger and Badges", expected: 285.0 / 120.0)
+        let legacy = XCTAttachment(screenshot: app.screenshot())
+        legacy.name = "Legacy referral ladder view only — \(lightMode ? "light" : "dark")"
+        legacy.lifetime = .keepAlways
+        add(legacy)
+        for (threshold, title, ratio) in [(25, "Arena Commander Racing Package", 800.0 / 480.0), (200, "Ready For Battle", 560.0 / 392.0)] {
+            let titleElement = app.staticTexts[title].firstMatch
+            for _ in 0..<4 {
+                if titleElement.exists && titleElement.isHittable { break }
+                app.swipeUp()
+            }
+            XCTAssertTrue(titleElement.waitForExistence(timeout: 10))
+            assertLegacyPictureRatio(app, threshold: threshold, title: title, expected: ratio)
+            let picture = XCTAttachment(screenshot: app.screenshot())
+            picture.name = "Legacy picture \(threshold) — \(lightMode ? "light" : "dark")"
+            picture.lifetime = .keepAlways
+            add(picture)
+        }
+        for _ in 0..<5 {
+            if currentButton.isHittable { break }
+            app.swipeDown()
+        }
+        currentButton.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
+        XCTAssertTrue(app.staticTexts["9 referrals"].waitForExistence(timeout: 10))
+        legacyButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.10)).tap()
+        XCTAssertTrue(app.staticTexts["View Only"].waitForExistence(timeout: 10))
+        currentButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.90)).tap()
+        XCTAssertTrue(app.staticTexts["9 referrals"].waitForExistence(timeout: 10))
+        app.buttons["Done"].firstMatch.tap()
+    }
+
+    @MainActor
+    func testAcquiredReferralOpensHangarDetailsAndHandlesMissingAndMultipleMatches() throws {
+        let app = application()
+        app.launchEnvironment["HANGAR_REFERRAL_UI_FIXTURE"] = "1"
+        for (key, name) in [("current_1", "referral-current-1"), ("current_2", "referral-current-2"), ("current_3", "referral-current-3"), ("current_10", "referral-current-10")] {
+            let url = try XCTUnwrap(Bundle(for: PerformanceUITests.self).url(forResource: name, withExtension: "jpg"))
+            app.launchEnvironment["HANGAR_REFERRAL_ARTWORK_\(key)"] = try Data(contentsOf: url).base64EncodedString()
+        }
+        app.launch()
+        assertOfflineFixture(app)
+        app.buttons["Account"].firstMatch.tap()
+        let tool = app.buttons["Referrals, Early Access"].firstMatch
+        for _ in 0..<5 { if tool.isHittable { break }; app.swipeUp() }
+        tool.tap()
+        let first = app.descendants(matching: .any)["referrals.reward.current.1"].firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 15))
+        first.tap()
+        XCTAssertTrue(app.navigationBars["CDS GCD-Army Medium Armor Set - Referral Reward"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["GCD-Army Helmet"].firstMatch.exists)
+        let detail = XCTAttachment(screenshot: app.screenshot())
+        detail.name = "Referral reward using Hangar detail page"
+        detail.lifetime = .keepAlways
+        add(detail)
+        app.navigationBars.buttons["Referrals"].firstMatch.tap()
+        let missing = app.descendants(matching: .any)["referrals.reward.current.2"].firstMatch
+        for _ in 0..<4 { if missing.isHittable { break }; app.swipeUp() }
+        missing.tap()
+        XCTAssertTrue(app.alerts["Hangar item unavailable"].waitForExistence(timeout: 10))
+        app.alerts.buttons["OK"].tap()
+        let multiple = app.descendants(matching: .any)["referrals.reward.current.3"].firstMatch
+        for _ in 0..<4 { if multiple.isHittable { break }; app.swipeUp() }
+        multiple.tap()
+        XCTAssertTrue(app.staticTexts["Choose a Hangar item"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Pledge #2"].exists)
+        XCTAssertTrue(app.staticTexts["Pledge #3"].exists)
+        app.buttons["referrals.match.2"].firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["Gladius Dunlevy Model - Referral Reward"].waitForExistence(timeout: 10))
+    }
+
+    @MainActor
+    func testStandardReferralToolShowsEarlyAccessPage() {
+        let app = application()
+        app.launchEnvironment["HANGAR_REFERRAL_UI_FIXTURE"] = "1"
+        app.launchEnvironment["HANGAR_REFERRAL_STANDARD_ACCESS"] = "1"
+        app.launch()
+        assertOfflineFixture(app)
+        app.buttons["Account"].firstMatch.tap()
+        let tool = app.buttons["Referrals, Early Access"].firstMatch
+        for _ in 0..<5 { if tool.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(tool.waitForExistence(timeout: 15))
+        let badge = XCTAttachment(screenshot: app.screenshot())
+        badge.name = "Referrals tool with Early Access badge"
+        badge.lifetime = .keepAlways
+        add(badge)
+        tool.tap()
+        XCTAssertTrue(app.navigationBars["Hangar Express Early Access"].waitForExistence(timeout: 15))
+        let release = app.staticTexts["1.2.0"].firstMatch
+        for _ in 0..<5 { if release.exists && release.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(release.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Expected release"].exists)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "TBD").count, 4)
+        XCTAssertFalse(app.staticTexts["Referrals shows your progress and reward pictures for both ladders. Tap reached rewards to view matching Hangar items."].exists)
+        XCTAssertTrue(app.staticTexts["Referrals"].exists)
+        XCTAssertFalse(app.staticTexts["9 referrals"].exists)
+        let page = XCTAttachment(screenshot: app.screenshot())
+        page.name = "Early Access page includes Referrals"
+        page.lifetime = .keepAlways
+        add(page)
+    }
+
+    @MainActor
+    private func assertLegacyPictureRatio(_ app: XCUIApplication, threshold: Int, title: String, expected: Double) {
+        let card = app.descendants(matching: .any)["referrals.reward.legacy.\(threshold)"].firstMatch
+        let label = app.staticTexts[title].firstMatch
+        let correctProportions = NSPredicate { _, _ in
+            guard card.exists, label.exists else { return false }
+            // The title has a 16-point top inset below the picture.
+            let imageHeight = label.frame.minY - card.frame.minY - 16
+            return imageHeight > 0 && abs(Double(card.frame.width / imageHeight) - expected) < 0.03
+        }
+        let check = XCTNSPredicateExpectation(predicate: correctProportions, object: card)
+        XCTAssertEqual(XCTWaiter.wait(for: [check], timeout: 10), .completed,
+                       "Legacy picture must use its actual proportions, even with stale or missing catalog metadata")
+    }
+
+    @MainActor
     func testScrolling() {
         let app = application()
         app.launch()

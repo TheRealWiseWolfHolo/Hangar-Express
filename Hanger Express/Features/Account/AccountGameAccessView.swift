@@ -3,6 +3,7 @@ import SwiftUI
 struct AccountGameAccessView: View {
     @Environment(\.colorScheme) private var colorScheme
     let summary: RSIGameAccessSummary?
+    let onSelectGame: (RSIGame) -> Void
 
     var body: some View {
         let starCitizenActive = access(for: .starCitizen) == .granted
@@ -82,28 +83,33 @@ struct AccountGameAccessView: View {
         let access = access(for: game)
         let isGranted = access == .granted
         let titleKey = LocalizedStringKey(game.title)
-        return HStack(spacing: 8) {
-            Image(game == .starCitizen ? "StarCitizenGameLogo" : "Squadron42GameLogo")
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 24, height: 24)
-                .foregroundStyle(isGranted ? Color.primary : Color.secondary)
-                .opacity(isGranted ? 1 : 0.48)
-                .accessibilityHidden(true)
+        return Button { onSelectGame(game) } label: {
+            HStack(spacing: 8) {
+                Image(game == .starCitizen ? "StarCitizenGameLogo" : "Squadron42GameLogo")
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 24, height: 24)
+                    .foregroundStyle(isGranted ? Color.primary : Color.secondary)
+                    .opacity(isGranted ? 1 : 0.48)
+                    .accessibilityHidden(true)
 
-            Text(titleKey)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(isGranted ? Color.primary : Color.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                Text(titleKey)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(isGranted ? Color.primary : Color.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
         }
-        .frame(maxWidth: .infinity, alignment: .center)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .accessibilityElement(children: .ignore)
+        .buttonStyle(.plain)
         .accessibilityLabel(Text(titleKey))
         .accessibilityValue(Text(statusLabel(for: access)))
+        .accessibilityHint(Text("Shows packages that include this game."))
+        .accessibilityIdentifier("GameAccess-\(game.rawValue)")
     }
 
     private func statusLabel(for access: RSIGameAccess) -> LocalizedStringKey {

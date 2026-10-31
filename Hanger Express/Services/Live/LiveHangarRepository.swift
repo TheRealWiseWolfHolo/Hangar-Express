@@ -24,10 +24,10 @@ final class LiveHangarRepository: HangarRepository {
 
     private var syncWorkerCount: Int {
         let configuredValue = UserDefaults.standard.integer(forKey: SyncPreferences.workerCountKey)
-        let fallbackValue = configuredValue == 0 ? SyncPreferences.defaultWorkerCount : configuredValue
-        return SyncPreferences.constrainedWorkerCount(
-            fallbackValue,
-            isPro: ProSubscriptionConfiguration.storedIsPro
+        return SyncPreferences.resolvedWorkerCount(
+            configuredCount: configuredValue,
+            isPro: ProSubscriptionConfiguration.storedIsPro,
+            wasCustomized: UserDefaults.standard.bool(forKey: SyncPreferences.workerCountWasCustomizedKey)
         )
     }
 
@@ -3571,7 +3571,8 @@ nonisolated enum RSIAccountHTMLParser {
                 baseURL: pageURL
             ),
             alsoContains: titles,
-            canGift: containsClass("js-gift", in: row.html),
+            canGift: containsClass("js-gift-v2", in: row.html)
+                || containsClass("js-gift", in: row.html),
             canReclaim: containsClass("js-reclaim", in: row.html),
             canUpgrade: containsClass("js-apply-upgrade", in: row.html),
             upgradeMetadata: parseUpgradeMetadata(in: row.html),
@@ -6050,7 +6051,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
           containsText: firstText(row, ['.items-col', '.contains']),
           thumbnailImageURL: firstImageURL(packageThumbnailNode),
           alsoContains: titles,
-          canGift: row.querySelector('.shadow-button.js-gift, .js-gift') !== null,
+          canGift: row.querySelector('.js-gift-v2, .js-gift') !== null,
           canReclaim: row.querySelector('.shadow-button.js-reclaim, .js-reclaim') !== null,
           canUpgrade: row.querySelector('.shadow-button.js-apply-upgrade, .js-apply-upgrade') !== null,
           upgradeMetadata: parseUpgradeMetadata(row),
@@ -9416,7 +9417,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     const completedPledgeIDs = [];
 
     for (const pledgeID of pledgeIDsToGift) {
-      const response = await fetch('/api/account/giftPledge', {
+      const response = await fetch('/api/account/giftPledgeV2', {
         method: 'POST',
         credentials: 'include',
         headers: requestHeaders,

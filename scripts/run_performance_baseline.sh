@@ -64,6 +64,7 @@ xcodebuild test \
   REMOTE_FALLBACK_BASE_URL=https://example.invalid \
   REMOTE_TRANSLATION_BASE_URL=https://example.invalid \
   REMOTE_IP_REGION_URL=https://example.invalid \
+  REMOTE_REFERRAL_REWARDS_BASE_URL=https://example.invalid \
   "${arguments[@]}" 2>&1 | tee "$output/build-test.log"
 status=${PIPESTATUS[0]}
 set -e

@@ -8,6 +8,7 @@ struct AccountView: View {
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage(DisplayPreferences.earlyAccessBadgeKey) private var showsEarlyAccessBadge = DisplayPreferences.earlyAccessBadgeEnabledByDefault
     @AppStorage("wbccuDeals.betaDisclaimerAcknowledged") private var hasAcknowledgedWBCCUDisclaimer = false
+    @State private var selectedGame: RSIGame?
     @State private var isShowingSettings = false
     @State private var isShowingBackgroundPicker = false
     @State private var isShowingAccountTotalValueExplanation = false
@@ -37,6 +38,7 @@ struct AccountView: View {
                         avatarURL: profileAvatarURL,
                         backgroundImageURL: profileBackgroundImageURL,
                         gameAccess: snapshot.gameAccess,
+                        onSelectGame: { selectedGame = $0 },
                         reloadToken: appModel.accountImageReloadToken,
                         onExplainTotalValue: {
                             isShowingAccountTotalValueExplanation = true
@@ -202,6 +204,11 @@ struct AccountView: View {
                     .accessibilityLabel("Open Settings")
                 }
             }
+            .sheet(item: $selectedGame) { game in
+                GameAccessPackagesSheet(game: game, appModel: appModel)
+            }
+            .onChange(of: appModel.authenticationFlowID) { _, _ in selectedGame = nil }
+            .onChange(of: appModel.session?.id) { _, _ in selectedGame = nil }
             .sheet(isPresented: $isShowingSettings) {
                 SettingsView(appModel: appModel, snapshot: snapshot)
             }
@@ -249,6 +256,8 @@ struct AccountView: View {
                     CharacterRepairView(appModel: appModel)
                 case .eventCalendar:
                     EventCalendarView()
+                case .referrals:
+                    ReferralRewardsView(appModel: appModel)
                 }
             }
             .alert("Account Total Value", isPresented: $isShowingAccountTotalValueExplanation) {
@@ -1060,6 +1069,7 @@ private struct AccountProfileCard: View {
     let avatarURL: URL?
     let backgroundImageURL: URL?
     let gameAccess: RSIGameAccessSummary?
+    let onSelectGame: (RSIGame) -> Void
     let reloadToken: UUID?
     let onExplainTotalValue: () -> Void
     let onShowConciergeLevels: () -> Void
@@ -1076,7 +1086,7 @@ private struct AccountProfileCard: View {
                 .frame(height: 1)
                 .accessibilityHidden(true)
 
-            AccountGameAccessView(summary: gameAccess)
+            AccountGameAccessView(summary: gameAccess, onSelectGame: onSelectGame)
         }
         .background(Color(uiColor: .systemBackground))
         .clipShape(cardShape)

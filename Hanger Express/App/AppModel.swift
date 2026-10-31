@@ -63,8 +63,10 @@ enum SyncPreferences {
     }
 
     static let workerCountKey = "sync.workerCount"
+    static let workerCountWasCustomizedKey = "sync.workerCount.wasCustomized"
     static let inventoryAutoRefreshIntervalKey = "sync.inventoryAutoRefreshInterval"
     static let defaultWorkerCount = ProSubscriptionConfiguration.standardRefreshWorkerLimit
+    static let earlyAccessDefaultWorkerCount = 5
     static let defaultInventoryAutoRefreshInterval = InventoryAutoRefreshInterval.sevenDays
     static let minWorkerCount = 1
     static let maxWorkerCount = ProSubscriptionConfiguration.proRefreshWorkerLimit
@@ -78,6 +80,20 @@ enum SyncPreferences {
             max(count, minWorkerCount),
             maxWorkerCount(isPro: isPro)
         )
+    }
+
+    static func resolvedWorkerCount(
+        configuredCount: Int,
+        isPro: Bool,
+        wasCustomized: Bool
+    ) -> Int {
+        // Older settings screens saved the former default of two on appearance.
+        let usesDefault = configuredCount <= 0
+            || (!wasCustomized && configuredCount == defaultWorkerCount)
+        let preferredCount = usesDefault
+            ? (isPro ? earlyAccessDefaultWorkerCount : defaultWorkerCount)
+            : configuredCount
+        return constrainedWorkerCount(preferredCount, isPro: isPro)
     }
 
     static func resolvedInventoryAutoRefreshInterval(
@@ -824,6 +840,15 @@ final class AppModel {
     private static let itemTranslationPreloadMaximumLogEntries = 80
     private static let itemTranslationPendingPreloadLanguageDefaultsKey = "hangar.itemTranslation.pendingPreloadLanguage"
     private static let versionUpdateNoteKeysByShortVersion: [String: [String]] = [
+        "1.1.1": [
+            "Upgrade target selection and confirmation now have Chinese text and show available Hangar item translations.",
+            "Early Access refresh now defaults to five parallel workers; Standard stays at two.",
+            "Gift and Apply Upgrade are available again for eligible Hangar pledges after RSI's page update.",
+            "The CCU calculator is easier to use, with clearer ship choices and expandable cost details.",
+            "Idris-M no longer appears in the CCU calculator because it cannot be upgraded.",
+            "Early Access: browse referral reward pictures in Tools, switch between the new and legacy ladders, and tap reached rewards to see matching Hangar items.",
+            "Tap Star Citizen or Squadron 42 on your profile to see which Hangar packages include game access."
+        ],
         "1.1.0": [
             "Your profile now shows your access to Star Citizen and Squadron 42.",
             "Hide the keyboard without losing your search results. Tap the search box to type again, or tap X to close search.",

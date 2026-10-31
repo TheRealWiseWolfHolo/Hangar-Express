@@ -78,3 +78,19 @@ latest buffered result applies after refresh and the interaction cooldown finish
 “Show loaded log entries” can apply it explicitly. Lowering the keyboard preserves
 the query and ends editing; closing search clears it. The only delay task is a
 one-shot interaction cooldown, canceled when the view disappears.
+
+## Game-access package popup
+
+Both Account game tiles open a read-only sheet, including when dimmed. The sheet
+uses the current account's immutable inventory presentation to list individual
+pledges and the explicit game-license contents that matched. The background builder
+computes these matches once per inventory revision; opening the sheet never fetches
+RSI entitlements. Account access colors/status still come from Account Refresh.
+
+Matching uses explicit game/download/access items, not package marketing names or
+ship names. Ambiguous merchandise and generic download labels do not grant matches;
+reclaimed/gifted/cancelled pledges are excluded. A shared license item can match both
+games. Each pledge copy keeps its own ID. A confirmed account entitlement without
+a matching saved package gets an honest empty state, rather than an invented source.
+Account/authentication-context changes dismiss the sheet; inventory and language
+changes update its contents using existing app mechanisms.

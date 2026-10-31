@@ -1199,7 +1199,8 @@ nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
     }
 
     var canApplyStoredUpgrade: Bool {
-        isOwnedUpgradeItem
+        // RSI can expose the Apply upgrade action without usable upgrade metadata.
+        isOwnedUpgradeItem || (canUpgrade && isUpgradeOnlyPledge)
     }
 
     var isUpgradeOnlyPledge: Bool {

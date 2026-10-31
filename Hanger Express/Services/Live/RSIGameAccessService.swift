@@ -1,8 +1,10 @@
 import Foundation
 
-nonisolated enum RSIGame: String, CaseIterable, Sendable {
+nonisolated enum RSIGame: String, CaseIterable, Identifiable, Sendable {
     case starCitizen
     case squadron42
+
+    var id: String { rawValue }
 
     var title: String {
         switch self {

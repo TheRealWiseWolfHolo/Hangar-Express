@@ -1183,6 +1183,11 @@ public nonisolated enum HostedShipFeedEndpoints {
         limitedShipSaleURLs(configuration: .live)
     }
 
+    static var referralRewardsURLs: [URL] {
+        guard let base = RemoteServiceConfiguration.live.referralRewardsBaseURL else { return [] }
+        return [base.appendingPathComponent("referral-rewards.json")]
+    }
+
     public static var eventCalendarURLs: [URL] {
         eventCalendarURLs(configuration: .live)
     }

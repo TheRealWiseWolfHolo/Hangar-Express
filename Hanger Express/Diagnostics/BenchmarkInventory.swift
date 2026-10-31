@@ -27,6 +27,22 @@ nonisolated enum BenchmarkInventory {
         let catalog = RSIShipCatalog(ships: ships)
         let offset = accountIndex * 100_000
         let packages = (0..<pledgeCount).map { index -> HangarPackage in
+            if ReferralRewardsBenchmark.enabled {
+                let title: String?
+                switch index {
+                case 0: title = "CDS GCD-Army Medium Armor Set - Referral Reward"
+                case 1: title = "Gladius Dunlevy Model - Referral Reward"
+                case 2: title = "Gear - Gladius Dunlevy Model - Referral Reward"
+                default: title = nil
+                }
+                if let title {
+                    return HangarPackage(id: offset + index + 1, title: title, status: "Attributed - Account Bound",
+                        insurance: "", acquiredAt: referenceDate, originalValueUSD: 0, currentValueUSD: 0,
+                        canGift: false, canReclaim: false, canUpgrade: false,
+                        contents: [PackageItem(id: "referral-\(index)", title: index == 0 ? "GCD-Army Helmet" : "Gladius Dunlevy Model",
+                            detail: "Referral reward", category: .flair, imageURL: nil, upgradePricing: nil)])
+                }
+            }
             // One quarter unique, the remaining entries share stable templates.
             let template = index % 4 == 0 ? 1_000 + index : index % 100
             let source = template % 60
@@ -89,7 +105,8 @@ nonisolated enum BenchmarkInventory {
         let snapshot = HangarSnapshot(
             accountHandle: "benchmark-account-\(accountIndex)", lastSyncedAt: referenceDate,
             storeCreditUSD: 500, totalSpendUSD: 1_000,
-            packages: packages, fleet: fleet, buyback: buyback
+            packages: packages, fleet: fleet, buyback: buyback,
+            referralStats: ReferralRewardsBenchmark.enabled ? ReferralStats(currentLadderCount: 9, legacyLadderCount: nil, hasLegacyLadder: false) : .unavailable
         )
         let session = UserSession(
             id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", accountIndex + 1))!,

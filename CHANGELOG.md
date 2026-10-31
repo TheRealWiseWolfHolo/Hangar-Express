@@ -1,6 +1,48 @@
 # Changelog
 
-## v1.1.0 (In Progress)
+## v1.1.1 (In Progress)
+
+### English
+
+- Upgrade target selection and confirmation now have Chinese text and show available Hangar item translations.
+
+- Early Access now defaults to five parallel refresh workers; Standard remains at two, and custom worker choices remain available.
+
+- Restored Gift and Apply Upgrade actions for eligible Hangar pledges after RSI changed its gift controls and gifting API.
+
+- Simplified the CCU calculator with clearer ship choices, a compact savings summary, expandable cost and step details, and a visible way to exclude a CCU.
+
+- Removed Idris-M from the CCU calculator's ship choices because it cannot be upgraded.
+
+- Referrals is now marked as an Early Access tool and listed on the Early Access page, using the same member access rules as WBCCU Deals.
+
+- Tap reached referral rewards to open the matching saved Hangar item using the same detail page as Hangar. If several entries match, choose one; missing rewards show a refresh message.
+
+- Browse referral rewards with pictures in Account → Tools. Switch between the new and legacy ladders and see saved referral progress; accounts without the legacy ladder can still browse its rewards.
+
+- Tap either game-access indicator on your profile to see the saved Hangar packages that include that game, with pledge numbers and matching contents.
+
+### 简体中文
+
+- 升级目标选择和确认页面现已补齐中文界面文字，并在有译名时显示机库物品的中文名称。
+
+- 抢先体验现在默认使用 5 个并行刷新任务；标准版仍为 2 个，且仍可自行调整并发数。
+
+- 适配 RSI 更新后的赠送按钮及接口，恢复符合条件的机库物品的“赠送”和“应用升级”操作。
+
+- CCU 计算器现采用更清晰的舰船选项和简洁的节省金额摘要，费用与步骤详情可按需展开，并可直接排除 CCU。
+
+- Idris-M 无法升级，现已从 CCU 计算器的舰船选项中移除。
+
+- 推荐工具现已标注为抢先体验功能，并加入抢先体验页面，与 WBCCU 优惠使用相同的会员访问规则。
+
+- 轻点已达到的推荐奖励，打开机库中对应物品的详情页。多个匹配条目可供选择；未找到对应奖励时会提示刷新机库。
+
+- 在账户工具中浏览推荐奖励图片、切换新旧阶梯，并查看已保存的推荐进度。无法参与旧阶梯的账户仍可浏览其奖励。
+
+- 轻点个人资料中的游戏权限标识，即可查看包含对应游戏的机库组合包、商品编号和匹配的内容。
+
+## v1.1.0 (Released)
 
 ### English
 

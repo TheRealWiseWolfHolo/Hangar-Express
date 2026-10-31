@@ -44,6 +44,43 @@ struct InventoryCPUWorkerTests {
         #expect(parsed.items.count == 10)
     }
 
+    @Test func currentPledgeActionsKeepGiftAndStoredUpgradeAvailable() throws {
+        let html = """
+        <html><head><title>My Hangar</title></head><body><div class="list-items">
+          <div class="row">
+            <input class="js-pledge-id" value="101">
+            <input class="js-pledge-name" value="Upgrade - Gladius to Hawk">
+            <div class="items-col"><div class="item"><span class="title">Upgrade - Gladius to Hawk</span></div></div>
+            <a class="js-gift-v2 gift">Gift</a>
+            <a class="js-apply-upgrade">Apply upgrade</a>
+          </div>
+          <div class="row">
+            <input class="js-pledge-id" value="102">
+            <input class="js-pledge-name" value="Standalone Ship - Gladius">
+            <div class="items-col"><div class="item"><span class="title">Gladius</span></div></div>
+            <a class="js-gift gift">Gift</a>
+            <a class="js-apply-upgrade">Apply upgrade</a>
+          </div>
+        </div></body></html>
+        """
+        let url = URL(string: "https://robertsspaceindustries.com/en/account/pledges?page=1")!
+        let page = try RSIAccountHTMLParser.parsePledgePage(
+            html: html, pageURL: url, requestedURL: url, statusCode: 200, cookieCount: 0
+        )
+        #expect(page.items.count == 2)
+        #expect(page.items[0].canGift)
+        #expect(page.items[0].canUpgrade)
+        #expect(page.items[1].canGift)
+        #expect(page.items[1].canUpgrade)
+
+        let inventory = try HangarInventoryNormalizationEngine().hangar(page.items, catalog: nil)
+        let upgrade = try #require(inventory.packages.first { $0.id == 101 })
+        let ship = try #require(inventory.packages.first { $0.id == 102 })
+        #expect(upgrade.upgradeMetadata == nil)
+        #expect(upgrade.canApplyStoredUpgrade)
+        #expect(!ship.canApplyStoredUpgrade)
+    }
+
     @Test func translationCacheReadinessLoadsInBackgroundAndClearFencesOldDiskResult() async throws {
         let arrived = TestGate(), release = TestGate()
         defer { Task { await release.open() } }
