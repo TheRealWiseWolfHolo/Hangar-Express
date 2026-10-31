@@ -8,6 +8,7 @@ struct AccountView: View {
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @AppStorage(DisplayPreferences.earlyAccessBadgeKey) private var showsEarlyAccessBadge = DisplayPreferences.earlyAccessBadgeEnabledByDefault
     @AppStorage("wbccuDeals.betaDisclaimerAcknowledged") private var hasAcknowledgedWBCCUDisclaimer = false
+    @State private var selectedGame: RSIGame?
     @State private var isShowingSettings = false
     @State private var isShowingBackgroundPicker = false
     @State private var isShowingAccountTotalValueExplanation = false
@@ -17,6 +18,7 @@ struct AccountView: View {
     @State private var isOverviewSavedLoginVisible = false
     @State private var presentedTool: FleetTool?
     @State private var isShowingWBCCUDisclaimer = false
+    @State private var isShowingEarlyAccessPlans = false
     @State private var isToolReordering = false
     @State private var isLoadingReferralInviteCode = false
     @State private var copiedReferralInviteCode = false
@@ -35,6 +37,8 @@ struct AccountView: View {
                         proBadgeKind: proBadgeKind,
                         avatarURL: profileAvatarURL,
                         backgroundImageURL: profileBackgroundImageURL,
+                        gameAccess: snapshot.gameAccess,
+                        onSelectGame: { selectedGame = $0 },
                         reloadToken: appModel.accountImageReloadToken,
                         onExplainTotalValue: {
                             isShowingAccountTotalValueExplanation = true
@@ -46,11 +50,23 @@ struct AccountView: View {
                             isShowingBackgroundPicker = true
                         }
                     )
-                    .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+                    .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 0, trailing: 0))
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                 } header: {
                     Text("Profile")
+                }
+                .listSectionSpacing(.custom(0))
+
+                if appModel.requiresMutationReview {
+                    Section("Review Previous Action") {
+                        Text("The previous action may have reached RSI. Refresh, then review your hangar, cart, or devices on RSI before allowing another action.")
+                        Button("Refresh for Review") { Task { await appModel.refresh(scope: .full) } }
+                            .disabled(appModel.isRefreshing)
+                        Link("Review RSI Account", destination: URL(string: "https://robertsspaceindustries.com/en/account/pledges")!)
+                        Button("I Reviewed RSI — Allow New Actions") { appModel.acknowledgeMutationReview() }
+                            .disabled(!appModel.canAcknowledgeMutationReview)
+                    }
                 }
 
                 Section {
@@ -149,10 +165,30 @@ struct AccountView: View {
                         Text(appModel.isRefreshing(.full) ? LocalizedStringKey("Refreshing Everything...") : LocalizedStringKey("Full Refresh"))
                     }
                     .disabled(appModel.isRefreshing)
+
+                    ForEach(SnapshotSection.allCases, id: \.self) { section in
+                        HStack {
+                            Text(section.title)
+                            Spacer()
+                            let state = snapshot.sections[section]
+                            if state.failedAt != nil {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                    .accessibilityLabel("Refresh failed")
+                            }
+                            if let refreshedAt = state.refreshedAt {
+                                Text(refreshedAt, format: .dateTime.month().day().hour().minute())
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text("Not refreshed").foregroundStyle(.secondary)
+                            }
+                        }
+                        .font(.caption)
+                    }
                 } header: {
                     Text("Sync")
                 } footer: {
-                    Text("Refresh Account updates balances, referral data, and profile metadata. Full Refresh also reloads hangar, fleet, and buy-back data.")
+                    Text("Refresh Account updates balances, referral data, profile metadata, and game access. Full Refresh also reloads hangar, fleet, and buy-back data.")
                 }
             }
             .scrollDisabled(isToolReordering)
@@ -168,6 +204,11 @@ struct AccountView: View {
                     .accessibilityLabel("Open Settings")
                 }
             }
+            .sheet(item: $selectedGame) { game in
+                GameAccessPackagesSheet(game: game, appModel: appModel)
+            }
+            .onChange(of: appModel.authenticationFlowID) { _, _ in selectedGame = nil }
+            .onChange(of: appModel.session?.id) { _, _ in selectedGame = nil }
             .sheet(isPresented: $isShowingSettings) {
                 SettingsView(appModel: appModel, snapshot: snapshot)
             }
@@ -184,6 +225,13 @@ struct AccountView: View {
                     currentLevel: conciergeLevel,
                     totalSpendUSD: snapshot.metrics.totalSpendUSD
                 )
+            }
+            .sheet(isPresented: $isShowingEarlyAccessPlans) {
+                ProPlansSheet(
+                    subscriptionStore: appModel.subscriptionStore,
+                    showsEarlyAccessBadge: $showsEarlyAccessBadge
+                )
+                .presentationDetents([.medium, .large])
             }
             .sheet(item: $presentedTool) { tool in
                 switch tool {
@@ -208,6 +256,8 @@ struct AccountView: View {
                     CharacterRepairView(appModel: appModel)
                 case .eventCalendar:
                     EventCalendarView()
+                case .referrals:
+                    ReferralRewardsView(appModel: appModel)
                 }
             }
             .alert("Account Total Value", isPresented: $isShowingAccountTotalValueExplanation) {
@@ -220,7 +270,7 @@ struct AccountView: View {
             } message: {
                 Text(referralInviteCopyErrorMessage ?? "")
             }
-            .alert("WBCCU Deals Beta", isPresented: $isShowingWBCCUDisclaimer) {
+            .alert("WBCCU Deals Notice", isPresented: $isShowingWBCCUDisclaimer) {
                 Button("Cancel", role: .cancel) {}
                 Button("Continue") {
                     hasAcknowledgedWBCCUDisclaimer = true
@@ -237,6 +287,11 @@ struct AccountView: View {
 
     private func handleToolSelection(_ tool: FleetTool) {
         guard tool.isAvailable else {
+            return
+        }
+
+        guard !tool.requiresEarlyAccess || appModel.isPro else {
+            isShowingEarlyAccessPlans = true
             return
         }
 
@@ -525,14 +580,23 @@ private struct CharacterRepairView: View {
     @State private var isRequesting = false
     @State private var errorMessage: String?
     @State private var successMessage: String?
+    @State private var repairReason = ""
+    @State private var issueCouncilURL = ""
+    @State private var cooldownClock = Date.now
 
-    private var hasSavedPassword: Bool {
-        let password = appModel.session?.credentials?.password.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return !password.isEmpty
+    private let reasonMaximumLength = 1_024
+
+    private var normalizedReason: String {
+        repairReason.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var canRequestRepair: Bool {
-        appModel.session != nil && hasSavedPassword && !appModel.isRefreshing && !isRequesting
+        appModel.session != nil
+            && appModel.session?.isReadOnly == false
+            && normalizedReason.count <= reasonMaximumLength
+            && appModel.characterRepairCooldownRemainingSeconds(at: cooldownClock) == 0
+            && !appModel.isRefreshing
+            && !isRequesting
     }
 
     private var accountDisplayName: String {
@@ -558,12 +622,27 @@ private struct CharacterRepairView: View {
             return AppLocalizer.string("Sign in to RSI before requesting a character repair.")
         }
 
-        if !hasSavedPassword {
-            return AppLocalizer.string("Sign in again with saved credentials before Hangar Express can submit a character repair request.")
+        if appModel.session?.isReadOnly == true {
+            return AppLocalizer.string("Character repair is unavailable for read-only accounts.")
         }
 
         if appModel.isRefreshing {
             return AppLocalizer.string("Wait for the current refresh or account action to finish before requesting a character repair.")
+        }
+
+        if normalizedReason.count > reasonMaximumLength {
+            return AppLocalizer.format("Keep the repair reason under %lld characters.", reasonMaximumLength)
+        }
+
+        let cooldownRemaining = appModel.characterRepairCooldownRemainingSeconds(at: cooldownClock)
+        if cooldownRemaining > 0 {
+            let minutes = cooldownRemaining / 60
+            let seconds = cooldownRemaining % 60
+            return AppLocalizer.format(
+                "Character Repair is available again in %lld:%02lld.",
+                minutes,
+                seconds
+            )
         }
 
         return AppLocalizer.string("Face ID or passcode verification is required before the request is sent.")
@@ -638,6 +717,38 @@ private struct CharacterRepairView: View {
                     }
 
                     Section {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(AppLocalizer.string("Why do you need to repair your account? (optional)"))
+                                .font(.subheadline.weight(.semibold))
+
+                            TextEditor(text: $repairReason)
+                                .frame(minHeight: 100)
+                                .scrollContentBackground(.hidden)
+                                .padding(8)
+                                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+
+                            HStack {
+                                Text(AppLocalizer.string("If left blank, Hangar Express will send a general character-broken reason."))
+                                Spacer()
+                                Text("\(repairReason.count.formatted()) / \(reasonMaximumLength.formatted())")
+                                    .foregroundStyle(repairReason.count > reasonMaximumLength ? .red : .secondary)
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+
+                        TextField(
+                            AppLocalizer.string("Issue Council URL (optional)"),
+                            text: $issueCouncilURL
+                        )
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    } footer: {
+                        Text(AppLocalizer.string("A Character Repair can only be requested once every hour."))
+                    }
+
+                    Section {
                         Button(role: .destructive) {
                             Task {
                                 await requestRepair()
@@ -682,6 +793,12 @@ private struct CharacterRepairView: View {
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
         .interactiveDismissDisabled(isRequesting)
+        .task {
+            while !Task.isCancelled {
+                cooldownClock = .now
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
     }
 
     private var errorAlertBinding: Binding<Bool> {
@@ -706,8 +823,11 @@ private struct CharacterRepairView: View {
         }
 
         do {
-            try await appModel.requestCharacterRepair()
-            successMessage = AppLocalizer.string("Your character has been reset")
+            try await appModel.requestCharacterRepair(
+                reason: repairReason,
+                issueCouncilURL: issueCouncilURL
+            )
+            successMessage = AppLocalizer.string("Your character repair request was submitted")
         } catch let error as SensitiveActionAuthorizationError where error.isCancellation {
             return
         } catch {
@@ -948,6 +1068,8 @@ private struct AccountProfileCard: View {
     let proBadgeKind: AccountProBadgeKind?
     let avatarURL: URL?
     let backgroundImageURL: URL?
+    let gameAccess: RSIGameAccessSummary?
+    let onSelectGame: (RSIGame) -> Void
     let reloadToken: UUID?
     let onExplainTotalValue: () -> Void
     let onShowConciergeLevels: () -> Void
@@ -956,37 +1078,37 @@ private struct AccountProfileCard: View {
     private let cardShape = RoundedRectangle(cornerRadius: 24, style: .continuous)
 
     var body: some View {
+        VStack(spacing: 0) {
+            profileBanner
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.12))
+                .frame(height: 1)
+                .accessibilityHidden(true)
+
+            AccountGameAccessView(summary: gameAccess, onSelectGame: onSelectGame)
+        }
+        .background(Color(uiColor: .systemBackground))
+        .clipShape(cardShape)
+        .overlay {
+            cardShape.strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+        }
+        .overlay(alignment: .topLeading) {
+            ProfileAvatarView(
+                avatarURL: avatarURL,
+                displayName: displayName,
+                reloadToken: reloadToken
+            )
+            .offset(x: 18, y: -18)
+        }
+        .padding(.top, 18)
+        .padding(.vertical, 4)
+    }
+
+    private var profileBanner: some View {
         ZStack(alignment: .topLeading) {
-            cardShape
+            Rectangle()
                 .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.12, green: 0.32, blue: 0.46),
-                            Color(red: 0.07, green: 0.16, blue: 0.26)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .overlay {
-                    if let backgroundImageURL {
-                        CachedRemoteImage(url: backgroundImageURL, reloadToken: reloadToken) { phase in
-                            switch phase {
-                            case let .success(image):
-                                image
-                                    .resizable()
-                                    .scaledToFill()
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                    .clipped()
-                            case .empty, .failure:
-                                profileCardFallbackDecoration
-                            }
-                        }
-                    } else {
-                        profileCardFallbackDecoration
-                    }
-                }
-                .overlay {
                     LinearGradient(
                         colors: [
                             Color.black.opacity(0.84),
@@ -998,18 +1120,7 @@ private struct AccountProfileCard: View {
                         startPoint: .leading,
                         endPoint: .trailing
                     )
-                }
-                .overlay(alignment: .topTrailing) {
-                    if let onChangeBackground {
-                        ProfileCardActionButton(
-                            systemName: "photo.on.rectangle.angled",
-                            action: onChangeBackground
-                        )
-                        .padding(.top, 16)
-                        .padding(.trailing, 16)
-                    }
-                }
-                .clipShape(cardShape)
+                )
 
             VStack(alignment: .leading, spacing: 10) {
                 Spacer(minLength: 52)
@@ -1040,17 +1151,16 @@ private struct AccountProfileCard: View {
             .frame(maxWidth: .infinity, minHeight: 150, alignment: .bottomLeading)
             .padding(18)
         }
-        .overlay(alignment: .topLeading) {
-            ProfileAvatarView(
-                avatarURL: avatarURL,
-                displayName: displayName,
-                reloadToken: reloadToken
-            )
-            .offset(x: 18, y: -18)
-        }
-        .overlay {
-            cardShape
-                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+        .background { profileArtwork }
+        .overlay(alignment: .topTrailing) {
+            if let onChangeBackground {
+                ProfileCardActionButton(
+                    systemName: "photo.on.rectangle.angled",
+                    action: onChangeBackground
+                )
+                .padding(.top, 16)
+                .padding(.trailing, 16)
+            }
         }
         .overlay(alignment: .bottomTrailing) {
             if let conciergeLevel {
@@ -1062,8 +1172,39 @@ private struct AccountProfileCard: View {
                 .padding(.bottom, 18)
             }
         }
-        .padding(.top, 18)
-        .padding(.vertical, 4)
+    }
+
+    private var profileArtwork: some View {
+        Rectangle()
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.12, green: 0.32, blue: 0.46),
+                        Color(red: 0.07, green: 0.16, blue: 0.26)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .overlay {
+                if let backgroundImageURL {
+                    CachedRemoteImage(url: backgroundImageURL, reloadToken: reloadToken) { phase in
+                        switch phase {
+                        case let .success(image):
+                            image
+                                .resizable()
+                                .scaledToFill()
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .clipped()
+                        case .empty, .failure:
+                            profileCardFallbackDecoration
+                        }
+                    }
+                } else {
+                    profileCardFallbackDecoration
+                }
+            }
+            .clipped()
     }
 
     private var profileCardFallbackDecoration: some View {
@@ -1092,98 +1233,31 @@ private enum AccountProBadgeKind {
 private struct AccountProBadge: View {
     let kind: AccountProBadgeKind
 
+    private let gold = Color(red: 0.92, green: 0.78, blue: 0.32)
+
     var body: some View {
-        HStack(alignment: .center, spacing: 3) {
-            VStack(alignment: .leading, spacing: -1) {
-                Text(verbatim: "Early")
-                Text(verbatim: "Access")
-            }
-            .font(.system(size: 8.5, weight: .heavy, design: .rounded))
-            .lineLimit(1)
+        HStack(spacing: 5) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 10, weight: .bold))
 
-            if kind == .proPlus {
-                Text("+")
-                    .font(.system(size: 18, weight: .black, design: .rounded))
-                    .baselineOffset(0.5)
-            }
+            Text(verbatim: "Early Access")
+                .font(.system(size: 9, weight: .heavy, design: .rounded))
+                .lineLimit(1)
         }
-        .foregroundStyle(textColor)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(backgroundGradient)
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .stroke(borderGradient, lineWidth: 1)
-            )
-            .shadow(color: shadowColor, radius: 8, y: 3)
+        .foregroundStyle(gold)
+        .padding(.horizontal, 8)
+        .frame(height: 30)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.black.opacity(0.72))
+        )
+        .overlay {
+            Capsule(style: .continuous)
+                .strokeBorder(gold.opacity(0.34), lineWidth: 1)
+        }
+        .shadow(color: Color.black.opacity(0.22), radius: 5, y: 2)
+        .accessibilityElement(children: .ignore)
             .accessibilityLabel(kind.accessibilityLabel)
-    }
-
-    private var textColor: Color {
-        switch kind {
-        case .pro:
-            return Color(red: 0.96, green: 0.94, blue: 0.86)
-        case .proPlus:
-            return Color(red: 0.92, green: 0.78, blue: 0.32)
-        }
-    }
-
-    private var backgroundGradient: LinearGradient {
-        switch kind {
-        case .pro:
-            return LinearGradient(
-                colors: [
-                    Color(red: 0.16, green: 0.18, blue: 0.22).opacity(0.96),
-                    Color(red: 0.38, green: 0.36, blue: 0.29).opacity(0.9)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        case .proPlus:
-            return LinearGradient(
-                colors: [
-                    Color.black.opacity(0.72),
-                    Color.black.opacity(0.46)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        }
-    }
-
-    private var borderGradient: LinearGradient {
-        switch kind {
-        case .pro:
-            return LinearGradient(
-                colors: [
-                    Color.white.opacity(0.34),
-                    Color(red: 0.95, green: 0.78, blue: 0.38).opacity(0.24)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        case .proPlus:
-            return LinearGradient(
-                colors: [
-                    Color(red: 0.92, green: 0.78, blue: 0.32).opacity(0.42),
-                    Color(red: 0.92, green: 0.78, blue: 0.32).opacity(0.16)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        }
-    }
-
-    private var shadowColor: Color {
-        switch kind {
-        case .pro:
-            return Color.black.opacity(0.24)
-        case .proPlus:
-            return Color.black.opacity(0.32)
-        }
     }
 }
 
@@ -1707,6 +1781,361 @@ private struct AuthorizedDevicesView: View {
 
     @Environment(\.dismiss) private var dismiss
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
+    @FocusState private var isVerificationCodeFocused: Bool
+    @State private var devices: [AuthorizedDevice] = []
+    @State private var verificationCode = ""
+    @State private var hasRequestedCode = false
+    @State private var isVerified = false
+    @State private var isLoading = false
+    @State private var mutatingDeviceID: String?
+    @State private var pendingRemoval: AuthorizedDevice?
+    @State private var errorMessage: String?
+    @State private var successMessage: String?
+
+    private var normalizedVerificationCode: String {
+        AuthorizedDevicesVerification.normalizedCode(verificationCode)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if isVerified {
+                    deviceList
+                } else if isLoading && !hasRequestedCode {
+                    AuthorizedDevicesLoadingView()
+                } else {
+                    verificationView
+                }
+            }
+            .id(appLanguageRawValue)
+            .navigationTitle(AppLocalizer.string("Logged In Devices"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if isVerified {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Refresh") {
+                            Task {
+                                await loadDevices()
+                            }
+                        }
+                        .disabled(isLoading || mutatingDeviceID != nil)
+                    }
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+            .task {
+                await loadDevices()
+            }
+            .alert(
+                AppLocalizer.string("Remove Device?"),
+                isPresented: Binding(
+                    get: { pendingRemoval != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            pendingRemoval = nil
+                        }
+                    }
+                ),
+                presenting: pendingRemoval
+            ) { device in
+                Button("Cancel", role: .cancel) {
+                    pendingRemoval = nil
+                }
+
+                Button("Remove", role: .destructive) {
+                    Task {
+                        await remove(device)
+                    }
+                }
+            } message: { device in
+                Text(
+                    AppLocalizer.format(
+                        "Remove %@ from RSI's logged-in devices? If this is the session Hangar Express uses, the app will be signed out.",
+                        device.displayName
+                    )
+                )
+            }
+        }
+    }
+
+    private var verificationView: some View {
+        ScrollView {
+            VStack(spacing: 22) {
+                Image(systemName: "envelope.badge.shield.half.filled")
+                    .font(.system(size: 46, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 88, height: 88)
+                    .background(
+                        Circle()
+                            .fill(Color.accentColor.opacity(0.13))
+                    )
+
+                VStack(spacing: 8) {
+                    Text("Identity Verification")
+                        .font(.title2.bold())
+
+                    Text(
+                        hasRequestedCode
+                            ? "Enter the six-digit code RSI sent to your account email. The code expires after 10 minutes."
+                            : "RSI requires an email verification code before it will show your trusted devices. Everything stays inside Hangar Express."
+                    )
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                }
+
+                if hasRequestedCode {
+                    TextField("Verification Code", text: Binding(
+                        get: { verificationCode },
+                        set: { verificationCode = AuthorizedDevicesVerification.normalizedCode($0) }
+                    ))
+                    .textContentType(.oneTimeCode)
+                    .keyboardType(.numberPad)
+                    .multilineTextAlignment(.center)
+                    .font(.title2.monospaced().weight(.semibold))
+                    .focused($isVerificationCodeFocused)
+                    .padding(.vertical, 14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color(.secondarySystemGroupedBackground))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(Color.secondary.opacity(0.25))
+                    )
+                    .accessibilityLabel("RSI verification code")
+                }
+
+                if let errorMessage {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                VStack(spacing: 12) {
+                    if hasRequestedCode {
+                        Button {
+                            Task {
+                                await verifyCode()
+                            }
+                        } label: {
+                            HStack {
+                                if isLoading {
+                                    ProgressView()
+                                        .tint(.white)
+                                }
+                                Text("Confirm Code")
+                                    .font(.headline)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(
+                            isLoading ||
+                                normalizedVerificationCode.count != AuthorizedDevicesVerification.codeLength
+                        )
+                    }
+
+                    if hasRequestedCode {
+                        Button("Resend Code") {
+                            Task {
+                                await requestCode()
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isLoading)
+                    } else {
+                        Button("Send Verification Code") {
+                            Task {
+                                await requestCode()
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isLoading)
+                    }
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 36)
+            .frame(maxWidth: 560)
+            .frame(maxWidth: .infinity)
+        }
+        .scrollDismissesKeyboard(.interactively)
+    }
+
+    @ViewBuilder
+    private var deviceList: some View {
+        if isLoading && devices.isEmpty {
+            AuthorizedDevicesLoadingView()
+        } else if let errorMessage, devices.isEmpty {
+            AuthorizedDevicesErrorView(message: errorMessage) {
+                Task {
+                    await loadDevices()
+                }
+            }
+        } else if devices.isEmpty {
+            AuthorizedDevicesEmptyView()
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    Text("These are the devices and sessions currently trusted by RSI. Removing a device signs that session out.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 4)
+
+                    if let successMessage {
+                        Label(successMessage, systemImage: "checkmark.circle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(.green)
+                            .padding(.horizontal, 4)
+                    }
+
+                    if let errorMessage {
+                        Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .padding(.horizontal, 4)
+                    }
+
+                    ForEach(devices) { device in
+                        AuthorizedDeviceRow(
+                            device: device,
+                            isRemoving: mutatingDeviceID == device.id,
+                            allowsRemoval: !device.isCurrent,
+                            onRemove: {
+                                pendingRemoval = device
+                            }
+                        )
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 24)
+            }
+            .refreshable {
+                await loadDevices()
+            }
+        }
+    }
+
+    private func loadDevices() async {
+        guard !isLoading, mutatingDeviceID == nil else {
+            return
+        }
+
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            devices = try await appModel.fetchAuthorizedDevices()
+                .sorted(by: sortAuthorizedDevices)
+            errorMessage = nil
+            isVerified = true
+        } catch HangarAccountActionError.authorizedDevicesVerificationRequired {
+            devices = []
+            errorMessage = nil
+            isVerified = false
+        } catch {
+            errorMessage = error.localizedDescription
+            isVerified = false
+        }
+    }
+
+    private func requestCode() async {
+        guard !isLoading else {
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+
+        do {
+            try await appModel.requestAuthorizedDevicesVerificationCode()
+            hasRequestedCode = true
+            verificationCode = ""
+            isVerificationCodeFocused = true
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func verifyCode() async {
+        guard !isLoading,
+              normalizedVerificationCode.count == AuthorizedDevicesVerification.codeLength else {
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+
+        do {
+            devices = try await appModel.verifyAuthorizedDevices(code: normalizedVerificationCode)
+                .sorted(by: sortAuthorizedDevices)
+            verificationCode = ""
+            isVerificationCodeFocused = false
+            isVerified = true
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func remove(_ device: AuthorizedDevice) async {
+        guard mutatingDeviceID == nil else {
+            return
+        }
+
+        pendingRemoval = nil
+        mutatingDeviceID = device.id
+        errorMessage = nil
+        successMessage = nil
+
+        do {
+            try await appModel.removeAuthorizedDevice(device)
+            // Match RSI's client-side removal instead of immediately reloading a
+            // potentially stale page that can temporarily contain the deleted row.
+            devices.removeAll { $0.id == device.id }
+            successMessage = AppLocalizer.format("Removed %@ from logged-in devices.", device.displayName)
+            mutatingDeviceID = nil
+        } catch HangarAccountActionError.authorizedDevicesVerificationRequired {
+            mutatingDeviceID = nil
+            requireFreshVerification()
+        } catch {
+            mutatingDeviceID = nil
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func requireFreshVerification() {
+        isVerified = false
+        hasRequestedCode = false
+        verificationCode = ""
+        errorMessage = nil
+        successMessage = nil
+    }
+
+    private func sortAuthorizedDevices(lhs: AuthorizedDevice, rhs: AuthorizedDevice) -> Bool {
+        if lhs.isCurrent != rhs.isCurrent {
+            return lhs.isCurrent
+        }
+
+        return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+    }
+}
+
+private struct LegacyAuthorizedDevicesView: View {
+    let appModel: AppModel
+
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @State private var devices: [AuthorizedDevice] = []
     @State private var isLoading = false
     @State private var isRemoving = false
@@ -1963,6 +2392,7 @@ private struct AuthorizedDevicesView: View {
 private struct AuthorizedDeviceRow: View {
     let device: AuthorizedDevice
     let isRemoving: Bool
+    var allowsRemoval = true
     let onRemove: () -> Void
 
     var body: some View {
@@ -2014,20 +2444,27 @@ private struct AuthorizedDeviceRow: View {
 
             Spacer(minLength: 8)
 
-            if device.shouldProtectFromBulkRemoval {
-                Image(systemName: "lock.fill")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 4)
-            } else {
-                Button(role: .destructive, action: onRemove) {
-                    Image(systemName: "trash")
-                        .font(.headline)
+            HStack(spacing: 12) {
+                if isRemoving {
+                    ProgressView()
+                        .controlSize(.small)
                 }
-                .buttonStyle(.borderless)
-                .disabled(isRemoving)
-                .padding(.top, 2)
+
+                if !allowsRemoval || device.shouldProtectFromBulkRemoval {
+                    Image(systemName: "lock.fill")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Button(role: .destructive, action: onRemove) {
+                        Image(systemName: "trash")
+                            .font(.headline)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove Device")
+                    .disabled(isRemoving)
+                }
             }
+            .padding(.top, 2)
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)

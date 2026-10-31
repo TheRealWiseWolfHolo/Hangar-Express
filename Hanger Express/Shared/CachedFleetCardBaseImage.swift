@@ -103,6 +103,7 @@ struct CachedFleetCardBaseImage<Content: View>: View {
 
     @Environment(\.displayScale) private var displayScale
     @State private var phase: CachedRemoteImagePhase = .empty
+    @State private var displayedResourceID: String?
 
     init(
         recipe: FleetCardBaseSnapshotRecipe,
@@ -136,7 +137,11 @@ struct CachedFleetCardBaseImage<Content: View>: View {
             return
         }
 
-        phase = .empty
+        let resourceID = recipe.cachePayload + "|\(displayScale)"
+        if displayedResourceID != resourceID {
+            phase = .empty
+            displayedResourceID = resourceID
+        }
 
         do {
             let image = try await URLCachedImageStore.shared.fleetCardBaseImage(

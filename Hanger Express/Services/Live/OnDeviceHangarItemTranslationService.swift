@@ -66,7 +66,17 @@ private actor OneShotAsyncResult<Value: Sendable> {
 @MainActor
 @Observable
 final class OnDeviceHangarItemTranslationService {
-    static let shared = OnDeviceHangarItemTranslationService()
+    static let shared: OnDeviceHangarItemTranslationService = {
+        #if DEBUG || HANGAR_BENCHMARKS
+        if BenchmarkDashboardView.requestedSize != nil {
+            // Offline UI measurements must not load the user's translation cache.
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("BenchmarkTranslations-\(UUID().uuidString)", isDirectory: true)
+            return OnDeviceHangarItemTranslationService(directoryURL: directory)
+        }
+        #endif
+        return OnDeviceHangarItemTranslationService()
+    }()
 
     private let persistenceWriter: OnDeviceTranslationCachePersistenceWriter
     private var cachedTranslations: [CacheKey: String] = [:]
@@ -78,15 +88,18 @@ final class OnDeviceHangarItemTranslationService {
     private var persistenceEpoch = 0
     private var persistenceRevision = 0
     private(set) var cacheGeneration = 0
+    private(set) var isCacheReady = false
+    private var cacheLoadTask: Task<Void, Never>?
 
-    private static let cacheVersion = 1
+    private nonisolated static let cacheVersion = 1
     private static let batchSize = 16
     private static let concurrentSessionLimit = 2
     private static let modelAvailabilityTimeoutNanoseconds: UInt64 = 8_000_000_000
 
     init(
         fileManager: FileManager = .default,
-        directoryURL: URL? = nil
+        directoryURL: URL? = nil,
+        loadOperation: (@Sendable (URL) async -> PersistedTranslationCacheState)? = nil
     ) {
         let rootDirectoryURL = directoryURL ?? Self.defaultDirectoryURL(fileManager: fileManager)
         let cacheURL = rootDirectoryURL.appendingPathComponent("translations.json", isDirectory: false)
@@ -94,52 +107,41 @@ final class OnDeviceHangarItemTranslationService {
             directoryURL: rootDirectoryURL,
             cacheURL: cacheURL
         )
-        let persistedCache = Self.loadPersistedCache(from: cacheURL)
-        cachedTranslations = persistedCache.translations
-        preprocessedLocales = persistedCache.preprocessedLocales
-        preprocessedTranslationKeys = persistedCache.preprocessedTranslationKeys
+        let load = Task.detached(priority: .utility) {
+            if let loadOperation { return await loadOperation(cacheURL) }
+            return Self.loadPersistedCache(from: cacheURL)
+        }
+        let initialEpoch = persistenceEpoch
+        cacheLoadTask = Task { @MainActor [weak self] in
+            let state = await withTaskCancellationHandler(operation: { await load.value }, onCancel: { load.cancel() })
+            guard let self, !Task.isCancelled, self.persistenceEpoch == initialEpoch else { return }
+            self.cachedTranslations = state.translations.merging(self.cachedTranslations) { _, current in current }
+            self.preprocessedLocales.formUnion(state.preprocessedLocales)
+            self.preprocessedTranslationKeys.formUnion(state.preprocessedTranslationKeys)
+            self.isCacheReady = true
+            self.cacheLoadTask = nil
+            self.cacheGeneration &+= 1
+        }
     }
 
-    func displayText(
-        for source: String,
-        using itemTranslator: HangarItemTranslator
-    ) -> String {
-        let trimmedSource = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedSource.isEmpty else {
-            return source
-        }
+    func prepareCache() async {
+        await cacheLoadTask?.value
+    }
 
-        let strictTranslation = itemTranslator.translated(trimmedSource)
-        if strictTranslation != trimmedSource {
-            return strictTranslation
-        }
+    func searchContext(using itemTranslator: HangarItemTranslator) -> InventoryTranslationContext {
+        InventoryTranslationContext(translator: itemTranslator, translations: cachedTranslations)
+    }
 
-        guard itemTranslator.isEnabled,
-              let targetLocale = itemTranslator.language.translationLocaleIdentifier else {
-            return source
-        }
-
-        let cacheKey = CacheKey(
-            source: trimmedSource,
-            targetLocale: targetLocale,
-            dictionaryVersion: itemTranslator.dictionary?.version
-        )
-
-        if let cachedTranslation = cachedTranslations[cacheKey] {
-            return itemTranslator.normalizedMachineTranslationSpacing(
-                cachedTranslation,
-                source: trimmedSource
-            )
-        }
-
-        let protectedTermTranslation = itemTranslator.replacingProtectedTerms(in: trimmedSource)
-        return protectedTermTranslation == trimmedSource ? source : protectedTermTranslation
+    func displayText(for source: String, using itemTranslator: HangarItemTranslator) -> String {
+        searchContext(using: itemTranslator).displayText(source)
     }
 
     func onDemandDisplayText(
         for source: String,
         using itemTranslator: HangarItemTranslator
     ) async -> String {
+        await prepareCache()
+        let requestEpoch = persistenceEpoch
         let trimmedSource = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedSource.isEmpty else {
             return source
@@ -170,7 +172,7 @@ final class OnDeviceHangarItemTranslationService {
 
         let fallbackText = displayText(for: trimmedSource, using: itemTranslator)
         let modelStatus = await installedStatus(targetLocale: targetLocale)
-        guard modelStatus.isInstalled else {
+        guard requestEpoch == persistenceEpoch, !Task.isCancelled, modelStatus.isInstalled else {
             return fallbackText
         }
 
@@ -194,11 +196,12 @@ final class OnDeviceHangarItemTranslationService {
         }
 
         let translationResult = await translationTask.value
-        if didCreateTranslationTask {
+        if didCreateTranslationTask, requestEpoch == persistenceEpoch {
             inFlightOnDemandTranslationTasks[cacheKey] = nil
         }
 
-        guard let translatedText = translationResult?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard requestEpoch == persistenceEpoch, !Task.isCancelled,
+              let translatedText = translationResult?.trimmingCharacters(in: .whitespacesAndNewlines),
               !translatedText.isEmpty,
               translatedText != trimmedSource else {
             return fallbackText
@@ -382,6 +385,9 @@ final class OnDeviceHangarItemTranslationService {
         progressHandler: OnDeviceHangarItemTranslationPreloadProgressHandler? = nil,
         logHandler: OnDeviceHangarItemTranslationPreloadLogHandler? = nil
     ) async {
+        await prepareCache()
+        let requestEpoch = persistenceEpoch
+        guard !Task.isCancelled, requestEpoch == persistenceEpoch else { return }
         guard itemTranslator.isEnabled,
               let targetLocale = itemTranslator.language.translationLocaleIdentifier else {
             logHandler?("Strict dictionary unavailable or locale mismatch; cannot start on-device preload.")
@@ -405,7 +411,7 @@ final class OnDeviceHangarItemTranslationService {
             preprocessedTranslationKeys: preprocessedTranslationKeys,
             inFlightKeys: inFlightPreloadKeys
         )
-        guard !Task.isCancelled else {
+        guard !Task.isCancelled, requestEpoch == persistenceEpoch else {
             logHandler?("Preload task cancelled after pending source discovery.")
             return
         }
@@ -438,7 +444,7 @@ final class OnDeviceHangarItemTranslationService {
         logHandler?("Checking installed Translation model for en -> \(targetLocale).")
         let modelStatus = await installedStatus(targetLocale: targetLocale)
         logHandler?("Translation model status=\(modelStatus).")
-        guard !Task.isCancelled else {
+        guard !Task.isCancelled, requestEpoch == persistenceEpoch else {
             markPreloadFinished(for: pendingSources.map(\.key))
             logHandler?("Preload task cancelled after model availability check.")
             return
@@ -503,7 +509,7 @@ final class OnDeviceHangarItemTranslationService {
             }
 
             while let batchResult = await group.next() {
-                guard !Task.isCancelled else {
+                guard !Task.isCancelled, requestEpoch == persistenceEpoch else {
                     group.cancelAll()
                     markPreloadFinished(for: pendingSources.map(\.key))
                     logHandler?("Preload task cancelled while concurrent translation was running.")
@@ -563,6 +569,7 @@ final class OnDeviceHangarItemTranslationService {
     }
 
     func clear() async {
+        cacheLoadTask?.cancel(); isCacheReady = true
         for task in inFlightOnDemandTranslationTasks.values {
             task.cancel()
         }
@@ -579,6 +586,7 @@ final class OnDeviceHangarItemTranslationService {
     }
 
     func flushPersistedCache() async {
+        await prepareCache()
         guard persistenceRevision > 0 else {
             return
         }
@@ -944,7 +952,7 @@ final class OnDeviceHangarItemTranslationService {
         )
     }
 
-    private static func loadPersistedCache(from cacheURL: URL) -> PersistedTranslationCacheState {
+    private nonisolated static func loadPersistedCache(from cacheURL: URL) -> PersistedTranslationCacheState {
         guard let data = try? Data(contentsOf: cacheURL),
               let payload = try? JSONDecoder().decode(PersistedTranslationCache.self, from: data),
               payload.version == cacheVersion else {
@@ -1053,7 +1061,7 @@ private nonisolated struct PersistedTranslationCache: Codable, Sendable {
     let entries: [Entry]
 }
 
-private struct PersistedTranslationCacheState {
+nonisolated struct PersistedTranslationCacheState: Sendable {
     let translations: [CacheKey: String]
     let preprocessedLocales: Set<String>
     let preprocessedTranslationKeys: Set<CacheKey>

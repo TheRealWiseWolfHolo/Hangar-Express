@@ -5,7 +5,7 @@ set -eu
 MODE="${1:-repo}"
 
 forbidden_path_pattern='(^|/)(Packaging\.log|DistributionSummary\.plist|ExportOptions\.plist|embedded\.mobileprovision|.*\.ipa|.*\.mobileprovision|.*\.xcarchive(/.*)?)$'
-forbidden_content_pattern='X-Apple-GS-Token|DSESSIONID|-----BEGIN (RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----|BEGIN OPENSSH PRIVATE KEY|AuthKey_[A-Za-z0-9._-]+\.p8'
+forbidden_content_pattern='X-Apple-GS-Token|DSESSIONID|-----BEGIN (RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----|BEGIN OPENSSH PRIVATE KEY|AuthKey_[A-Za-z0-9._-]+\.p8|https://[A-Za-z0-9._-]+\.(workers|pages)\.dev'
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM
@@ -42,7 +42,7 @@ scan_repo() {
     exit 1
   fi
 
-  if git grep -n -I -e "$forbidden_content_pattern" -- . ':(exclude)scripts/check_repo_hygiene.sh' > "$tmpdir/forbidden-content.txt"; then
+  if git grep -n -I -E -e "$forbidden_content_pattern" -- . ':(exclude)scripts/check_repo_hygiene.sh' > "$tmpdir/forbidden-content.txt"; then
     printf '%s\n' 'Sensitive content markers detected in tracked files:' >&2
     cat "$tmpdir/forbidden-content.txt" >&2
     exit 1

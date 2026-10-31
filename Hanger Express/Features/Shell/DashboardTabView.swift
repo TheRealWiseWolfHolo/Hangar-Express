@@ -6,18 +6,25 @@ struct DashboardTabView: View {
     let snapshot: HangarSnapshot
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
     @State private var didCopyRefreshDebugReport = false
+    @State private var hasDynamicIsland = false
 
     private var appLanguage: AppLanguage {
         AppLanguage.resolved(from: appLanguageRawValue)
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            content(in: geometry)
-        }
+        content
+            .overlay {
+                if appModel.isPreparingInventoryPresentation && appModel.selectedTab != .account {
+                    ProgressView("Preparing inventory...")
+                        .padding(20)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .allowsHitTesting(false)
+                }
+            }
     }
 
-    private func content(in geometry: GeometryProxy) -> some View {
+    private var content: some View {
         TabView(selection: selection) {
             HangarDashboardView(appModel: appModel, snapshot: snapshot)
                 .tabItem {
@@ -52,10 +59,7 @@ struct DashboardTabView: View {
                 )
 
                 if let itemTranslationPreloadProgress = appModel.itemTranslationPreloadProgress {
-                    if shouldShowItemTranslationPreloadCard(
-                        for: itemTranslationPreloadProgress,
-                        in: geometry
-                    ) {
+                    if shouldShowItemTranslationPreloadCard(for: itemTranslationPreloadProgress) {
                         ItemTranslationPreloadProgressCard(
                             progress: itemTranslationPreloadProgress,
                             onDownloadModel: {
@@ -77,19 +81,34 @@ struct DashboardTabView: View {
         .animation(.snappy, value: appModel.itemTranslationPreloadProgress)
         .animation(.snappy, value: appModel.previewsTranslationLoadingBar)
         .overlay(alignment: .top) {
-            if let itemTranslationPreloadProgress = appModel.itemTranslationPreloadProgress,
-               itemTranslationPreloadProgress.prefersDynamicIslandProgress,
-               let metrics = DynamicIslandProgressMetrics(in: geometry) {
-                DynamicIslandTranslationProgressIndicator(
-                    progress: itemTranslationPreloadProgress,
-                    metrics: metrics
-                )
-                .transition(.opacity)
-            } else if appModel.previewsTranslationLoadingBar,
-                      let metrics = DynamicIslandProgressMetrics(in: geometry) {
-                DynamicIslandTranslationProgressPreview(metrics: metrics)
-                    .transition(.opacity)
+            GeometryReader { geometry in
+                let metrics = DynamicIslandProgressMetrics(in: geometry)
+
+                ZStack(alignment: .top) {
+                    Color.clear
+
+                    if let itemTranslationPreloadProgress = appModel.itemTranslationPreloadProgress,
+                       itemTranslationPreloadProgress.prefersDynamicIslandProgress,
+                       let metrics {
+                        DynamicIslandTranslationProgressIndicator(
+                            progress: itemTranslationPreloadProgress,
+                            metrics: metrics
+                        )
+                        .transition(.opacity)
+                    } else if appModel.previewsTranslationLoadingBar,
+                              let metrics {
+                        DynamicIslandTranslationProgressPreview(metrics: metrics)
+                            .transition(.opacity)
+                    }
+                }
+                .onAppear {
+                    hasDynamicIsland = metrics != nil
+                }
+                .onChange(of: metrics != nil) { _, isAvailable in
+                    hasDynamicIsland = isAvailable
+                }
             }
+            .allowsHitTesting(false)
         }
         .overlay {
             if let message = appModel.lastRefreshErrorMessage {
@@ -161,14 +180,13 @@ struct DashboardTabView: View {
     }
 
     private func shouldShowItemTranslationPreloadCard(
-        for progress: AppModel.ItemTranslationPreloadProgress,
-        in geometry: GeometryProxy
+        for progress: AppModel.ItemTranslationPreloadProgress
     ) -> Bool {
         guard progress.prefersDynamicIslandProgress else {
             return true
         }
 
-        return DynamicIslandProgressMetrics(in: geometry) == nil
+        return !hasDynamicIsland
     }
 
     private var selection: Binding<AppModel.Tab> {
@@ -821,6 +839,9 @@ enum RefreshDebugReportBuilder {
 
         var sections: [String] = [
             "Hangar Express Refresh Debug Report",
+            "Diagnostic Format: 2",
+            "Generated UTC: \(ISO8601DateFormatter().string(from: Date()))",
+            "Device time-zone offset seconds: \(TimeZone.current.secondsFromGMT())",
             "Generated: \(Date().formatted(date: .complete, time: .standard))",
             "App: \(appVersionIdentifier())",
             "Device: \(UIDevice.current.model)",

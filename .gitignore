@@ -37,3 +37,6 @@ embedded.mobileprovision
 !.env.example
 Config/Local.xcconfig
 server-local/
+
+# Local cloud tooling cache
+.wrangler/

@@ -13,6 +13,10 @@ struct AppEnvironment {
     let authDiagnostics: AuthenticationDiagnosticsStore
     let refreshDiagnostics: RefreshDiagnosticsStore
     let subscriptionStore: SubscriptionStore
+    let userDefaults: UserDefaults
+    let responseCache: URLCache
+    let shipCatalogStore: HostedShipCatalogStore
+    let shipDetailCatalogStore: HostedShipDetailCatalogStore
 
     init(
         sessionStore: any SessionStore,
@@ -25,7 +29,11 @@ struct AppEnvironment {
         authIPRegionChecker: any AuthenticationIPRegionChecking,
         authDiagnostics: AuthenticationDiagnosticsStore,
         refreshDiagnostics: RefreshDiagnosticsStore,
-        subscriptionStore: SubscriptionStore
+        subscriptionStore: SubscriptionStore,
+        userDefaults: UserDefaults = .standard,
+        responseCache: URLCache = .shared,
+        shipCatalogStore: HostedShipCatalogStore = .shared,
+        shipDetailCatalogStore: HostedShipDetailCatalogStore = .shared
     ) {
         self.sessionStore = sessionStore
         self.snapshotStore = snapshotStore
@@ -38,6 +46,10 @@ struct AppEnvironment {
         self.authDiagnostics = authDiagnostics
         self.refreshDiagnostics = refreshDiagnostics
         self.subscriptionStore = subscriptionStore
+        self.userDefaults = userDefaults
+        self.responseCache = responseCache
+        self.shipCatalogStore = shipCatalogStore
+        self.shipDetailCatalogStore = shipDetailCatalogStore
     }
 
     static var preview: AppEnvironment {

@@ -498,6 +498,8 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
     let buyback: [BuybackPledge]
     let hangarLogs: [HangarLogEntry]
     let referralStats: ReferralStats
+    let gameAccess: RSIGameAccessSummary?
+    let sections: SnapshotSectionStates
 
     init(
         accountHandle: String,
@@ -511,7 +513,9 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
         fleet: [FleetShip],
         buyback: [BuybackPledge],
         hangarLogs: [HangarLogEntry] = [],
-        referralStats: ReferralStats = .unavailable
+        referralStats: ReferralStats = .unavailable,
+        gameAccess: RSIGameAccessSummary? = nil,
+        sections: SnapshotSectionStates? = nil
     ) {
         self.accountHandle = accountHandle
         self.lastSyncedAt = lastSyncedAt
@@ -525,6 +529,8 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
         self.buyback = buyback
         self.hangarLogs = hangarLogs
         self.referralStats = referralStats
+        self.gameAccess = gameAccess
+        self.sections = sections ?? SnapshotSectionStates(legacyDate: lastSyncedAt)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -540,6 +546,8 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
         case buyback
         case hangarLogs
         case referralStats
+        case gameAccess
+        case sections
     }
 
     init(from decoder: Decoder) throws {
@@ -558,6 +566,8 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
         buyback = try container.decodeIfPresent([BuybackPledge].self, forKey: .buyback) ?? []
         hangarLogs = try container.decodeIfPresent([HangarLogEntry].self, forKey: .hangarLogs) ?? []
         referralStats = try container.decodeIfPresent(ReferralStats.self, forKey: .referralStats) ?? .unavailable
+        gameAccess = try container.decodeIfPresent(RSIGameAccessSummary.self, forKey: .gameAccess)
+        sections = try container.decodeIfPresent(SnapshotSectionStates.self, forKey: .sections) ?? SnapshotSectionStates(legacyDate: lastSyncedAt)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -574,6 +584,8 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
         try container.encode(buyback, forKey: .buyback)
         try container.encode(hangarLogs, forKey: .hangarLogs)
         try container.encode(referralStats, forKey: .referralStats)
+        try container.encodeIfPresent(gameAccess, forKey: .gameAccess)
+        try container.encode(sections, forKey: .sections)
     }
 
     func updatingHangar(
@@ -593,7 +605,9 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
             fleet: fleet,
             buyback: buyback,
             hangarLogs: hangarLogs,
-            referralStats: referralStats
+            referralStats: referralStats,
+            gameAccess: gameAccess,
+            sections: sections.refreshing(.hangar, at: lastSyncedAt, changed: self.packages != packages || self.fleet != fleet)
         )
     }
 
@@ -604,11 +618,13 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
         let remainingPackages = packages.filter { !packageIDs.contains($0.id) }
         let remainingFleet = fleet.filter { !packageIDs.contains($0.sourcePackageID) }
 
+        var states = sections
+        if remainingPackages != packages || remainingFleet != fleet { states.hangar.contentRevision &+= 1 }
         return updatingHangar(
             packages: remainingPackages,
             fleet: remainingFleet,
             lastSyncedAt: lastSyncedAt
-        )
+        ).replacingSections(states)
     }
 
     func updatingBuyback(
@@ -627,7 +643,9 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
             fleet: fleet,
             buyback: buyback,
             hangarLogs: hangarLogs,
-            referralStats: referralStats
+            referralStats: referralStats,
+            gameAccess: gameAccess,
+            sections: sections.refreshing(.buyback, at: lastSyncedAt, changed: self.buyback != buyback)
         )
     }
 
@@ -647,7 +665,9 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
             fleet: fleet,
             buyback: buyback,
             hangarLogs: hangarLogs,
-            referralStats: referralStats
+            referralStats: referralStats,
+            gameAccess: gameAccess,
+            sections: sections.refreshing(.hangarLog, at: lastSyncedAt, changed: self.hangarLogs != hangarLogs)
         )
     }
 
@@ -659,6 +679,7 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
         storeCreditUSD: Decimal?,
         totalSpendUSD: Decimal?,
         referralStats: ReferralStats,
+        gameAccess: RSIGameAccessSummary? = nil,
         lastSyncedAt: Date = .now
     ) -> HangarSnapshot {
         HangarSnapshot(
@@ -673,8 +694,17 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
             fleet: fleet,
             buyback: buyback,
             hangarLogs: hangarLogs,
-            referralStats: referralStats
+            referralStats: referralStats,
+            gameAccess: gameAccess ?? self.gameAccess,
+            sections: sections.refreshing(.account, at: lastSyncedAt, changed: self.accountHandle != (accountHandle ?? self.accountHandle) || self.avatarURL != avatarURL || self.primaryOrganization != primaryOrganization || self.storeCreditUSD != storeCreditUSD || self.totalSpendUSD != totalSpendUSD || self.referralStats != referralStats || (gameAccess != nil && self.gameAccess != gameAccess))
         )
+    }
+
+    func replacingSections(_ sections: SnapshotSectionStates) -> HangarSnapshot {
+        HangarSnapshot(accountHandle: accountHandle, lastSyncedAt: lastSyncedAt, avatarURL: avatarURL,
+                      primaryOrganization: primaryOrganization, didRefreshPrimaryOrganization: didRefreshPrimaryOrganization,
+                      storeCreditUSD: storeCreditUSD, totalSpendUSD: totalSpendUSD, packages: packages, fleet: fleet,
+                      buyback: buyback, hangarLogs: hangarLogs, referralStats: referralStats, gameAccess: gameAccess, sections: sections)
     }
 
     func preservingUnavailableProfile(from previousSnapshot: HangarSnapshot) -> HangarSnapshot {
@@ -692,6 +722,7 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
                 storeCreditUSD: storeCreditUSD,
                 totalSpendUSD: totalSpendUSD,
                 referralStats: referralStats,
+                gameAccess: gameAccess ?? previousSnapshot.gameAccess,
                 lastSyncedAt: lastSyncedAt
             )
         }
@@ -704,6 +735,7 @@ nonisolated struct HangarSnapshot: Hashable, Sendable, Codable {
             storeCreditUSD: storeCreditUSD,
             totalSpendUSD: totalSpendUSD,
             referralStats: referralStats,
+            gameAccess: gameAccess ?? previousSnapshot.gameAccess,
             lastSyncedAt: lastSyncedAt
         )
     }
@@ -1167,7 +1199,8 @@ nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
     }
 
     var canApplyStoredUpgrade: Bool {
-        isOwnedUpgradeItem
+        // RSI can expose the Apply upgrade action without usable upgrade metadata.
+        isOwnedUpgradeItem || (canUpgrade && isUpgradeOnlyPledge)
     }
 
     var isUpgradeOnlyPledge: Bool {
@@ -1466,10 +1499,15 @@ nonisolated struct HangarPackage: Identifiable, Hashable, Sendable, Codable {
         return (priority: 1, months: 0)
     }
 
+    private nonisolated static let insuranceExpressions: [String: NSRegularExpression] = {
+        let patterns = [#"(\d+)\s*(month|months|mo)\b"#, #"(\d+)\s*(year|years|yr)\b"#, #"(\d+)\s*months?\b"#]
+        return Dictionary(uniqueKeysWithValues: patterns.compactMap { pattern in
+            (try? NSRegularExpression(pattern: pattern)).map { (pattern, $0) }
+        })
+    }()
+
     private nonisolated static func insuranceValueMatch(in text: String, pattern: String) -> Int? {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return nil
-        }
+        guard let regex = insuranceExpressions[pattern] else { return nil }
 
         let range = NSRange(text.startIndex..., in: text)
         guard let match = regex.firstMatch(in: text, range: range),
@@ -1523,7 +1561,10 @@ nonisolated struct GroupedHangarPackage: Identifiable, Hashable, Sendable {
 }
 
 extension Sequence where Element == HangarPackage {
-    var groupedForInventoryDisplay: [GroupedHangarPackage] {
+    nonisolated var groupedForInventoryDisplay: [GroupedHangarPackage] {
+        let performanceInterval = PerformanceTrace.begin("GroupHangar")
+        defer { PerformanceTrace.end("GroupHangar", performanceInterval) }
+
         var orderedKeys: [HangarPackage.InventoryGroupingKey] = []
         var groupedPackages: [HangarPackage.InventoryGroupingKey: [HangarPackage]] = [:]
 
@@ -1785,21 +1826,16 @@ nonisolated struct FleetShip: Identifiable, Hashable, Sendable, Codable {
 }
 
 nonisolated struct GroupedFleetShip: Identifiable, Hashable, Sendable {
+    let id: String
     let representative: FleetShip
     let ships: [FleetShip]
 
     init(representative: FleetShip, ships: [FleetShip]) {
         self.representative = representative
         self.ships = ships
+        id = ships.map(\.id).sorted().map(String.init).joined(separator: "-")
     }
 
-    var id: String {
-        ships
-            .map(\.id)
-            .sorted()
-            .map(String.init)
-            .joined(separator: "-")
-    }
 
     var quantity: Int {
         ships.count
@@ -1829,7 +1865,10 @@ nonisolated struct GroupedFleetShip: Identifiable, Hashable, Sendable {
 }
 
 extension Sequence where Element == FleetShip {
-    var groupedForFleetDisplay: [GroupedFleetShip] {
+    nonisolated var groupedForFleetDisplay: [GroupedFleetShip] {
+        let performanceInterval = PerformanceTrace.begin("GroupFleet")
+        defer { PerformanceTrace.end("GroupFleet", performanceInterval) }
+
         var orderedKeys: [FleetShip.GroupingKey] = []
         var groupedShips: [FleetShip.GroupingKey: [FleetShip]] = [:]
 
@@ -1857,7 +1896,7 @@ extension Sequence where Element == FleetShip {
 }
 
 private extension FleetShip {
-    var representativePriority: Int {
+    nonisolated var representativePriority: Int {
         var score = 0
 
         let hasMSRPLabel = !(msrpLabel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
@@ -1944,20 +1983,10 @@ nonisolated struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
             || haystack.contains("livery")
     }
 
-    var isUpgrade: Bool {
-        let haystack = searchHaystack
-        return haystack.range(of: #"\bupgrade\b"#, options: .regularExpression) != nil
-            || haystack.range(of: #"\bccu\b"#, options: .regularExpression) != nil
-            || haystack.range(of: #"\S+\s+to\s+\S+"#, options: .regularExpression) != nil
-    }
-
-    var isGear: Bool {
-        if isUpgrade || isSkin {
-            return false
-        }
-
-        let haystack = searchHaystack
-        let gearKeywords = [
+    enum InventoryKind: Sendable { case upgrade, skin, gear, package, standalone }
+    private nonisolated static let upgradeExpressions: [NSRegularExpression] = [#"\bupgrade\b"#, #"\bccu\b"#, #"\S+\s+to\s+\S+"#]
+        .compactMap { try? NSRegularExpression(pattern: $0) }
+    private static let gearKeywords = [
             "armor",
             "helmet",
             "undersuit",
@@ -1981,40 +2010,19 @@ nonisolated struct BuybackPledge: Identifiable, Hashable, Sendable, Codable {
             "tool"
         ]
 
-        return gearKeywords.contains { haystack.contains($0) }
-    }
-
-    var isPackage: Bool {
-        if isGear || isUpgrade || isSkin {
-            return false
-        }
-
+    var inventoryKind: InventoryKind {
         let haystack = searchHaystack
-        return haystack.contains("game package")
-            || haystack.contains("starter package")
-            || haystack.contains("starter pack")
-            || haystack.contains("package")
-            || haystack.contains("bundle")
+        let range = NSRange(haystack.startIndex..., in: haystack)
+        if Self.upgradeExpressions.contains(where: { $0.firstMatch(in: haystack, range: range) != nil }) { return .upgrade }
+        if ["paint", "skin", "livery"].contains(where: { haystack.contains($0) }) { return .skin }
+        if Self.gearKeywords.contains(where: { haystack.contains($0) }) { return .gear }
+        if ["game package", "starter package", "starter pack", "package", "bundle"].contains(where: { haystack.contains($0) }) { return .package }
+        return .standalone
     }
-
-    var isStandaloneShip: Bool {
-        if isUpgrade || isSkin || isPackage || isGear {
-            return false
-        }
-
-        let haystack = searchHaystack
-        if haystack.contains("standalone ship")
-            || haystack.contains("ship")
-            || haystack.contains("vehicle")
-            || haystack.contains("fighter")
-            || haystack.contains("freighter")
-            || haystack.contains("gunboat")
-            || haystack.contains("rover") {
-            return true
-        }
-
-        return true
-    }
+    var isUpgrade: Bool { inventoryKind == .upgrade }
+    var isGear: Bool { inventoryKind == .gear }
+    var isPackage: Bool { inventoryKind == .package }
+    var isStandaloneShip: Bool { inventoryKind == .standalone }
 
     var isShip: Bool {
         isStandaloneShip
@@ -2055,21 +2063,16 @@ nonisolated struct BuybackUpgradeContext: Hashable, Sendable, Codable {
 }
 
 nonisolated struct GroupedBuybackPledge: Identifiable, Hashable, Sendable {
+    let id: String
     let representative: BuybackPledge
     let pledges: [BuybackPledge]
 
     init(representative: BuybackPledge, pledges: [BuybackPledge]) {
         self.representative = representative
         self.pledges = pledges
+        id = pledges.map(\.id).sorted().map(String.init).joined(separator: "-")
     }
 
-    var id: String {
-        pledges
-            .map(\.id)
-            .sorted()
-            .map(String.init)
-            .joined(separator: "-")
-    }
 
     var quantity: Int {
         pledges.count
@@ -2085,7 +2088,10 @@ nonisolated struct GroupedBuybackPledge: Identifiable, Hashable, Sendable {
 }
 
 extension Sequence where Element == BuybackPledge {
-    var groupedForBuybackDisplay: [GroupedBuybackPledge] {
+    nonisolated var groupedForBuybackDisplay: [GroupedBuybackPledge] {
+        let performanceInterval = PerformanceTrace.begin("GroupBuyback")
+        defer { PerformanceTrace.end("GroupBuyback", performanceInterval) }
+
         var orderedKeys: [BuybackPledge.GroupingKey] = []
         var groupedPledges: [BuybackPledge.GroupingKey: [BuybackPledge]] = [:]
 

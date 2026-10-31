@@ -9,6 +9,17 @@
 "App Updated" = "应用已更新";
 "Hangar Express was updated from %@ to %@. Run a full refresh so your cached hangar, fleet, buy-back, and log data stay in sync with this build." = "机库通已从 %@ 更新到 %@。请执行一次完整刷新，以确保缓存的机库、舰队、回购和日志数据与当前版本保持同步。";
 "What's New" = "更新内容";
+"Connection problems are easier to investigate with more detailed support logs." = "连接出现问题时，诊断日志会提供更多信息，方便排查原因。";
+"Your profile now shows your access to Star Citizen and Squadron 42." = "个人资料卡片现在会显示您是否拥有星际公民和42中队的游戏权限。";
+"Hide the keyboard without losing your search results. Tap the search box to type again, or tap X to close search." = "收起键盘后仍会保留搜索结果。轻点搜索框可继续输入，轻点 X 可关闭搜索。";
+"Paste email verification codes with one tap. Picture verification codes stay visible while you type." = "邮件验证码可一键粘贴。输入图形验证码时，验证码图片会保持可见。";
+"Hangar share pictures now use the same item names and language as your Hangar list." = "机库分享图片现在会使用与机库列表一致的物品名称和语言。";
+"Chinese names use consistent quotation marks. Translation animations are smoother, and Buy Back counts line up correctly." = "中文名称的引号更加统一，翻译动画更加平滑，回购数量标记也已对齐。";
+"Fixed missing ship details for renamed Constellation ships, including the Phoenix Emerald." = "修复了星座系列舰船改名后资料缺失的问题，包括凤凰翡翠版。";
+"Search and browsing are smoother in large hangars. Unchanged pictures stay visible during refresh." = "大型机库的搜索和浏览更加流畅。刷新时，未变化的图片会继续显示。";
+"See when each part of your account was last refreshed. If part of a refresh fails, your saved information stays available." = "现在可查看各项内容上次刷新的时间。部分内容刷新失败时，仍会保留已保存的信息。";
+"More reliable account saving and switching, with clearer messages when information cannot be saved." = "保存和切换账户更加可靠，无法保存信息时会明确提示。";
+"Hangar Log waits until you stop scrolling or typing before showing new updates." = "机库日志会等您停止滚动或输入后，再更新列表。";
 "Added Character Reset, allowing eligible users to request an RSI character repair from within Hangar Express." = "新增“角色重置”功能，支持符合条件的用户在机库通内请求 RSI 角色修复。";
 "Improved Simplified Chinese localization across app flows." = "优化了应用各流程中的简体中文本地化。";
 "Resolved visual inconsistencies across multiple screens for a more consistent interface." = "修复了多个界面的视觉不一致问题，使整体界面更加统一。";
@@ -151,6 +162,7 @@
 "Identity verification failed." = "身份验证失败。";
 "Available" = "可用";
 "Unavailable" = "不可用";
+"Included" = "已包含";
 "Not yet synced" = "尚未同步";
 "Citizen" = "公民";
 "No Organization" = "无组织";
@@ -268,7 +280,7 @@
 "Log In" = "登录";
 "OR" = "或";
 "Login as Read Only" = "以只读模式登录";
-"Read-only login opens an RSI browser session. You enter your password directly on RSI's website, so it is never visible to or saved by Hangar Express. Password-confirmed features—including gifting, melting, applying upgrades, character repair, and device management—are disabled for this account." = "你将在RSI官网上直接完成登录，因此机库通无法看到或保存你的密码。但所有需要密码确认的功能（赠送、回收、升级、角色修复和设备管理）会不可用";
+"Read-only login opens an RSI browser session. You enter your password directly on RSI's website, so it is never visible to or saved by Hangar Express. Password-confirmed features—including gifting, melting, applying upgrades, and character repair—are disabled for this account." = "你将在 RSI 官网上直接完成登录，因此机库通无法看到或保存你的密码。但所有需要密码确认的功能（赠送、回收、升级和角色修复）会不可用";
 "RSI CAPTCHA image" = "RSI 验证码图片";
 "CAPTCHA Code" = "图片验证码";
 "Verify CAPTCHA" = "验证图片验证码";
@@ -288,6 +300,7 @@
 "Auth Debug Report Copied" = "认证调试报告已复制";
 "The full auth debug report was copied to the clipboard so a tester can paste it into a message." = "完整的认证调试报告已复制到剪贴板，测试人员现在可以将其粘贴到消息中。";
 "Verification Code" = "验证码";
+"Paste Verification Code" = "粘贴验证码";
 "Device Name" = "设备名称";
 "Verify" = "验证";
 "Back to Sign In" = "返回登录";
@@ -394,6 +407,8 @@
 "Standard keeps your current saved account. Early Access unlocks multiple account switching while the feature is in Labs." = "标准版只保留当前账户。多账户切换仍在实验室阶段时，抢先体验可解锁该功能。";
 "Early Access Labs can refresh up to 10 pages in parallel." = "抢先体验实验室最多可并行刷新 10 个页面。";
 "Standard refreshes up to 2 pages in parallel. Early Access unlocks up to 10 while the feature is in Labs." = "标准版最多可并行刷新 2 个页面。该功能仍在实验室阶段时，抢先体验可提升到 10 个。";
+"Early Access defaults to 5 refresh workers and can use up to 10." = "抢先体验默认使用 5 个刷新并发任务，最多可设为 10 个。";
+"Standard defaults to 2 refresh workers. Early Access defaults to 5 and can use up to 10." = "标准版默认使用 2 个刷新并发任务；抢先体验默认使用 5 个，最多可设为 10 个。";
 "Manage Early Access" = "管理抢先体验";
 "Preferences" = "偏好设置";
 "Access verified" = "访问权限已验证";
@@ -484,21 +499,27 @@
 "Tools" = "工具";
 "Ship Catalogue" = "舰船目录";
 "WBCCU Deals" = "WBCCU优惠";
-"WBCCU Deals Beta" = "WBCCU 优惠测试版";
+"WBCCU Deals Notice" = "WBCCU 优惠提示";
 "WBCCU Deals is an experimental feature. It depends on live data and automated interactions with the RSI website, which may change or fail without notice. Verify every item, price, and cart before checkout. Use this feature at your own risk." = "WBCCU 优惠是一项实验性功能。它依赖实时数据和与 RSI 网站的自动交互，RSI 网站可能随时变更，功能也可能在无提示的情况下失败。结账前请核对所有物品、价格和购物车内容。使用风险由你自行承担。";
 "Continue" = "继续";
-"%@, Beta" = "%@，测试版";
+"%@, Early Access" = "%@，抢先体验";
 "CCU Calculator" = "CCU计算器";
 "Source Ship" = "来源舰船";
 "Destination Ship" = "目标舰船";
 "Choose source" = "选择来源";
 "Choose destination" = "选择目标";
 "Ships" = "舰船";
+"Source Ship Value" = "来源舰船价值";
+"Choose melt value" = "选择回收价值";
+"Using MSRP because this ship is not in your hangar." = "机库中没有此舰船，因此使用建议售价。";
+"Using the melt value of your owned ship." = "使用你拥有的舰船回收价值。";
 "Store availability comes from the hosted Star Citizen ship feed." = "商店可用性来自托管的 Star Citizen 舰船数据。";
 "Refresh hosted ship catalog" = "刷新托管舰船目录";
 "Loading hosted ship catalog..." = "正在加载托管舰船目录...";
 "Select Ships" = "选择舰船";
 "Choose both ships to calculate the chain." = "请选择来源舰船和目标舰船以计算 CCU 链。";
+"Choose Source Value" = "选择来源舰船价值";
+"You own this ship at multiple melt values. Choose which one to use." = "你拥有的这款舰船有多个回收价值，请选择要使用的一个。";
 "Destination Too Low" = "目标价值过低";
 "The destination ship must have a higher MSRP than the source ship." = "目标舰船的 MSRP 必须高于来源舰船。";
 "No CCU Path" = "没有可用的 CCU 路径";
@@ -508,11 +529,15 @@
 "Try a different ship name or manufacturer." = "请尝试其他舰船名称或制造商。";
 "Search ships" = "搜索舰船";
 "%@ • MSRP %@" = "%@ • MSRP %@";
+"MSRP %@" = "MSRP %@";
 "Best CCU Chain" = "最佳 CCU 链";
+"Cost details" = "费用明细";
+"Total Cost" = "总成本";
 "Total Savings" = "总节省";
 "Destination MSRP" = "目标舰船 MSRP";
 "Melt Value" = "可溶价值";
 "Save to Photos" = "存储到照片";
+"Save Image" = "保存图片";
 "Share" = "分享";
 "Creating image..." = "正在生成图片…";
 "Saved to Photos" = "已存储到照片";
@@ -534,6 +559,10 @@
 "This chain includes at least one CCU that is not purchasable right now." = "此链包含至少一个当前无法购买的 CCU。";
 "Cost" = "成本";
 "Saving" = "节省";
+"Exclude" = "排除此 CCU";
+"Excluded CCUs" = "已排除的 CCU";
+"Restore" = "恢复";
+"Restoring a CCU recalculates the path and allows it to be used again." = "恢复 CCU 后会重新计算升级路径，并允许再次使用。";
 "Purchase %@" = "购买 %@";
 "Store credit %@ • New money %@" = "商店信用点 %@ • 新资金 %@";
 "Already in hangar %@" = "已在机库中 %@";
@@ -555,12 +584,11 @@
 "Refresh WBCCU deals" = "刷新 WBCCU 优惠";
 "Unable to Refresh Deals" = "无法刷新优惠";
 "No WBCCU Deals" = "暂无 WBCCU 优惠";
-"StarCitizen-Info is not reporting any available Warbond CCU offers right now." = "StarCitizen-Info 当前未提供任何可用的战争债券 CCU 优惠。";
+"No Warbond CCU offers are available right now." = "目前没有可用的战争债券 CCU 优惠。";
 "STANDARD VALUE" = "标准价值";
 "WARBOND VALUE" = "战争债券价值";
 "Save %@" = "节省 %@";
 "RSI Store" = "RSI 商店";
-"Live data from StarCitizen-Info" = "实时数据来自 StarCitizen-Info";
 "Feed updated %@" = "数据更新于 %@";
 "Availability and prices can change without notice; confirm the final offer in the RSI store." = "可用性和价格可能随时变化，请在 RSI 商店确认最终优惠。";
 "Open RSI Upgrade Store" = "打开 RSI 升级商店";
@@ -689,7 +717,7 @@
 "Refresh Account" = "刷新账户";
 "Refreshing Everything..." = "正在刷新全部...";
 "Full Refresh" = "完整刷新";
-"Refresh Account updates balances, referral data, and profile metadata. Full Refresh also reloads hangar, fleet, and buy-back data." = "刷新账户会更新余额、推荐数据和资料元数据。完整刷新还会重新加载机库、舰队和回购数据。";
+"Refresh Account updates balances, referral data, profile metadata, and game access. Full Refresh also reloads hangar, fleet, and buy-back data." = "刷新账户会更新余额、推荐数据、资料元数据和游戏权限。完整刷新还会重新加载机库、舰队和回购数据。";
 "Account Total Value" = "账户总价值";
 "Current Spend" = "当前消费";
 "Current Tier" = "当前等级";
@@ -723,6 +751,13 @@
 "Raw Hangar Express buy-back data" = "机库通原始回购数据";
 "Search packages, ships, insurance" = "搜索项目、舰船、保险";
 "Clear Search" = "清除搜索";
+"Close Search" = "关闭搜索";
+"Access active" = "已拥有游戏权限";
+"Star Citizen" = "星际公民";
+"Squadron 42" = "42中队";
+"No access" = "无游戏权限";
+"Checking access..." = "正在检查游戏权限...";
+"Access unavailable" = "暂时无法检查权限";
 "Log" = "日志";
 "Pledges" = "项目";
 "Grey actions need a fresh sign-in with saved credentials before Hangar Express can send live RSI requests." = "灰色操作需要重新登录并保存凭据后，机库通才能发送实时 RSI 请求。";
@@ -740,6 +775,25 @@
 "This package contains Squadron 42. Type I understand before Hangar Express can continue to Face ID and submit the melt request." = "此组合包包含 Squadron 42。在机库通继续进行 Face ID 验证并提交回收请求之前，请输入 I understand。";
 "Loading eligible RSI target pledges..." = "正在加载可用的 RSI 目标项目...";
 "Search target pledges" = "搜索目标项目";
+"Choose Target" = "选择目标项目";
+"Selected Upgrade" = "所选升级";
+"This grouped stack contains %lld identical copies. Hangar Express will apply one copy in this first release." = "这组共有 %lld 个相同的升级。机库通本次仅应用其中一个。";
+"Unable to Load Upgrade Targets" = "无法加载升级目标";
+"Eligible Target Pledges" = "可用的目标项目";
+"No target pledges match your search." = "没有符合搜索条件的目标项目。";
+"RSI decides which pledges are eligible. Hangar Express shows the live target list returned by RSI, then enriches it with your cached hangar data when available." = "哪些项目可以升级由 RSI 决定。机库通显示 RSI 实时返回的目标列表，并在可用时补充已缓存的机库信息。";
+"Attributed" = "已归属";
+"Upgrade Item" = "升级物品";
+"Hangar Express will consume one copy from this grouped stack of %lld identical upgrades." = "机库通将从这组 %lld 个相同升级中消耗一个。";
+"Upgrade Path" = "升级路径";
+"Selected Target" = "所选目标";
+"This action cannot be undone. RSI will permanently consume the stored upgrade and apply it to the selected pledge." = "此操作无法撤销。RSI 将永久消耗所拥有的升级，并将其应用到所选项目。";
+"Hangar Express will reuse the saved RSI password for this account after Face ID or device passcode confirmation." = "通过 Face ID 或设备密码确认后，机库通将使用此账户保存的 RSI 密码。";
+"Warning" = "警告";
+"Applying Upgrade..." = "正在应用升级...";
+"Apply Upgrade" = "应用升级";
+"Confirm Upgrade" = "确认升级";
+"Unable to Apply Upgrade" = "无法应用升级";
 "Not separable from this package" = "无法从此组合包中单独分离";
 "Choose Background" = "选择背景";
 "Actual Value" = "实际价值";
@@ -819,6 +873,9 @@
 "Review and remove trusted RSI devices" = "查看并移除已信任的 RSI 设备";
 "Authorized Devices" = "授权设备";
 "Logged In Devices" = "已登录设备";
+"Trusted Devices" = "受信任设备";
+"Unable to Open Logged In Devices" = "无法打开已登录设备";
+"Sign in to RSI before managing trusted devices." = "请先登录 RSI，再管理受信任设备。";
 "Logged In Devices Updated" = "已登录设备已更新";
 "Authorized devices are trusted RSI sign-in sessions. Removing a device signs that session out." = "授权设备是已信任的 RSI 登录会话。移除设备会让该会话退出登录。";
 "Logged-in devices are trusted RSI sign-in sessions. Removing a device signs that session out." = "已登录设备是受信任的 RSI 登录会话。移除设备会让该会话退出登录。";
@@ -859,6 +916,8 @@
 "RSI rejected password confirmation for logged-in devices." = "RSI 拒绝了已登录设备的密码确认。";
 "Confirm removing %lld authorized RSI devices except this app." = "确认移除此应用以外的 %lld 个授权 RSI 设备。";
 "RSI did not remove %@ within %lld seconds." = "RSI 未在 %lld 秒内移除 %@。";
+"Remove %@ from RSI's logged-in devices? If this is the session Hangar Express uses, the app will be signed out." = "要从 RSI 的已登录设备中移除 %@ 吗？如果这是机库通正在使用的会话，应用将退出登录。";
+"These are the devices and sessions currently trusted by RSI. Removing a device signs that session out." = "这些是 RSI 当前信任的设备和会话。移除设备会让该会话退出登录。";
 "Auto Copy Share Picture Log" = "自动复制分享图片日志";
 "Control hangar artwork, row highlights, and share-picture diagnostics." = "控制机库图像、行高亮和分享图片诊断。";
 "Item Language" = "物品语言";
@@ -904,7 +963,7 @@
 "Clearing translation cache removes the hosted item translation dictionary and saved on-device translations. Your hangar snapshots, images, accounts, cookies, and credentials are not affected." = "清除翻译缓存会移除托管物品翻译词典和已保存的本机翻译。你的机库快照、图片、账户、Cookie 和凭据不会受到影响。";
 "Clearing local cache removes downloaded images and saved local snapshots. Hangar Express will then run a full reload to rebuild account data from RSI. Translation cache is not affected." = "清除本地缓存会移除已下载图片和已保存的本地快照。之后机库通会执行一次完整重载，从 RSI 重新构建账户数据。翻译缓存不会受到影响。";
 "Success" = "成功";
-"Your character has been reset" = "你的角色已重置";
+"Your character repair request was submitted" = "你的角色修复请求已提交";
 "This action cannot be undone" = "此操作无法撤销";
 "Please verify the account you are trying to reset." = "请确认你要重置的账户。";
 "Current RSI Account" = "当前 RSI 账户";
@@ -913,7 +972,143 @@
 "Requesting Repair..." = "正在请求修复...";
 "Unable to Request Repair" = "无法请求角色修复";
 "Sign in to RSI before requesting a character repair." = "请先登录 RSI，然后再请求角色修复。";
-"Sign in again with saved credentials before Hangar Express can submit a character repair request." = "请先使用已保存凭据重新登录，机库通才能提交角色修复请求。";
+"Character repair is unavailable for read-only accounts." = "只读账户无法请求角色修复。";
 "Wait for the current refresh or account action to finish before requesting a character repair." = "请等待当前刷新或账户操作完成后再请求角色修复。";
 "Face ID or passcode verification is required before the request is sent." = "发送请求前需要通过 Face ID 或密码验证。";
+"Why do you need to repair your account? (optional)" = "你为什么需要修复账户？（可选）";
+"If left blank, Hangar Express will send a general character-broken reason." = "如果留空，机库通将发送通用的角色异常说明。";
+"Issue Council URL (optional)" = "Issue Council 链接（可选）";
+"A Character Repair can only be requested once every hour." = "角色修复每小时只能请求一次。";
+"Keep the repair reason under %lld characters." = "角色修复原因请控制在 %lld 个字符以内。";
+"RSI allows one Character Repair per hour. Try again in about %lld minute(s)." = "RSI 每小时只允许一次角色修复。请大约 %lld 分钟后重试。";
+"Character Repair is available again in %lld:%02lld." = "距离下次可用角色修复还有 %lld:%02lld。";
 "OK" = "好";
+"Identity Verification" = "身份验证";
+"RSI requires an email verification code before it will show your trusted devices. Everything stays inside Hangar Express." = "RSI 要求先通过电子邮件验证码确认身份，才能显示受信任设备。整个流程都在机库通内完成。";
+"Enter the six-digit code RSI sent to your account email. The code expires after 10 minutes." = "请输入 RSI 发送到你账户邮箱的六位验证码。验证码将在 10 分钟后过期。";
+"RSI verification code" = "RSI 验证码";
+"Confirm Code" = "确认验证码";
+"Resend Code" = "重新发送验证码";
+"Send Verification Code" = "发送验证码";
+"These are the devices and sessions currently trusted by RSI. Device removal remains on RSI while its new API is being validated." = "这些是 RSI 当前信任的设备和会话。在新接口验证完成前，移除设备仍需在 RSI 网站上操作。";
+"Verify your identity with the six-digit code from RSI before loading logged-in devices." = "请先使用 RSI 的六位验证码确认身份，然后加载已登录设备。";
+"Enter the six-digit verification code from RSI." = "请输入 RSI 的六位验证码。";
+"RSI did not send the verification code within %lld seconds." = "RSI 未能在 %lld 秒内发送验证码。";
+"RSI did not verify the code within %lld seconds." = "RSI 未能在 %lld 秒内验证该验证码。";
+"RSI did not return the logged-in device list within %lld seconds." = "RSI 未能在 %lld 秒内返回已登录设备列表。";
+"Your saved RSI session expired. Sign in again before managing logged-in devices." = "已保存的 RSI 会话已过期。请重新登录后再管理已登录设备。";
+"Hide Keyboard" = "收起键盘";
+
+"Secure Storage" = "安全存储";
+"Secure storage is unavailable. Unlock your device and try again. Your saved accounts have not been replaced." = "安全存储暂时不可用。请解锁设备后重试。已保存的账户尚未被替换。";
+"The saved account data could not be read. It has been preserved in secure storage." = "无法读取已保存的账户数据。原始数据仍保留在安全存储中。";
+"The account could not be saved. Your existing saved accounts have been preserved." = "无法保存账户。现有的已保存账户仍被保留。";
+
+"Another account action is still running. Wait for it to finish." = "另一个账户操作仍在进行中，请等待其完成。";
+"The previous action may have reached RSI. Open Account to refresh and review it before allowing another action." = "上一个操作可能已提交至 RSI。请打开“账户”页刷新并检查，再允许新的操作。";
+"This operation was cancelled because the account changed." = "账户已更改，此操作已取消。";
+"Sign-in was cancelled." = "登录已取消。";
+"Review Previous Action" = "检查上一个操作";
+"The previous action may have reached RSI. Refresh, then review your hangar, cart, or devices on RSI before allowing another action." = "上一个操作可能已提交至 RSI。请先刷新，再到 RSI 检查机库、购物车或设备状态，确认后才能允许新的操作。";
+"Refresh for Review" = "刷新以供检查";
+"Review RSI Account" = "检查 RSI 账户";
+"I Reviewed RSI — Allow New Actions" = "已检查 RSI，允许新的操作";
+
+"Local Storage" = "本机存储";
+"Local snapshot storage is unavailable. The latest changes may not be saved. Please try again." = "本机快照存储暂时不可用，最新更改可能尚未保存，请重试。";
+"The local snapshot could not be read. The original file has been preserved." = "无法读取本机快照，原始文件已保留。";
+"This snapshot was saved by a newer app version. The original file has been preserved." = "此快照由较新版本的应用保存，原始文件已保留。";
+
+"Some sections could not refresh: %@. Previously saved data is shown where available." = "部分数据刷新失败：%@。如有已保存的数据，将继续显示。";
+"Not refreshed" = "尚未刷新";
+"Refresh failed" = "刷新失败";
+
+"Unable to refresh account information." = "无法刷新账户信息。";
+
+"Preparing inventory..." = "正在整理物品...";
+
+"Preparing search..." = "正在准备搜索...";
+
+"Game Access" = "游戏权限";
+
+"Game Packages" = "游戏组合包";
+
+"Shows packages that include this game." = "查看包含此游戏权限的组合包。";
+
+"Access status comes from your last Account refresh." = "权限状态来自上次账户刷新。";
+
+"No matching game packages" = "未找到匹配的游戏组合包";
+
+"RSI confirms access, but no matching package was found in your saved Hangar." = "RSI 已确认您拥有游戏权限，但在已保存的机库中未找到匹配的组合包。";
+
+"No package with this game was found in your saved Hangar." = "在已保存的机库中未找到包含此游戏的组合包。";
+
+"Refresh Hangar to find packages that include this game." = "刷新机库以查找包含此游戏权限的组合包。";
+
+"Packages are matched from your saved Hangar contents. Refresh Hangar to update this list." = "此列表根据已保存的机库内容匹配。刷新机库可更新列表。";
+
+"Pledge #%lld" = "商品编号 #%lld";
+
+"Tap Star Citizen or Squadron 42 on your profile to see which Hangar packages include game access." = "轻点个人资料中的星际公民或42中队，即可查看哪些机库组合包包含游戏权限。";
+
+"New Ladder" = "新阶梯";
+
+"Legacy Ladder" = "旧阶梯";
+
+"Referral Ladder" = "推荐奖励阶梯";
+
+"%lld referrals" = "%lld 位推荐玩家";
+
+"%lld more to the next reward" = "再推荐 %lld 位玩家即可达到下一奖励";
+
+"All milestones reached" = "已达到所有奖励里程碑";
+
+"View Only" = "仅供查看";
+
+"The legacy ladder is not available for this account. You can still browse its rewards." = "此账户无法参与旧阶梯，但仍可浏览奖励。";
+
+"Referral count unavailable" = "暂时无法获取推荐人数";
+
+"Use Refresh Account to update your referral progress." = "请使用“刷新账户”更新推荐进度。";
+
+"Unable to Load Rewards" = "无法加载奖励";
+
+"Rewards shown are from RSI's referral program. Your progress updates with Refresh Account." = "奖励来自 RSI 推荐计划。推荐进度随“刷新账户”更新。";
+
+"Milestone Reached" = "已达到";
+
+"Not Yet Reached" = "未达到";
+
+"Browse referral rewards with pictures in Tools, switch between the new and legacy ladders, and see your saved referral progress." = "在工具中查看推荐奖励图片、切换新旧阶梯，并查看已保存的推荐进度。";
+
+"Check your connection and try again." = "请检查网络连接后重试。";
+
+"%lld referral" = "%lld 位推荐玩家";
+
+"View matching item in Hangar" = "查看机库中的对应物品";
+
+"Hangar item unavailable" = "暂时无法查看机库物品";
+
+"Your saved Hangar is being prepared. Try again in a moment, or refresh Hangar if it has not been loaded yet." = "正在准备已保存的机库。请稍后重试；如果尚未加载机库，请先刷新机库。";
+
+"This milestone is reached, but its reward was not found in your saved Hangar. Refresh Hangar and try again." = "已达到此里程碑，但在已保存的机库中未找到对应奖励。请刷新机库后重试。";
+
+"Choose a Hangar item" = "选择机库物品";
+
+"More than one saved Hangar entry matches this reward." = "已保存的机库中有多个条目与此奖励对应。";
+
+"Browse referral rewards with pictures in Tools, switch between the new and legacy ladders, and tap reached rewards to see matching Hangar items." = "在工具中浏览推荐奖励图片、切换新旧阶梯，并轻点已达到的奖励查看机库中的对应物品。";
+
+
+"Early Access: browse referral reward pictures in Tools, switch between the new and legacy ladders, and tap reached rewards to see matching Hangar items." = "抢先体验：在工具中浏览推荐奖励图片、切换新旧阶梯，并轻点已达到的奖励查看机库中的对应物品。";
+
+"Idris-M no longer appears in the CCU calculator because it cannot be upgraded." = "Idris-M 无法升级，现已从 CCU 计算器的舰船选项中移除。";
+"Gift and Apply Upgrade are available again for eligible Hangar pledges after RSI's page update." = "适配 RSI 页面更新后，符合条件的机库物品现可再次使用“赠送”和“应用升级”。";
+"Early Access refresh now defaults to five parallel workers; Standard stays at two." = "抢先体验现在默认使用 5 个并行刷新任务；标准版仍为 2 个。";
+"The CCU calculator is easier to use, with clearer ship choices and expandable cost details." = "CCU 计算器更易使用，舰船选项更清晰，费用明细可按需展开。";
+"Upgrade target selection and confirmation now have Chinese text and show available Hangar item translations." = "升级目标选择和确认页面现已补齐中文界面文字，并在有译名时显示机库物品的中文名称。";
+
+"Expected release" = "预计发布版本";
+"TBD" = "待定";
+
+"Entries" = "条记录";

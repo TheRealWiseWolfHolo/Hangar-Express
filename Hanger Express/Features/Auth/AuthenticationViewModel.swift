@@ -45,6 +45,11 @@ final class AuthenticationViewModel {
         }
     }
 
+    private var requestID = UUID()
+    private func isCurrentRequest(_ id: UUID, flowID: UUID) -> Bool {
+        requestID == id && appModel.authenticationFlowID == flowID && !Task.isCancelled
+    }
+
     func updateVerificationCode(_ code: String) {
         verificationCode = Self.normalizedVerificationCode(code)
     }
@@ -56,7 +61,10 @@ final class AuthenticationViewModel {
 
         clearMessages()
         isSubmitting = true
-        defer { isSubmitting = false }
+        let id = UUID()
+        requestID = id
+        let flowID = appModel.authenticationFlowID
+        defer { if requestID == id { isSubmitting = false } }
 
         do {
             let result = try await authService.signIn(
@@ -66,8 +74,10 @@ final class AuthenticationViewModel {
                 forceBrowserLogin: forceBrowserLogin
             )
 
-            await handle(result, browserLoginIdentifier: loginIdentifier, browserPassword: password)
+            guard isCurrentRequest(id, flowID: flowID) else { return }
+            await handle(result, browserLoginIdentifier: loginIdentifier, browserPassword: password, flowID: flowID)
         } catch {
+            guard isCurrentRequest(id, flowID: flowID) else { return }
             if case let AuthenticationError.requiresBrowserChallenge(message) = error {
                 browserChallenge = BrowserChallenge(
                     message: message,
@@ -85,12 +95,17 @@ final class AuthenticationViewModel {
         guard !isSubmitting else { return }
         clearMessages()
         isSubmitting = true
-        defer { isSubmitting = false }
+        let id = UUID()
+        requestID = id
+        let flowID = appModel.authenticationFlowID
+        defer { if requestID == id { isSubmitting = false } }
 
         do {
             let result = try await authService.submitCaptcha(captchaCode)
-            await handle(result, browserLoginIdentifier: loginIdentifier, browserPassword: password)
+            guard isCurrentRequest(id, flowID: flowID) else { return }
+            await handle(result, browserLoginIdentifier: loginIdentifier, browserPassword: password, flowID: flowID)
         } catch {
+            guard isCurrentRequest(id, flowID: flowID) else { return }
             showError(error)
         }
     }
@@ -99,12 +114,17 @@ final class AuthenticationViewModel {
         guard !isSubmitting else { return }
         clearMessages()
         isSubmitting = true
-        defer { isSubmitting = false }
+        let id = UUID()
+        requestID = id
+        let flowID = appModel.authenticationFlowID
+        defer { if requestID == id { isSubmitting = false } }
 
         do {
             let result = try await authService.beginReadOnlySignIn()
-            await handle(result, browserLoginIdentifier: "", browserPassword: "")
+            guard isCurrentRequest(id, flowID: flowID) else { return }
+            await handle(result, browserLoginIdentifier: "", browserPassword: "", flowID: flowID)
         } catch {
+            guard isCurrentRequest(id, flowID: flowID) else { return }
             showError(error)
         }
     }
@@ -117,7 +137,10 @@ final class AuthenticationViewModel {
         clearMessages()
         verificationCode = Self.normalizedVerificationCode(verificationCode)
         isSubmitting = true
-        defer { isSubmitting = false }
+        let id = UUID()
+        requestID = id
+        let flowID = appModel.authenticationFlowID
+        defer { if requestID == id { isSubmitting = false } }
 
         do {
             let session = try await authService.submitTwoFactor(
@@ -126,10 +149,12 @@ final class AuthenticationViewModel {
                 trustDuration: .year
             )
 
+            guard isCurrentRequest(id, flowID: flowID) else { return }
             password = ""
             verificationCode = ""
-            await appModel.completeAuthentication(session)
+            await appModel.completeAuthentication(session, expectedFlowID: flowID)
         } catch {
+            guard isCurrentRequest(id, flowID: flowID) else { return }
             if case let AuthenticationError.requiresBrowserChallenge(message) = error {
                 browserChallenge = BrowserChallenge(
                     message: message,
@@ -150,7 +175,10 @@ final class AuthenticationViewModel {
 
         clearMessages()
         isSubmitting = true
-        defer { isSubmitting = false }
+        let id = UUID()
+        requestID = id
+        let flowID = appModel.authenticationFlowID
+        defer { if requestID == id { isSubmitting = false } }
 
         do {
             appModel.authDiagnostics.record(
@@ -162,12 +190,14 @@ final class AuthenticationViewModel {
                 cookies: [],
                 trustBrowserSession: trustBrowserSession
             )
+            guard isCurrentRequest(id, flowID: flowID) else { return AppLocalizer.string("Sign-in was cancelled.") }
             browserChallenge = nil
             password = ""
             verificationCode = ""
-            await appModel.completeAuthentication(session)
+            await appModel.completeAuthentication(session, expectedFlowID: flowID)
             return nil
         } catch {
+            guard isCurrentRequest(id, flowID: flowID) else { return AppLocalizer.string("Sign-in was cancelled.") }
             let presentation = AuthenticationDebugFormatter.present(error)
             errorMessage = presentation.message
             errorDebugDetails = presentation.debugDetails
@@ -183,40 +213,50 @@ final class AuthenticationViewModel {
     }
 
     func cancelBrowserChallenge() {
+        requestID = UUID()
         browserChallenge = nil
         verificationCode = ""
         captchaCode = ""
         captchaImageData = nil
         step = .signIn
 
+        let cancellationID = requestID
+        isSubmitting = true
         Task {
             await authService.cancelPendingAuthentication()
+            if requestID == cancellationID { isSubmitting = false }
         }
     }
 
     func returnToSignIn() {
+        requestID = UUID()
         clearMessages()
         verificationCode = ""
         captchaCode = ""
         captchaImageData = nil
         step = .signIn
 
+        let cancellationID = requestID
+        isSubmitting = true
         Task {
             await authService.cancelPendingAuthentication()
+            if requestID == cancellationID { isSubmitting = false }
         }
     }
 
     private func handle(
         _ result: SignInOutcome,
         browserLoginIdentifier: String,
-        browserPassword: String
+        browserPassword: String,
+        flowID: UUID
     ) async {
+        guard flowID == appModel.authenticationFlowID else { return }
         switch result {
         case let .authenticated(session):
             password = ""
             captchaCode = ""
             captchaImageData = nil
-            await appModel.completeAuthentication(session)
+            await appModel.completeAuthentication(session, expectedFlowID: flowID)
         case let .requiresCaptcha(imageData):
             captchaImageData = imageData
             captchaCode = ""

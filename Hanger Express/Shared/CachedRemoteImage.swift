@@ -13,10 +13,12 @@ struct CachedRemoteImage<Content: View>: View {
     let reloadToken: UUID?
     let maxRetryCount: Int
     let trimsTransparentPadding: Bool
+    let onImageSize: ((CGSize) -> Void)?
     let content: (CachedRemoteImagePhase) -> Content
 
     @Environment(\.displayScale) private var displayScale
     @State private var phase: CachedRemoteImagePhase = .empty
+    @State private var displayedResourceID: String?
 
     init(
         url: URL?,
@@ -24,6 +26,7 @@ struct CachedRemoteImage<Content: View>: View {
         reloadToken: UUID? = nil,
         maxRetryCount: Int = 5,
         trimsTransparentPadding: Bool = false,
+        onImageSize: ((CGSize) -> Void)? = nil,
         @ViewBuilder content: @escaping (CachedRemoteImagePhase) -> Content
     ) {
         self.url = url
@@ -31,6 +34,7 @@ struct CachedRemoteImage<Content: View>: View {
         self.reloadToken = reloadToken
         self.maxRetryCount = maxRetryCount
         self.trimsTransparentPadding = trimsTransparentPadding
+        self.onImageSize = onImageSize
         self.content = content
     }
 
@@ -69,7 +73,11 @@ struct CachedRemoteImage<Content: View>: View {
             return
         }
 
-        phase = .empty
+        let resourceID = [url.absoluteString, cacheSizeKey, trimsTransparentPadding ? "trim" : "raw"].joined(separator: "|")
+        if displayedResourceID != resourceID {
+            phase = .empty
+            displayedResourceID = resourceID
+        }
 
         do {
             let loadedImage = try await URLCachedImageStore.shared.image(
@@ -86,6 +94,7 @@ struct CachedRemoteImage<Content: View>: View {
                 return
             }
 
+            onImageSize?(image.size)
             phase = .success(Image(uiImage: image))
         } catch {
             guard !Task.isCancelled else {
@@ -178,6 +187,7 @@ struct CachedUpgradeCompositeImage<Content: View>: View {
 
     @Environment(\.displayScale) private var displayScale
     @State private var phase: CachedRemoteImagePhase = .empty
+    @State private var displayedResourceID: String?
 
     init(
         sourceURL: URL?,
@@ -216,7 +226,11 @@ struct CachedUpgradeCompositeImage<Content: View>: View {
             return
         }
 
-        phase = .empty
+        let resourceID = [sourceURL?.absoluteString ?? "nil", targetURL?.absoluteString ?? "nil", "\(targetSize):\(displayScale)"].joined(separator: "|")
+        if displayedResourceID != resourceID {
+            phase = .empty
+            displayedResourceID = resourceID
+        }
 
         do {
             let image = try await URLCachedImageStore.shared.compositeImage(

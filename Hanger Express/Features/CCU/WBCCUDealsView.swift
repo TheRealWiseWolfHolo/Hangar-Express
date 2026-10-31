@@ -88,15 +88,15 @@ struct WBCCUDealsView: View {
                     context: context,
                     onCancel: { cookies in
                         checkoutContext = nil
-                        persistCheckoutCookies(cookies, clearCart: false)
+                        persistCheckoutCookies(cookies, clearCart: false, context: context)
                     },
                     onFinished: { cookies in
                         checkoutContext = nil
-                        persistCheckoutCookies(cookies, clearCart: true)
+                        persistCheckoutCookies(cookies, clearCart: true, context: context)
                     },
                     onSucceeded: { cookies, _ in
                         checkoutContext = nil
-                        persistCheckoutCookies(cookies, clearCart: true)
+                        persistCheckoutCookies(cookies, clearCart: true, context: context)
                     }
                 )
             }
@@ -131,7 +131,7 @@ struct WBCCUDealsView: View {
                     ContentUnavailableView(
                         "No WBCCU Deals",
                         systemImage: "tag.slash",
-                        description: Text("StarCitizen-Info is not reporting any available Warbond CCU offers right now.")
+                        description: Text("No Warbond CCU offers are available right now.")
                     )
                     .padding(.vertical, 44)
                 } else {
@@ -216,8 +216,11 @@ struct WBCCUDealsView: View {
         isPreparingCheckout = true
         defer { isPreparingCheckout = false }
 
+        let accountID = appModel.session?.id
+        let generation = appModel.accountContextGeneration
         do {
             let preparation = try await appModel.prepareWBCCUCheckout(items: items)
+            guard accountID == appModel.session?.id, generation == appModel.accountContextGeneration else { return }
             let cookies = RSISessionCookieSet.merging(
                 savedCookies: appModel.session?.cookies ?? [],
                 refreshedCookies: preparation.updatedCookies
@@ -228,6 +231,7 @@ struct WBCCUDealsView: View {
                 checkoutURL: preparation.checkoutURL,
                 cookies: cookies,
                 navigationTitle: "WBCCU Checkout",
+                accountID: accountID, accountGeneration: generation,
                 completionButtonTitle: "Finished Shopping"
             )
         } catch {
@@ -235,12 +239,14 @@ struct WBCCUDealsView: View {
         }
     }
 
-    private func persistCheckoutCookies(_ cookies: [SessionCookie], clearCart: Bool) {
+    private func persistCheckoutCookies(_ cookies: [SessionCookie], clearCart: Bool, context: RSICheckoutContext) {
+        guard let accountID = context.accountID, accountID == appModel.session?.id,
+              context.accountGeneration == appModel.accountContextGeneration else { return }
         if clearCart {
             cartItems.removeAll()
         }
         Task {
-            await appModel.persistBrowserCookies(cookies)
+            await appModel.persistBrowserCookies(cookies, for: accountID, generation: context.accountGeneration)
         }
     }
 

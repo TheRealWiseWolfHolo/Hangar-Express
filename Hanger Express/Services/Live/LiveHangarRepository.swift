@@ -4,7 +4,9 @@ import WebKit
 @MainActor
 final class LiveHangarRepository: HangarRepository {
     private let browser = RSIAccountPageBrowser()
-    private let shipCatalogClient = HostedShipCatalogClient()
+    private let inventoryNormalizer = HangarInventoryNormalizer()
+    private let shipCatalogClient: HostedShipCatalogClient
+    private let shipCatalogStore: HostedShipCatalogStore
     private let limitedShipSaleClient = HostedLimitedShipSaleClient()
     private let previewRepository = PreviewHangarRepository()
     private let refreshDiagnostics: RefreshDiagnosticsStore
@@ -14,16 +16,18 @@ final class LiveHangarRepository: HangarRepository {
     private let maxBuybackPages = 100
     private let hangarLogBatchSize = 10
 
-    init(diagnostics: RefreshDiagnosticsStore) {
+    init(diagnostics: RefreshDiagnosticsStore, shipCatalogClient: HostedShipCatalogClient = HostedShipCatalogClient(), shipCatalogStore: HostedShipCatalogStore = .shared) {
         refreshDiagnostics = diagnostics
+        self.shipCatalogClient = shipCatalogClient
+        self.shipCatalogStore = shipCatalogStore
     }
 
     private var syncWorkerCount: Int {
         let configuredValue = UserDefaults.standard.integer(forKey: SyncPreferences.workerCountKey)
-        let fallbackValue = configuredValue == 0 ? SyncPreferences.defaultWorkerCount : configuredValue
-        return SyncPreferences.constrainedWorkerCount(
-            fallbackValue,
-            isPro: ProSubscriptionConfiguration.storedIsPro
+        return SyncPreferences.resolvedWorkerCount(
+            configuredCount: configuredValue,
+            isPro: ProSubscriptionConfiguration.storedIsPro,
+            wasCustomized: UserDefaults.standard.bool(forKey: SyncPreferences.workerCountWasCustomizedKey)
         )
     }
 
@@ -45,6 +49,8 @@ final class LiveHangarRepository: HangarRepository {
     }
 
     private struct FullAccountRefreshPayload {
+        let didRefreshAccountOverview: Bool
+        let didRefreshReferralStats: Bool
         let accountHandle: String?
         let avatarURL: URL?
         let primaryOrganization: AccountOrganization?
@@ -53,55 +59,62 @@ final class LiveHangarRepository: HangarRepository {
         let totalSpendUSD: Decimal?
         let hangarLogs: [HangarLogEntry]
         let referralStats: ReferralStats
+        let gameAccess: RSIGameAccessSummary?
     }
 
-    func fetchSnapshot(
-        for session: UserSession,
-        progress: @escaping RefreshProgressHandler
-    ) async throws -> HangarSnapshot {
+    func fetchSnapshot(for session: UserSession, progress: @escaping RefreshProgressHandler) async throws -> HangarSnapshot {
+        try await fetchSnapshot(for: session, preserving: nil, progress: progress)
+    }
+
+    func fetchSnapshot(for session: UserSession, preserving previous: HangarSnapshot?, progress: @escaping RefreshProgressHandler) async throws -> HangarSnapshot {
         if session.authMode == .developerPreview {
             return try await previewRepository.fetchSnapshot(for: session, progress: progress)
         }
-
         try validate(session: session)
-        let hangarBrowser = RSIAccountPageBrowser()
-        let buybackBrowser = RSIAccountPageBrowser()
-        let accountBrowser = RSIAccountPageBrowser()
+        let base = previous ?? HangarSnapshot(accountHandle: session.handle, lastSyncedAt: .distantPast,
+            avatarURL: session.avatarURL, storeCreditUSD: nil, packages: [], fleet: [], buyback: [], sections: .empty)
+        let hangarBrowser = RSIAccountPageBrowser(), buybackBrowser = RSIAccountPageBrowser(), accountBrowser = RSIAccountPageBrowser()
+        async let hangar = sectionResult {
+            let value = try await self.fetchFullHangarRefreshPayload(using: session.cookies, browser: hangarBrowser, progress: progress)
+            return base.updatingHangar(packages: value.packages, fleet: value.fleet)
+        }
+        async let buyback = sectionResult {
+            let value = try await self.fetchFullBuybackRefreshPayload(using: session.cookies, browser: buybackBrowser, progress: progress)
+            return base.updatingBuyback(buyback: value)
+        }
+        async let account = sectionResult {
+            let value = try await self.fetchFullAccountRefreshPayload(for: session, browser: accountBrowser, progress: progress)
+            guard value.didRefreshAccountOverview || value.didRefreshReferralStats else {
+                throw LiveHangarRepositoryError.unexpectedMarkup(AppLocalizer.string("Unable to refresh account information."))
+            }
+            return base.updatingAccount(accountHandle: value.accountHandle ?? base.accountHandle,
+                avatarURL: value.avatarURL ?? base.avatarURL,
+                primaryOrganization: value.didRefreshPrimaryOrganization ? value.primaryOrganization : base.primaryOrganization,
+                didRefreshPrimaryOrganization: value.didRefreshPrimaryOrganization || base.didRefreshPrimaryOrganization,
+                storeCreditUSD: value.storeCreditUSD ?? base.storeCreditUSD, totalSpendUSD: value.totalSpendUSD ?? base.totalSpendUSD,
+                referralStats: value.didRefreshReferralStats ? value.referralStats : base.referralStats, gameAccess: value.gameAccess)
+        }
+        async let logs = sectionResult {
+            try await self.refreshHangarLogData(for: session, from: base, mode: .initial, progress: { _ in })
+        }
+        let resolved = await [SnapshotSection.hangar: hangar, .buyback: buyback, .account: account, .hangarLog: logs]
+        try Task.checkCancellation()
+        let successes = resolved.values.filter { if case .success = $0 { return true }; return false }.count
+        if successes == 0, let error = resolved.values.compactMap({ if case .failure(let error) = $0 { return error }; return nil }).first {
+            throw error
+        }
+        let outcomes = resolved.mapValues { result -> SnapshotSectionOutcome in
+            switch result {
+            case .success(let snapshot): .success(snapshot)
+            case .failure(let error): .failure(requiresAuthentication: (error as? LiveHangarRepositoryError)?.requiresReauthentication == true)
+            }
+        }
+        return SnapshotRefreshMerger.merge(base: base, outcomes: outcomes, at: .now)
+    }
 
-        async let hangarPayload = fetchFullHangarRefreshPayload(
-            using: session.cookies,
-            browser: hangarBrowser,
-            progress: progress
-        )
-        async let buybackPayload = fetchFullBuybackRefreshPayload(
-            using: session.cookies,
-            browser: buybackBrowser,
-            progress: progress
-        )
-        async let accountPayload = fetchFullAccountRefreshPayload(
-            for: session,
-            browser: accountBrowser,
-            progress: progress
-        )
-
-        let resolvedHangarPayload = try await hangarPayload
-        let resolvedBuyback = try await buybackPayload
-        let resolvedAccountPayload = try await accountPayload
-
-        return HangarSnapshot(
-            accountHandle: resolvedAccountPayload.accountHandle ?? session.handle,
-            lastSyncedAt: .now,
-            avatarURL: resolvedAccountPayload.avatarURL ?? session.avatarURL,
-            primaryOrganization: resolvedAccountPayload.primaryOrganization,
-            didRefreshPrimaryOrganization: resolvedAccountPayload.didRefreshPrimaryOrganization,
-            storeCreditUSD: resolvedAccountPayload.storeCreditUSD,
-            totalSpendUSD: resolvedAccountPayload.totalSpendUSD,
-            packages: resolvedHangarPayload.packages,
-            fleet: resolvedHangarPayload.fleet,
-            buyback: resolvedBuyback,
-            hangarLogs: resolvedAccountPayload.hangarLogs,
-            referralStats: resolvedAccountPayload.referralStats
-        )
+    private func sectionResult(_ operation: () async throws -> HangarSnapshot) async -> Result<HangarSnapshot, Error> {
+        do { return .success(try await operation()) }
+        catch { return .failure(error) }
     }
 
     func refreshHangarData(
@@ -131,8 +144,9 @@ final class LiveHangarRepository: HangarRepository {
             stepNumber: 3,
             stepCount: 3
         )
-        let packages = remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) }
-        let fleet = FleetProjector.project(packages: packages, shipCatalog: shipCatalog)
+        let normalized = try await inventoryNormalizer.hangar(remotePledges, catalog: shipCatalog)
+        let packages = normalized.packages
+        let fleet = normalized.fleet
 
         progress(
             makeProgress(
@@ -207,13 +221,9 @@ final class LiveHangarRepository: HangarRepository {
 
             return sourcePage < partialRefreshStartPage
         }
-        let refreshedPackages = unaffectedPrefix + refreshedRemotePledgeTail.map {
-            normalize(package: $0, shipCatalog: resolvedShipCatalog)
-        }
-        let fleet = FleetProjector.project(
-            packages: refreshedPackages,
-            shipCatalog: resolvedShipCatalog
-        )
+        let normalized = try await inventoryNormalizer.hangar(refreshedRemotePledgeTail, catalog: resolvedShipCatalog, prefix: unaffectedPrefix)
+        let refreshedPackages = normalized.packages
+        let fleet = normalized.fleet
 
         progress(
             makeProgress(
@@ -263,7 +273,7 @@ final class LiveHangarRepository: HangarRepository {
 
         let resolvedRemoteBuyback = try await remoteBuyback
         let resolvedShipCatalog = await shipCatalog
-        let buyback = resolvedRemoteBuyback.map { normalize(buyback: $0, shipCatalog: resolvedShipCatalog) }
+        let buyback = try await inventoryNormalizer.buyback(resolvedRemoteBuyback, catalog: resolvedShipCatalog)
         progress(
             makeProgress(
                 stage: .finalizing,
@@ -343,12 +353,14 @@ final class LiveHangarRepository: HangarRepository {
         try validate(session: session)
         progress(preparationProgress(for: session, stepNumber: 1, stepCount: 2))
 
+        async let fetchedGameAccess: RSIGameAccessSummary? = try? await RSIGameAccessService.fetch(using: session.cookies)
         let accountContext = try await fetchAccountContext(
             for: session,
             progress: progress,
             stepNumber: 2,
             stepCount: 2
         )
+        let gameAccess = await fetchedGameAccess
 
         return snapshot.updatingAccount(
             accountHandle: accountContext.accountHandle ?? snapshot.accountHandle,
@@ -358,6 +370,7 @@ final class LiveHangarRepository: HangarRepository {
             storeCreditUSD: accountContext.didRefreshAccountOverview ? accountContext.storeCreditUSD : snapshot.storeCreditUSD,
             totalSpendUSD: accountContext.didRefreshAccountOverview ? accountContext.totalSpendUSD : snapshot.totalSpendUSD,
             referralStats: accountContext.didRefreshReferralStats ? accountContext.referralStats : snapshot.referralStats,
+            gameAccess: gameAccess,
             lastSyncedAt: (accountContext.didRefreshAccountOverview || accountContext.didRefreshReferralStats) ? .now : snapshot.lastSyncedAt
         )
     }
@@ -383,8 +396,9 @@ final class LiveHangarRepository: HangarRepository {
             trackerID: FullRefreshTracker.hangar,
             trackerTitle: "Hangar"
         )
-        let packages = remotePledges.map { normalize(package: $0, shipCatalog: shipCatalog) }
-        let fleet = FleetProjector.project(packages: packages, shipCatalog: shipCatalog)
+        let normalized = try await inventoryNormalizer.hangar(remotePledges, catalog: shipCatalog)
+        let packages = normalized.packages
+        let fleet = normalized.fleet
         emitFullRefreshCompletion(
             progress: progress,
             trackerID: FullRefreshTracker.hangar,
@@ -424,7 +438,7 @@ final class LiveHangarRepository: HangarRepository {
 
         let resolvedRemoteBuyback = try await remoteBuyback
         let resolvedShipCatalog = await shipCatalog
-        let buyback = resolvedRemoteBuyback.map { normalize(buyback: $0, shipCatalog: resolvedShipCatalog) }
+        let buyback = try await inventoryNormalizer.buyback(resolvedRemoteBuyback, catalog: resolvedShipCatalog)
         emitFullRefreshCompletion(
             progress: progress,
             trackerID: FullRefreshTracker.buyback,
@@ -441,6 +455,7 @@ final class LiveHangarRepository: HangarRepository {
         browser: RSIAccountPageBrowser,
         progress: @escaping RefreshProgressHandler
     ) async throws -> FullAccountRefreshPayload {
+        async let fetchedGameAccess: RSIGameAccessSummary? = try? await RSIGameAccessService.fetch(using: session.cookies)
         let accountContext = try await fetchAccountContext(
             for: session,
             browser: browser,
@@ -450,6 +465,7 @@ final class LiveHangarRepository: HangarRepository {
             trackerID: FullRefreshTracker.account,
             trackerTitle: "Account"
         )
+        let gameAccess = await fetchedGameAccess
         emitFullRefreshCompletion(
             progress: progress,
             trackerID: FullRefreshTracker.account,
@@ -460,6 +476,8 @@ final class LiveHangarRepository: HangarRepository {
         )
 
         return FullAccountRefreshPayload(
+            didRefreshAccountOverview: accountContext.didRefreshAccountOverview,
+            didRefreshReferralStats: accountContext.didRefreshReferralStats,
             accountHandle: accountContext.accountHandle,
             avatarURL: accountContext.avatarURL,
             primaryOrganization: accountContext.primaryOrganization,
@@ -467,7 +485,8 @@ final class LiveHangarRepository: HangarRepository {
             storeCreditUSD: accountContext.storeCreditUSD,
             totalSpendUSD: accountContext.totalSpendUSD,
             hangarLogs: [],
-            referralStats: accountContext.referralStats
+            referralStats: accountContext.referralStats,
+            gameAccess: gameAccess
         )
     }
 
@@ -586,19 +605,22 @@ final class LiveHangarRepository: HangarRepository {
 
     func requestCharacterRepair(
         for session: UserSession,
-        password: String
+        reason: String,
+        issueCouncilURL: String?
     ) async throws -> CharacterRepairResult {
         if session.authMode == .developerPreview {
             return try await previewRepository.requestCharacterRepair(
                 for: session,
-                password: password
+                reason: reason,
+                issueCouncilURL: issueCouncilURL
             )
         }
 
         try validate(session: session)
         return try await browser.requestCharacterRepair(
             using: session.cookies,
-            password: password
+            reason: reason,
+            issueCouncilURL: issueCouncilURL
         )
     }
 
@@ -703,6 +725,29 @@ final class LiveHangarRepository: HangarRepository {
 
         try validate(session: session)
         return try await browser.fetchAuthorizedDevices(using: session.cookies, password: password)
+    }
+
+    func requestAuthorizedDevicesVerificationCode(
+        for session: UserSession
+    ) async throws -> [SessionCookie] {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.requestAuthorizedDevicesVerificationCode(for: session)
+        }
+
+        try validate(session: session)
+        return try await browser.requestAuthorizedDevicesVerificationCode(using: session.cookies)
+    }
+
+    func verifyAuthorizedDevices(
+        for session: UserSession,
+        code: String
+    ) async throws -> [SessionCookie] {
+        if session.authMode == .developerPreview {
+            return try await previewRepository.verifyAuthorizedDevices(for: session, code: code)
+        }
+
+        try validate(session: session)
+        return try await browser.verifyAuthorizedDevices(using: session.cookies, code: code)
     }
 
     func removeAuthorizedDevice(
@@ -827,7 +872,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         )
 
-        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies, diagnostics: directHTTPDiagnosticsHandler())
         let firstPage: RemotePledgePage
         do {
             firstPage = try await directClient.fetchPledgePage(
@@ -938,7 +983,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         }
 
-        let warmedCookies = directClient.currentCookies
+        let warmedCookies = await directClient.currentCookies
         let remainingPages = Array(2 ... totalPages)
         let orderedResults: [RemotePledgePage]
         do {
@@ -1057,7 +1102,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         )
 
-        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies, diagnostics: directHTTPDiagnosticsHandler())
         let firstPage: RemotePledgePage
         do {
             firstPage = try await directClient.fetchPledgePage(
@@ -1169,7 +1214,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         }
 
-        let warmedCookies = directClient.currentCookies
+        let warmedCookies = await directClient.currentCookies
         let remainingPages = Array((startPage + 1) ... totalPages)
         let orderedResults: [RemotePledgePage]
         do {
@@ -1277,7 +1322,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         )
 
-        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies, diagnostics: directHTTPDiagnosticsHandler())
         let firstPage: RemoteBuybackPage
         do {
             firstPage = try await directClient.fetchBuybackPage(
@@ -1386,7 +1431,7 @@ final class LiveHangarRepository: HangarRepository {
             )
         }
 
-        let warmedCookies = directClient.currentCookies
+        let warmedCookies = await directClient.currentCookies
         let remainingPages = Array(2 ... totalPages)
         let orderedResults: [RemoteBuybackPage]
         do {
@@ -1466,7 +1511,7 @@ final class LiveHangarRepository: HangarRepository {
         var pledgeTotalPages = knownTotalPages
         var previousSignature = previousPageSignature
         var didReachEndOfPledges = false
-        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies, diagnostics: directHTTPDiagnosticsHandler())
 
         for page in startPage ... maxPledgePages {
             progress(
@@ -1576,7 +1621,7 @@ final class LiveHangarRepository: HangarRepository {
         var buybackTotalPages = knownTotalPages
         var previousSignature = previousPageSignature
         var didReachEndOfBuyback = false
-        let directClient = RSIAccountHTTPPageClient(cookies: cookies)
+        let directClient = RSIAccountHTTPPageClient(cookies: cookies, diagnostics: directHTTPDiagnosticsHandler())
 
         for page in startPage ... maxBuybackPages {
             progress(
@@ -1684,13 +1729,15 @@ final class LiveHangarRepository: HangarRepository {
         )
         var resultsByPage: [Int: RemotePledgePage] = [:]
 
+        let networkDiagnostics = directHTTPDiagnosticsHandler()
         try await withThrowingTaskGroup(of: [(Int, RemotePledgePage)].self) { group in
             for chunk in chunks {
                 group.addTask {
                     try await RSIAccountHTTPPageClient.loadPledgeChunk(
                         using: cookies,
                         pages: chunk,
-                        pageSize: pageSize
+                        pageSize: pageSize,
+                        diagnostics: networkDiagnostics
                     ) { _, itemCount in
                         let totals = await progressTracker.record(
                             completedPages: 1,
@@ -1750,13 +1797,15 @@ final class LiveHangarRepository: HangarRepository {
         )
         var resultsByPage: [Int: RemoteBuybackPage] = [:]
 
+        let networkDiagnostics = directHTTPDiagnosticsHandler()
         try await withThrowingTaskGroup(of: [(Int, RemoteBuybackPage)].self) { group in
             for chunk in chunks {
                 group.addTask {
                     try await RSIAccountHTTPPageClient.loadBuybackChunk(
                         using: cookies,
                         pages: chunk,
-                        pageSize: pageSize
+                        pageSize: pageSize,
+                        diagnostics: networkDiagnostics
                     ) { _, itemCount in
                         let totals = await progressTracker.record(
                             completedPages: 1,
@@ -2156,7 +2205,7 @@ final class LiveHangarRepository: HangarRepository {
 
         let shipCatalog: RSIShipCatalog?
         do {
-            shipCatalog = try await shipCatalogClient.fetchCatalog()
+            shipCatalog = try await shipCatalogStore.catalog(using: shipCatalogClient)
         } catch {
             shipCatalog = nil
         }
@@ -2294,6 +2343,16 @@ final class LiveHangarRepository: HangarRepository {
             throw error
         } catch {
             return nil
+        }
+    }
+
+    private func directHTTPDiagnosticsHandler() -> RSIHTTPDiagnosticsHandler {
+        let generation = refreshDiagnostics.generation
+        return { [weak self] detail, failed in
+            guard let self, self.refreshDiagnostics.generation == generation else { return }
+            self.recordRefreshDiagnostics(stage: "network.directHTTP",
+                summary: failed ? "RSI direct HTTP request failed." : "RSI direct HTTP request completed.",
+                detail: detail, level: failed ? .error : .info)
         }
     }
 
@@ -2532,469 +2591,7 @@ final class LiveHangarRepository: HangarRepository {
         )
     }
 
-    private func normalize(package remote: RemotePledge, shipCatalog: RSIShipCatalog?) -> HangarPackage {
-        let containsSummary = remote.containsText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let packageValueUSD = parseMoney(remote.valueText)
-        let packageThumbnailURL = mirroredCatalogImageURL(
-            remote.thumbnailImageURL.flatMap(URL.init(string:)),
-            shipCatalog: shipCatalog
-        )
-        let insuranceOptions = inferInsuranceOptions(
-            from: remote.alsoContains,
-            containsSummary: containsSummary,
-            items: remote.items
-        )
-        let contents = normalizeContents(
-            for: remote,
-            containsSummary: containsSummary,
-            packageValueUSD: packageValueUSD,
-            shipCatalog: shipCatalog,
-            packageThumbnailURL: packageThumbnailURL
-        )
 
-        return HangarPackage(
-            id: remote.id ?? stableNumericID(from: remote.title),
-            title: normalizePackageTitle(remote.title),
-            status: remote.statusText.nilIfEmpty ?? "Unknown",
-            insurance: insuranceOptions.first ?? "Unknown",
-            insuranceOptions: insuranceOptions.isEmpty ? nil : insuranceOptions,
-            acquiredAt: parseRSIDate(remote.dateText) ?? .now,
-            originalValueUSD: packageValueUSD,
-            currentValueUSD: inferredCurrentValueUSD(contents: contents, shipCatalog: shipCatalog, fallbackValueUSD: packageValueUSD),
-            canGift: remote.canGift,
-            canReclaim: remote.canReclaim,
-            canUpgrade: remote.canUpgrade,
-            isUpgradedStatusFlag: remote.isUpgradedStatusFlag,
-            upgradeMetadata: remote.upgradeMetadata?.domainModel,
-            sourcePage: remote.sourcePage,
-            sourcePageIndex: remote.sourcePageIndex,
-            packageThumbnailURL: packageThumbnailURL,
-            contents: contents
-        )
-    }
-
-    private func normalizeContents(
-        for remote: RemotePledge,
-        containsSummary: String,
-        packageValueUSD: Decimal,
-        shipCatalog: RSIShipCatalog?,
-        packageThumbnailURL: URL?
-    ) -> [PackageItem] {
-        let renderableRemoteItems = remote.items.filter {
-            HangarPledgeSummaryParser.shouldRenderContentTitle($0.title)
-        }
-        let upgradeMeltValueUSD = inferredUpgradeMeltValue(
-            items: renderableRemoteItems,
-            packageValueUSD: packageValueUSD
-        )
-        let shouldUsePackageThumbnailFallback = renderableRemoteItems.count <= 1
-
-        let liveItems = renderableRemoteItems.enumerated().map { offset, item in
-            let itemCategory = category(for: item.kind, title: item.title, detail: item.detail)
-            let upgradePath = itemCategory == .upgrade ? UpgradeTitleParser.parse(item.title) : nil
-            let sourceShip = upgradePath.flatMap { shipCatalog?.matchShip(named: $0.sourceShipName) }
-            let targetShip = upgradePath.flatMap { shipCatalog?.matchShip(named: $0.targetShipName) }
-
-            return PackageItem(
-                id: "\(remote.id ?? stableNumericID(from: remote.title))-\(offset)",
-                title: item.title.nilIfEmpty ?? "Untitled Item",
-                detail: item.detail.nilIfEmpty ?? item.kind.nilIfEmpty ?? "Unknown",
-                category: itemCategory,
-                imageURL: itemImageURL(
-                    for: item,
-                    category: itemCategory,
-                    shipCatalog: shipCatalog,
-                    targetShip: targetShip,
-                    packageThumbnailURL: packageThumbnailURL,
-                    usePackageThumbnailFallback: shouldUsePackageThumbnailFallback
-                ),
-                upgradePricing: upgradePricing(
-                    path: upgradePath,
-                    sourceShip: sourceShip,
-                    targetShip: targetShip,
-                    meltValueUSD: upgradeMeltValueUSD
-                )
-            )
-        }
-
-        let supplementalTitles = HangarPledgeSummaryParser.supplementalTitles(
-            from: containsSummary,
-            alsoContains: remote.alsoContains,
-            excluding: [remote.title, normalizePackageTitle(remote.title)] + liveItems.map(\.title)
-        )
-        let supplementalItems = supplementalTitles.enumerated().map { offset, title in
-            let detail = supplementalDetail(for: title)
-            return PackageItem(
-                id: "\(remote.id ?? stableNumericID(from: remote.title))-\(liveItems.count + offset)",
-                title: title,
-                detail: detail,
-                category: category(for: "", title: title, detail: detail),
-                imageURL: liveItems.isEmpty && offset == 0 ? packageThumbnailURL : nil,
-                upgradePricing: nil
-            )
-        }
-
-        if !liveItems.isEmpty {
-            return liveItems + supplementalItems
-        }
-
-        if !supplementalItems.isEmpty {
-            return supplementalItems
-        }
-
-        guard !containsSummary.isEmpty else {
-            return []
-        }
-
-        return [
-            PackageItem(
-                id: "\(remote.id ?? stableNumericID(from: remote.title))-0",
-                title: containsSummary,
-                detail: "Extracted from the RSI pledge summary",
-                category: .perk,
-                imageURL: packageThumbnailURL,
-                upgradePricing: nil
-            )
-        ]
-    }
-
-    private func supplementalDetail(for title: String) -> String {
-        let lowercasedTitle = title.localizedLowercase
-
-        if lowercasedTitle.contains("hangar") {
-            return "Hangar entitlement"
-        }
-
-        if lowercasedTitle.contains("insurance")
-            || HangarPackage.containsLifetimeInsuranceToken(lowercasedTitle) {
-            return "Insurance"
-        }
-
-        return "RSI pledge entitlement"
-    }
-
-    private func itemImageURL(
-        for item: RemotePledgeItem,
-        category: PackageItem.Category,
-        shipCatalog: RSIShipCatalog?,
-        targetShip: RSIShipCatalog.Ship?,
-        packageThumbnailURL: URL?,
-        usePackageThumbnailFallback: Bool
-    ) -> URL? {
-        if let directURL = item.imageURL.flatMap(URL.init(string:)) {
-            return mirroredCatalogImageURL(directURL, shipCatalog: shipCatalog)
-        }
-
-        if let specialEditionURL = specialEditionImageURL(
-            for: item.title,
-            packageThumbnailURL: packageThumbnailURL
-        ) {
-            return specialEditionURL
-        }
-
-        switch category {
-        case .upgrade:
-            return nil
-        case .ship, .vehicle:
-            return shipCatalog?.matchShip(named: item.title)?.imageURL ?? (usePackageThumbnailFallback ? packageThumbnailURL : nil)
-        case .gamePackage, .flair, .perk:
-            return usePackageThumbnailFallback ? packageThumbnailURL : nil
-        }
-    }
-
-    private func specialEditionImageURL(
-        for itemTitle: String,
-        packageThumbnailURL: URL?
-    ) -> URL? {
-        if itemTitle.localizedCaseInsensitiveContains("Dragonfly Star Kitten Edition") {
-            return packageThumbnailURL
-        }
-
-        return nil
-    }
-
-    private func upgradePricing(
-        path: ShipUpgradePath?,
-        sourceShip: RSIShipCatalog.Ship?,
-        targetShip: RSIShipCatalog.Ship?,
-        meltValueUSD: Decimal?
-    ) -> PackageItem.UpgradePricing? {
-        guard let path else {
-            return nil
-        }
-
-        let actualValueUSD: Decimal?
-        if let sourceMSRP = sourceShip?.msrpUSD, let targetMSRP = targetShip?.msrpUSD {
-            actualValueUSD = targetMSRP - sourceMSRP
-        } else {
-            actualValueUSD = nil
-        }
-
-        return PackageItem.UpgradePricing(
-            sourceShipName: path.sourceShipName,
-            sourceShipMSRPUSD: sourceShip?.msrpUSD,
-            sourceShipImageURL: sourceShip?.imageURL,
-            targetShipName: path.targetShipName,
-            targetShipMSRPUSD: targetShip?.msrpUSD,
-            targetShipImageURL: targetShip?.imageURL,
-            actualValueUSD: actualValueUSD,
-            meltValueUSD: meltValueUSD
-        )
-    }
-
-    private func inferredCurrentValueUSD(
-        contents: [PackageItem],
-        shipCatalog: RSIShipCatalog?,
-        fallbackValueUSD: Decimal
-    ) -> Decimal {
-        let shipLikeItems = contents.filter(\.isShipLike)
-        let shipLikeValueUSD = shipLikeItems.reduce(into: Decimal.zero) { partialResult, item in
-            partialResult += shipCatalog?.matchShip(named: item.title)?.msrpUSD ?? .zero
-        }
-
-        if !shipLikeItems.isEmpty, shipLikeValueUSD > 0 {
-            return shipLikeValueUSD
-        }
-
-        let upgradeValueUSD = contents.reduce(into: Decimal.zero) { partialResult, item in
-            partialResult += item.upgradePricing?.actualValueUSD ?? .zero
-        }
-
-        if upgradeValueUSD > 0 {
-            return upgradeValueUSD
-        }
-
-        return fallbackValueUSD
-    }
-
-    private func inferredUpgradeMeltValue(items: [RemotePledgeItem], packageValueUSD: Decimal) -> Decimal? {
-        guard packageValueUSD > 0 else {
-            return nil
-        }
-
-        let upgradeItems = items.filter {
-            category(for: $0.kind, title: $0.title, detail: $0.detail) == .upgrade
-        }
-
-        guard !upgradeItems.isEmpty else {
-            return nil
-        }
-
-        let nonUpgradeCategories = items
-            .map { category(for: $0.kind, title: $0.title, detail: $0.detail) }
-            .filter { $0 != .upgrade && $0 != .perk && $0 != .flair }
-
-        return nonUpgradeCategories.isEmpty ? packageValueUSD : nil
-    }
-
-    private func normalize(buyback remote: RemoteBuybackPledge, shipCatalog: RSIShipCatalog?) -> BuybackPledge {
-        let title = remote.title.nilIfEmpty ?? "Untitled Buy Back"
-        let notes = remote.containsText.nilIfEmpty ?? ""
-
-        return BuybackPledge(
-            id: remote.id ?? stableNumericID(from: title),
-            title: title,
-            recoveredValueUSD: parseMoney(remote.valueText),
-            addedToBuybackAt: parseRSIDate(remote.dateText) ?? BuybackPledge.unknownAddedToBuybackDate,
-            notes: notes,
-            imageURL: mirroredCatalogImageURL(
-                remote.imageURL.flatMap(URL.init(string:)),
-                shipCatalog: shipCatalog
-            ),
-            upgradeContext: remote.upgradeContext,
-            sourceRawInfo: remote.sourceRawInfo
-        )
-    }
-
-    private func mirroredCatalogImageURL(_ originalURL: URL?, shipCatalog: RSIShipCatalog?) -> URL? {
-        guard let originalURL else {
-            return nil
-        }
-
-        return shipCatalog?.mirroredAssetURL(for: originalURL) ?? originalURL
-    }
-
-    private func normalizePackageTitle(_ title: String) -> String {
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if trimmed.localizedCaseInsensitiveContains("contains"),
-           trimmed.localizedCaseInsensitiveContains("nameable ship"),
-           let prefix = trimmed.components(separatedBy: " Contains ").first {
-            return prefix
-        }
-
-        return trimmed.isEmpty ? "Untitled Pledge" : trimmed
-    }
-
-    private func category(for kind: String, title: String, detail: String) -> PackageItem.Category {
-        let haystack = [kind, title, detail]
-            .joined(separator: " ")
-            .localizedLowercase
-
-        if haystack.contains("upgrade") || title.contains(" to ") {
-            return .upgrade
-        }
-
-        if haystack.contains("game package") || haystack.contains("digital download") {
-            return .gamePackage
-        }
-
-        if haystack.contains("vehicle") || haystack.contains("ground vehicle") || haystack.contains("bike") {
-            return .vehicle
-        }
-
-        if haystack.contains("ship") || haystack.contains("gunboat") || haystack.contains("fighter") || haystack.contains("freighter") {
-            return .ship
-        }
-
-        if haystack.contains("paint") || haystack.contains("skin") || haystack.contains("hangar") || haystack.contains("flair") {
-            return .flair
-        }
-
-        if haystack.contains("perk") || haystack.contains("reward") || haystack.contains("token") || haystack.contains("coin") {
-            return .perk
-        }
-
-        return .perk
-    }
-
-    private func inferInsuranceOptions(
-        from alsoContains: [String],
-        containsSummary: String,
-        items: [RemotePledgeItem]
-    ) -> [String] {
-        let itemCandidates = items.flatMap { item in
-            [item.title, item.kind, item.detail]
-        }
-        let candidates = alsoContains + containsSummary.components(separatedBy: "#") + itemCandidates
-        let extractedOptions = candidates.flatMap(extractInsuranceOptions(from:))
-
-        return HangarPackage.normalizedInsuranceLevels(extractedOptions)
-    }
-
-    private func extractInsuranceOptions(from rawValue: String) -> [String] {
-        let value = rawValue
-            .replacingOccurrences(of: "-", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !value.isEmpty else {
-            return []
-        }
-
-        var results: [String] = []
-        let lowercased = value.localizedLowercase
-
-        if HangarPackage.containsLifetimeInsuranceToken(lowercased) {
-            results.append("LTI")
-        }
-
-        results.append(contentsOf: allMatches(in: lowercased, pattern: #"(\d+)\s*(month|months|mo)\b"#).map { "\($0) months" })
-        results.append(contentsOf: allMatches(in: lowercased, pattern: #"(\d+)\s*(year|years|yr)\b"#).map { "\($0 * 12) months" })
-
-        return results
-    }
-
-    private func parseMoney(_ value: String) -> Decimal {
-        let normalized = value
-            .replacingOccurrences(of: ",", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !normalized.isEmpty, !normalized.localizedCaseInsensitiveContains("uec") else {
-            return .zero
-        }
-
-        if let direct = Decimal(string: normalized.filter { $0.isNumber || $0 == "." || $0 == "-" }) {
-            return direct
-        }
-
-        return .zero
-    }
-
-    private func parseRSIDate(_ value: String) -> Date? {
-        let normalized = value
-            .replacingOccurrences(
-                of: #"(?i)\b(?:created|date|added|reclaimed|recovered)\s*:"#,
-                with: "",
-                options: .regularExpression
-            )
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(
-                of: #"\b(\d{1,2})(st|nd|rd|th)\b"#,
-                with: "$1",
-                options: [.regularExpression, .caseInsensitive]
-            )
-
-        guard !normalized.isEmpty else {
-            return nil
-        }
-
-        for formatter in Self.dateFormatters {
-            if let date = formatter.date(from: normalized) {
-                return date
-            }
-        }
-
-        return nil
-    }
-
-    private func firstMatch(in text: String, pattern: String) -> Int? {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return nil
-        }
-
-        let range = NSRange(text.startIndex..., in: text)
-        guard let match = regex.firstMatch(in: text, range: range),
-              let captureRange = Range(match.range(at: 1), in: text) else {
-            return nil
-        }
-
-        return Int(text[captureRange])
-    }
-
-    private func allMatches(in text: String, pattern: String) -> [Int] {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return []
-        }
-
-        let range = NSRange(text.startIndex..., in: text)
-        return regex.matches(in: text, range: range).compactMap { match in
-            guard let captureRange = Range(match.range(at: 1), in: text) else {
-                return nil
-            }
-
-            return Int(text[captureRange])
-        }
-    }
-
-    private func stableNumericID(from text: String) -> Int {
-        var value = 0
-        for scalar in text.unicodeScalars {
-            value = (value &* 31 &+ Int(scalar.value)) & 0x7fffffff
-        }
-        return max(value, 1)
-    }
-
-    private static let dateFormatters: [DateFormatter] = {
-        let formats = [
-            "MMM d, yyyy",
-            "MMM dd, yyyy",
-            "MMMM d, yyyy",
-            "MMMM dd, yyyy",
-            "MMM d yyyy",
-            "MMM dd yyyy",
-            "MMMM d yyyy",
-            "MMMM dd yyyy",
-            "yyyy-MM-dd"
-        ]
-
-        return formats.map { format in
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.timeZone = TimeZone(secondsFromGMT: 0)
-            formatter.dateFormat = format
-            return formatter
-        }
-    }()
 }
 
 nonisolated enum LiveHangarRepositoryError: Error, LocalizedError, Equatable {
@@ -3036,7 +2633,10 @@ nonisolated enum FleetProjector {
     ]
 
     static func project(packages: [HangarPackage], shipCatalog: RSIShipCatalog?) -> [FleetShip] {
-        packages.flatMap { package in
+        let performanceInterval = PerformanceTrace.begin("FleetProjection")
+        defer { PerformanceTrace.end("FleetProjection", performanceInterval) }
+
+        return packages.flatMap { package in
             let fleetEntries = package.contents.compactMap { item -> (PackageItem, RSIShipCatalog.Ship?)? in
                 guard HangarPledgeSummaryParser.shouldRenderContentTitle(item.title) else {
                     return nil
@@ -3343,12 +2943,29 @@ private struct RemoteCharacterRepairExecution: Decodable {
     let status: String
     let failureMessage: String?
     let debugSummary: String?
+    let remainingSeconds: Int?
 }
 
 private struct RemoteAuthorizedDevicesLookup: Decodable {
     let accessDenied: Bool
+    let verificationRequired: Bool
     let status: String
     let devices: [RemoteAuthorizedDevice]
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
+private struct RemoteAuthorizedDevicesVerification: Decodable {
+    let accessDenied: Bool
+    let status: String
+    let failureMessage: String?
+    let debugSummary: String?
+}
+
+private struct RemoteAuthorizedDeviceRemovalResult: Decodable {
+    let accessDenied: Bool
+    let verificationRequired: Bool
+    let status: String
     let failureMessage: String?
     let debugSummary: String?
 }
@@ -3389,17 +3006,19 @@ private struct RemoteAuthorizedDeviceBulkRemoval: Decodable {
     let debugSummary: String?
 }
 
-private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
+actor RSIAccountHTTPPageClient {
     private var cookies: [SessionCookie]
     private let session: URLSession
     private let timeoutSeconds: TimeInterval = 25
+    private let diagnostics: RSIHTTPDiagnosticsHandler?
 
     var currentCookies: [SessionCookie] {
         cookies
     }
 
-    init(cookies: [SessionCookie]) {
+    init(cookies: [SessionCookie], session: URLSession? = nil, diagnostics: RSIHTTPDiagnosticsHandler? = nil) {
         self.cookies = cookies
+        self.diagnostics = diagnostics
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false
@@ -3407,11 +3026,13 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = timeoutSeconds
         configuration.timeoutIntervalForResource = max(timeoutSeconds * 2, 45)
-        session = URLSession(configuration: configuration)
+        self.session = session ?? URLSession(configuration: configuration)
     }
 
     func fetchPledgePage(page: Int, pageSize: Int) async throws -> RemotePledgePage {
         let payload = try await fetchHTML(path: "/en/account/pledges", page: page, pageSize: pageSize)
+        try Task.checkCancellation()
+        assert(!Thread.isMainThread)
         return try RSIAccountHTMLParser.parsePledgePage(
             html: payload.html,
             pageURL: payload.finalURL,
@@ -3423,6 +3044,8 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
 
     func fetchBuybackPage(page: Int, pageSize: Int) async throws -> RemoteBuybackPage {
         let payload = try await fetchHTML(path: "/en/account/buy-back-pledges", page: page, pageSize: pageSize)
+        try Task.checkCancellation()
+        assert(!Thread.isMainThread)
         return try RSIAccountHTMLParser.parseBuybackPage(
             html: payload.html,
             pageURL: payload.finalURL,
@@ -3432,17 +3055,18 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
         )
     }
 
-    static func loadPledgeChunk(
+    nonisolated static func loadPledgeChunk(
         using cookies: [SessionCookie],
         pages: [Int],
         pageSize: Int,
+        diagnostics: RSIHTTPDiagnosticsHandler? = nil,
         onPageLoaded: @escaping @Sendable (_ page: Int, _ itemCount: Int) async -> Void
     ) async throws -> [(Int, RemotePledgePage)] {
         guard !pages.isEmpty else {
             return []
         }
 
-        let client = RSIAccountHTTPPageClient(cookies: cookies)
+        let client = RSIAccountHTTPPageClient(cookies: cookies, diagnostics: diagnostics)
         var results: [(Int, RemotePledgePage)] = []
         var previousSignature: String?
 
@@ -3475,17 +3099,18 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
         return results
     }
 
-    static func loadBuybackChunk(
+    nonisolated static func loadBuybackChunk(
         using cookies: [SessionCookie],
         pages: [Int],
         pageSize: Int,
+        diagnostics: RSIHTTPDiagnosticsHandler? = nil,
         onPageLoaded: @escaping @Sendable (_ page: Int, _ itemCount: Int) async -> Void
     ) async throws -> [(Int, RemoteBuybackPage)] {
         guard !pages.isEmpty else {
             return []
         }
 
-        let client = RSIAccountHTTPPageClient(cookies: cookies)
+        let client = RSIAccountHTTPPageClient(cookies: cookies, diagnostics: diagnostics)
         var results: [(Int, RemoteBuybackPage)] = []
         var previousSignature: String?
 
@@ -3519,6 +3144,9 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
     }
 
     private func fetchHTML(path: String, page: Int, pageSize: Int) async throws -> HTTPPagePayload {
+        let performanceInterval = PerformanceTrace.begin("FetchHTML")
+        defer { PerformanceTrace.end("FetchHTML", performanceInterval) }
+
         let requestedURL = try pageURL(path: path, page: page, pageSize: pageSize)
         var request = URLRequest(url: requestedURL)
         request.httpMethod = "GET"
@@ -3544,20 +3172,39 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
             request.setValue(rsiDevice, forHTTPHeaderField: "x-rsi-device")
         }
 
+        let requestID = UUID().uuidString
+        let started = DispatchTime.now().uptimeNanoseconds
+        #if DEBUG || HANGAR_BENCHMARKS
+        let collector = RSIRequestMetricsDelegate(profilingDelegate: PerformanceNetworkMetrics.shared.delegateIfEnabled())
+        #else
+        let collector = RSIRequestMetricsDelegate()
+        #endif
+        func context() -> String {
+            (["requestID=\(requestID)",
+              "elapsedMs=\(String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000))",
+              "taskCancelled=\(Task.isCancelled)", "serverTrust=systemDefault",
+              "resourceTimeoutSeconds=\(session.configuration.timeoutIntervalForResource)",
+              "allowsCellular=\(session.configuration.allowsCellularAccess), allowsExpensive=\(session.configuration.allowsExpensiveNetworkAccess), allowsConstrained=\(session.configuration.allowsConstrainedNetworkAccess)"]
+              + collector.lines()).joined(separator: "\n")
+        }
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await session.data(for: request, delegate: collector)
         } catch {
-            throw LiveHangarRepositoryError.unexpectedMarkup(
-                directHTTPDiagnostics(
-                    summary: "Direct RSI HTTP page load failed.",
-                    requestedURL: requestedURL,
-                    response: nil,
-                    data: nil,
-                    underlyingError: error
-                )
-            )
+            let detail = directHTTPDiagnostics(summary: "Direct RSI HTTP page load failed.",
+                requestedURL: requestedURL, response: nil, data: nil, underlyingError: error) + "\n" + context()
+            await diagnostics?(detail, true)
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
+            throw LiveHangarRepositoryError.unexpectedMarkup(detail)
+        }
+        // Successful first pages establish connection context without recording
+        // every successful inventory page in the bounded support log.
+        if page == 1 || (response as? HTTPURLResponse).map({ !(200..<300).contains($0.statusCode) }) == true {
+            let failed = (response as? HTTPURLResponse).map { !(200..<300).contains($0.statusCode) } ?? true
+            let detail = directHTTPDiagnostics(summary: "Direct RSI HTTP response received.",
+                requestedURL: requestedURL, response: response, data: data, underlyingError: nil) + "\n" + context()
+            await diagnostics?(detail, failed)
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -3689,30 +3336,42 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
             "",
             "Direct HTTP Diagnostics",
             "transport=URLSession.directHTML",
-            "requestedURL=\(requestedURL.absoluteString)",
-            "finalURL=\(response?.url?.absoluteString ?? "unknown")",
+            "requestedURL=\(RSINetworkDiagnostics.safeURL(requestedURL))",
+            "finalURL=\(RSINetworkDiagnostics.safeURL(response?.url))",
             "timeoutSeconds=\(Int(timeoutSeconds))",
             "httpStatus=\(httpResponse.map { String($0.statusCode) } ?? "unknown")",
             "mimeType=\(response?.mimeType ?? "unknown")",
             "expectedContentLength=\(response?.expectedContentLength ?? -1)",
-            "responseBytes=\(data?.count ?? 0)",
+            "responseBytes=\(data.map { String($0.count) } ?? "unavailable")",
             "cookieCount=\(cookies.count)",
             "cookieNames=\(cookieNamesSummary())",
             "authCookies=\(authCookieSummary())"
         ]
 
+        let secrets = cookies.filter {
+            ["rsi-token", "_rsi_device"].contains($0.name.lowercased()) || $0.value.count >= 8
+        }.map(\.value)
         if let underlyingError {
-            let nsError = underlyingError as NSError
-            lines.append("errorType=\(String(reflecting: type(of: underlyingError)))")
-            lines.append("errorDomain=\(nsError.domain)")
-            lines.append("errorCode=\(nsError.code)")
-            lines.append("errorDescription=\(underlyingError.localizedDescription)")
+            let error = underlyingError as NSError
+            lines += ["failureCategory=\(RSINetworkDiagnostics.category(underlyingError))",
+                "errorDomain=\(RSINetworkDiagnostics.text(error.domain, secrets: secrets))", "errorCode=\(error.code)"]
+            lines += RSINetworkDiagnostics.errorLines(underlyingError, secrets: secrets)
         }
-
-        if let data,
-           let body = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) {
-            lines.append("bodyPreview=\(RSIAccountHTMLParser.previewText(from: body, limit: 700))")
+        if let ray = httpResponse?.value(forHTTPHeaderField: "CF-Ray"),
+           ray.range(of: #"^[A-Fa-f0-9]{8,64}-[A-Z]{3}$"#, options: .regularExpression) != nil {
+            lines.append("cfRay=\(ray)")
         }
+        if let rawDate = httpResponse?.value(forHTTPHeaderField: "Date") {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+            if let serverDate = formatter.date(from: rawDate) {
+                lines.append("serverDateUTC=\(ISO8601DateFormatter().string(from: serverDate))")
+                lines.append("deviceClockOffsetEstimateSeconds=\(Int(Date().timeIntervalSince(serverDate))) (includes response transit time)")
+            }
+        }
+        if data != nil { lines.append("responseBody=omitted (account HTML)") }
 
         return lines.joined(separator: "\n")
     }
@@ -3749,7 +3408,7 @@ private nonisolated final class RSIAccountHTTPPageClient: @unchecked Sendable {
     }
 }
 
-private nonisolated enum RSIAccountHTMLParser {
+nonisolated enum RSIAccountHTMLParser {
     static func parsePledgePage(
         html: String,
         pageURL: URL,
@@ -3757,6 +3416,9 @@ private nonisolated enum RSIAccountHTMLParser {
         statusCode: Int,
         cookieCount: Int
     ) throws -> RemotePledgePage {
+        let performanceInterval = PerformanceTrace.begin("ParsePledgeHTML")
+        defer { PerformanceTrace.end("ParsePledgeHTML", performanceInterval) }
+
         let title = firstText(in: html, selectors: ["title"])
         let accessDenied = isAccessDenied(html: html, title: title)
         let currentPage = currentPageNumber(from: pageURL)
@@ -3800,6 +3462,9 @@ private nonisolated enum RSIAccountHTMLParser {
         statusCode: Int,
         cookieCount: Int
     ) throws -> RemoteBuybackPage {
+        let performanceInterval = PerformanceTrace.begin("ParseBuybackHTML")
+        defer { PerformanceTrace.end("ParseBuybackHTML", performanceInterval) }
+
         let title = firstText(in: html, selectors: ["title"])
         let accessDenied = isAccessDenied(html: html, title: title)
         let currentPage = currentPageNumber(from: pageURL)
@@ -3906,7 +3571,8 @@ private nonisolated enum RSIAccountHTMLParser {
                 baseURL: pageURL
             ),
             alsoContains: titles,
-            canGift: containsClass("js-gift", in: row.html),
+            canGift: containsClass("js-gift-v2", in: row.html)
+                || containsClass("js-gift", in: row.html),
             canReclaim: containsClass("js-reclaim", in: row.html),
             canUpgrade: containsClass("js-apply-upgrade", in: row.html),
             upgradeMetadata: parseUpgradeMetadata(in: row.html),
@@ -4632,6 +4298,34 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         webView.navigationDelegate = self
     }
 
+    func fetchGameEntitlements(using cookies: [SessionCookie], query: String) async throws -> Data {
+        guard var components = URLComponents(string: "https://robertsspaceindustries.com/graphql") else {
+            throw LiveHangarRepositoryError.unexpectedMarkup("Invalid RSI game access URL.")
+        }
+        components.queryItems = [URLQueryItem(name: "query", value: query)]
+        guard let url = components.url else {
+            throw LiveHangarRepositoryError.unexpectedMarkup("Invalid RSI game access query.")
+        }
+
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+        guard webView.url?.host == url.host,
+              webView.url?.path == url.path else {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        let result = try await webView.callAsyncJavaScript(
+            "return document.body ? document.body.innerText : '';",
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let body = result as? String, !body.isEmpty else {
+            throw LiveHangarRepositoryError.unexpectedMarkup("RSI returned an empty game access response.")
+        }
+        return Data(body.utf8)
+    }
+
     fileprivate func extractPledges(
         using cookies: [SessionCookie],
         page: Int,
@@ -4859,18 +4553,18 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     fileprivate func requestCharacterRepair(
         using cookies: [SessionCookie],
-        password: String
+        reason: String,
+        issueCouncilURL: String?
     ) async throws -> CharacterRepairResult {
-        let url = try storefrontURL(path: "/en/account/reset")
+        let url = try storefrontURL(path: "/en/account/settings/character-repair")
         try await prepareWebView(with: cookies)
         try await load(url: url)
 
         let result = try await evaluate(
             script: Self.requestCharacterRepairScript,
             arguments: [
-                "reason": "Character reset",
-                "issueCouncilURL": "",
-                "currentPassword": password
+                "reason": reason,
+                "issueCouncilURL": issueCouncilURL ?? ""
             ],
             as: RemoteCharacterRepairExecution.self
         )
@@ -4895,6 +4589,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         return CharacterRepairResult(
             wasSuccessful: shouldTreatAsSuccess,
             failureMessage: failureMessage,
+            cooldownRemainingSeconds: result.remainingSeconds,
             updatedCookies: await currentRSICookies()
         )
     }
@@ -5134,17 +4829,14 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     fileprivate func fetchAuthorizedDevices(
         using cookies: [SessionCookie],
-        password: String?
+        password _: String?
     ) async throws -> [AuthorizedDevice] {
-        let url = try storefrontURL(path: "/en/account/security/devices")
+        let url = try storefrontURL(path: "/en/account/settings/login-security/trusted_devices")
         try await prepareWebView(with: cookies)
         try await load(url: url)
 
         let result = try await evaluate(
             script: Self.authorizedDevicesExtractionScript,
-            arguments: [
-                "currentPassword": password ?? ""
-            ],
             as: RemoteAuthorizedDevicesLookup.self
         )
 
@@ -5152,36 +4844,60 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             throw LiveHangarRepositoryError.sessionExpired
         }
 
+        if result.verificationRequired {
+            throw HangarAccountActionError.authorizedDevicesVerificationRequired
+        }
+
         guard result.status == "ok" else {
-            let failureMessage = [result.failureMessage, result.debugSummary]
-                .compactMap { value in
-                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                }
-                .joined(separator: "\n\n")
-                .nilIfEmpty ?? "RSI did not return the authorized device list."
+            let failureMessage = Self.userFacingDeviceManagementFailure(
+                result.failureMessage,
+                debugSummary: result.debugSummary,
+                fallback: "RSI did not return the authorized device list."
+            )
             throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
         }
 
         return result.devices.map(\.domainModel)
     }
 
-    fileprivate func removeAuthorizedDevice(
+    fileprivate func requestAuthorizedDevicesVerificationCode(
+        using cookies: [SessionCookie]
+    ) async throws -> [SessionCookie] {
+        try await performAuthorizedDevicesVerification(
+            using: cookies,
+            operation: "request",
+            code: ""
+        )
+    }
+
+    fileprivate func verifyAuthorizedDevices(
         using cookies: [SessionCookie],
-        device: AuthorizedDevice,
-        password: String?
-    ) async throws {
-        let url = try storefrontURL(path: "/en/account/security/devices")
+        code: String
+    ) async throws -> [SessionCookie] {
+        try await performAuthorizedDevicesVerification(
+            using: cookies,
+            operation: "verify",
+            code: code
+        )
+    }
+
+    private func performAuthorizedDevicesVerification(
+        using cookies: [SessionCookie],
+        operation: String,
+        code: String
+    ) async throws -> [SessionCookie] {
+        let url = try storefrontURL(path: "/en/account/settings/login-security/trusted_devices")
         try await prepareWebView(with: cookies)
         try await load(url: url)
 
         let result = try await evaluate(
-            script: Self.removeAuthorizedDeviceScript,
+            script: Self.authorizedDevicesVerificationScript,
             arguments: [
-                "deviceID": device.id,
-                "deviceName": device.displayName,
-                "currentPassword": password ?? ""
+                "operation": operation,
+                "verificationCode": code,
+                "verificationPermission": AuthorizedDevicesVerification.permission
             ],
-            as: RemoteAuthorizedDeviceRemoval.self
+            as: RemoteAuthorizedDevicesVerification.self
         )
 
         if result.accessDenied {
@@ -5189,12 +4905,50 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         }
 
         guard result.status == "ok" else {
-            let failureMessage = [result.failureMessage, result.debugSummary]
-                .compactMap { value in
-                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                }
-                .joined(separator: "\n\n")
-                .nilIfEmpty ?? "RSI did not remove the selected authorized device."
+            let failureMessage = Self.userFacingDeviceManagementFailure(
+                result.failureMessage,
+                debugSummary: result.debugSummary,
+                fallback: operation == "request"
+                    ? "RSI did not send the verification code."
+                    : "RSI did not accept the verification code."
+            )
+            throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
+        }
+
+        return await currentRSICookies()
+    }
+
+    fileprivate func removeAuthorizedDevice(
+        using cookies: [SessionCookie],
+        device: AuthorizedDevice,
+        password _: String?
+    ) async throws {
+        let url = try storefrontURL(path: "/en/account/settings/login-security/trusted_devices")
+        try await prepareWebView(with: cookies)
+        try await load(url: url)
+
+        let result = try await evaluate(
+            script: Self.authorizedDeviceRemovalScript,
+            arguments: [
+                "deviceID": device.id
+            ],
+            as: RemoteAuthorizedDeviceRemovalResult.self
+        )
+
+        if result.accessDenied {
+            throw LiveHangarRepositoryError.sessionExpired
+        }
+
+        if result.verificationRequired {
+            throw HangarAccountActionError.authorizedDevicesVerificationRequired
+        }
+
+        guard result.status == "ok" else {
+            let failureMessage = Self.userFacingDeviceManagementFailure(
+                result.failureMessage,
+                debugSummary: result.debugSummary,
+                fallback: "RSI did not remove the selected logged-in device."
+            )
             throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
         }
     }
@@ -5232,14 +4986,42 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         }
 
         guard result.status == "ok" else {
-            let failureMessage = [result.failureMessage, result.debugSummary]
-                .compactMap { value in
-                    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                }
-                .joined(separator: "\n\n")
-                .nilIfEmpty ?? "RSI did not remove the selected authorized devices."
+            let failureMessage = Self.userFacingDeviceManagementFailure(
+                result.failureMessage,
+                debugSummary: result.debugSummary,
+                fallback: "RSI did not remove the selected authorized devices."
+            )
             throw LiveHangarRepositoryError.unexpectedMarkup(failureMessage)
         }
+    }
+
+    nonisolated static func userFacingDeviceManagementFailure(
+        _ failureMessage: String?,
+        debugSummary: String?,
+        fallback: String
+    ) -> String {
+        let message = failureMessage?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedMessage = message?.lowercased() ?? ""
+        let returnedHTML = normalizedMessage.hasPrefix("<!doctype html") ||
+            normalizedMessage.hasPrefix("<html") ||
+            normalizedMessage.contains("<head>") ||
+            normalizedMessage.contains("<body")
+
+        if returnedHTML {
+            let status = debugSummary?
+                .components(separatedBy: CharacterSet.decimalDigits.inverted)
+                .first(where: { $0.count == 3 })
+            let statusSuffix = status.map { " (HTTP \($0))" } ?? ""
+            return "RSI device management is temporarily unavailable\(statusSuffix). Try again later."
+        }
+
+        return [message, debugSummary]
+            .compactMap { value in
+                value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            }
+            .joined(separator: "\n\n")
+            .nilIfEmpty ?? fallback
     }
 
     fileprivate func currentRSICookies() async -> [SessionCookie] {
@@ -5857,12 +5639,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     private func navigationErrorSummary(_ error: Error) -> String {
-        let nsError = error as NSError
-        return [
-            "domain=\(nsError.domain)",
-            "code=\(nsError.code)",
-            "description=\(error.localizedDescription)"
-        ].joined(separator: ", ")
+        RSINetworkDiagnostics.errorLines(error).joined(separator: ", ")
     }
 
     private func evaluate<Value: Decodable>(script: String, as type: Value.Type) async throws -> Value {
@@ -6274,7 +6051,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
           containsText: firstText(row, ['.items-col', '.contains']),
           thumbnailImageURL: firstImageURL(packageThumbnailNode),
           alsoContains: titles,
-          canGift: row.querySelector('.shadow-button.js-gift, .js-gift') !== null,
+          canGift: row.querySelector('.js-gift-v2, .js-gift') !== null,
           canReclaim: row.querySelector('.shadow-button.js-reclaim, .js-reclaim') !== null,
           canUpgrade: row.querySelector('.shadow-button.js-apply-upgrade, .js-apply-upgrade') !== null,
           upgradeMetadata: parseUpgradeMetadata(row),
@@ -9640,7 +9417,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     const completedPledgeIDs = [];
 
     for (const pledgeID of pledgeIDsToGift) {
-      const response = await fetch('/api/account/giftPledge', {
+      const response = await fetch('/api/account/giftPledgeV2', {
         method: 'POST',
         credentials: 'include',
         headers: requestHeaders,
@@ -9813,7 +9590,322 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     };
     """
 
+    private static let authorizedDevicesVerificationScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const operationValue = typeof operation === 'string' ? operation : '';
+    const codeValue = typeof verificationCode === 'string' ? verificationCode.replace(/\\D/g, '').slice(0, 6) : '';
+    const permissionValue = typeof verificationPermission === 'string' ? verificationPermission : 'settings_verified';
+    const nativeRsiTokenValue = typeof nativeRsiToken === 'string' ? nativeRsiToken : '';
+    const nativeRsiDeviceValue = typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '';
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || nativeRsiTokenValue;
+    const rsiDevice = cookieValue('_rsi_device') || nativeRsiDeviceValue;
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    const headers = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+    if (rsiToken) headers['x-rsi-token'] = rsiToken;
+    if (rsiDevice) headers['x-rsi-device'] = rsiDevice;
+    if (csrfToken) headers['x-csrf-token'] = csrfToken;
+
+    const isAuthenticationFailure = (payload, responseText) => {
+      const raw = normalizeText([payload?.code, payload?.msg, payload?.message, responseText].filter(Boolean).join(' ')).toLowerCase();
+      return raw.includes('errnotauthenticated') || raw.includes('must be authenticated');
+    };
+
+    if (operationValue === 'verify' && codeValue.length !== 6) {
+      return {
+        accessDenied: false,
+        status: 'invalid-code',
+        failureMessage: 'Enter the six-digit verification code from RSI.',
+        debugSummary: null
+      };
+    }
+
+    const endpoint = operationValue === 'request'
+      ? '/api/settings/RequestCodeChallenge'
+      : '/api/settings/VerifyCodeChallenge';
+    const body = operationValue === 'request'
+      ? {}
+      : { code: codeValue, permission: permissionValue };
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify(body)
+    });
+    const responseText = await response.text();
+    let payload = null;
+    try {
+      payload = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      payload = null;
+    }
+
+    if (response.status === 401 || isAuthenticationFailure(payload, responseText)) {
+      return {
+        accessDenied: true,
+        status: 'access-denied',
+        failureMessage: normalizeText(payload?.msg || payload?.message || payload?.code || 'RSI rejected the authenticated session.'),
+        debugSummary: `httpStatus=${response.status}`
+      };
+    }
+
+    const requestSucceeded = response.ok && Number(payload?.success ?? 0) === 1;
+    const challengeSucceeded = operationValue === 'request' || payload?.data?.success === true;
+    if (!requestSucceeded || !challengeSucceeded) {
+      return {
+        accessDenied: false,
+        status: 'failed',
+        failureMessage: normalizeText(payload?.data?.message || payload?.msg || payload?.message || payload?.code || (operationValue === 'request' ? 'RSI did not send the verification code.' : 'That verification code was not accepted. Use the newest RSI code and try again.')),
+        debugSummary: `operation=${operationValue || 'unknown'}, httpStatus=${response.status}`
+      };
+    }
+
+    return {
+      accessDenied: false,
+      status: 'ok',
+      failureMessage: null,
+      debugSummary: `operation=${operationValue}, httpStatus=${response.status}`
+    };
+    """
+
     private static let authorizedDevicesExtractionScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const nativeRsiTokenValue = typeof nativeRsiToken === 'string' ? nativeRsiToken : '';
+    const nativeRsiDeviceValue = typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '';
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || nativeRsiTokenValue;
+    const rsiDevice = cookieValue('_rsi_device') || nativeRsiDeviceValue;
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    const headers = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+    if (rsiToken) headers['x-rsi-token'] = rsiToken;
+    if (rsiDevice) headers['x-rsi-device'] = rsiDevice;
+    if (csrfToken) headers['x-csrf-token'] = csrfToken;
+
+    const failureText = (payload, responseText) => normalizeText([
+      payload?.code,
+      payload?.msg,
+      payload?.message,
+      responseText
+    ].filter(Boolean).join(' ')).toLowerCase();
+    const isAuthenticationFailure = (payload, responseText) => {
+      const raw = failureText(payload, responseText);
+      return raw.includes('errnotauthenticated') || raw.includes('must be authenticated');
+    };
+    const isVerificationFailure = (payload, responseText, status) => {
+      if (status === 403) return true;
+      const raw = failureText(payload, responseText);
+      return raw.includes('settings_verified') || raw.includes('verification') || raw.includes('permission');
+    };
+
+    const devices = [];
+    const seenDeviceIDs = new Set();
+    let page = 1;
+    let pageCount = 1;
+    let firstResponseStatus = 0;
+    let lastResponsePreview = '';
+
+    while (page <= pageCount && page <= 50) {
+      const response = await fetch('/api/security/devices/list', {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: JSON.stringify({ page })
+      });
+      const responseText = await response.text();
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        payload = null;
+      }
+      if (page === 1) firstResponseStatus = response.status;
+      lastResponsePreview = normalizeText(responseText).slice(0, 280);
+
+      if (response.status === 401 || isAuthenticationFailure(payload, responseText)) {
+        return {
+          accessDenied: true,
+          verificationRequired: false,
+          status: 'access-denied',
+          devices: [],
+          failureMessage: normalizeText(payload?.msg || payload?.message || payload?.code || 'RSI rejected the trusted-device request.'),
+          debugSummary: `httpStatus=${response.status}`
+        };
+      }
+
+      if (isVerificationFailure(payload, responseText, response.status)) {
+        return {
+          accessDenied: false,
+          verificationRequired: true,
+          status: 'verification-required',
+          devices: [],
+          failureMessage: null,
+          debugSummary: `httpStatus=${response.status}`
+        };
+      }
+
+      if (!response.ok || Number(payload?.success ?? 0) !== 1) {
+        return {
+          accessDenied: false,
+          verificationRequired: false,
+          status: 'failed',
+          devices: [],
+          failureMessage: normalizeText(payload?.msg || payload?.message || payload?.code || 'RSI did not return the trusted-device list.'),
+          debugSummary: `httpStatus=${response.status}, responsePreview=${lastResponsePreview || 'n/a'}`
+        };
+      }
+
+      const data = payload?.data || {};
+      const resultset = Array.isArray(data.resultset) ? data.resultset : [];
+      for (const item of resultset) {
+        const id = normalizeText(item?.id);
+        if (!id || seenDeviceIDs.has(id)) continue;
+        seenDeviceIDs.add(id);
+        devices.push({
+          id,
+          name: normalizeText(item?.name),
+          type: normalizeText(item?.device_type || item?.type) || null,
+          createdAtLabel: normalizeText(item?.time_created || item?.created_at) || null,
+          duration: normalizeText(item?.duration) || null,
+          isCurrent: Boolean(item?.is_current || item?.current)
+        });
+      }
+
+      const parsedPage = Number.parseInt(data.page || page, 10);
+      const parsedPageCount = Number.parseInt(data.pagecount || pageCount, 10);
+      page = Number.isFinite(parsedPage) ? parsedPage + 1 : page + 1;
+      pageCount = Number.isFinite(parsedPageCount) && parsedPageCount > 0 ? parsedPageCount : pageCount;
+    }
+
+    return {
+      accessDenied: false,
+      verificationRequired: false,
+      status: 'ok',
+      devices,
+      failureMessage: null,
+      debugSummary: `httpStatus=${firstResponseStatus}, deviceCount=${devices.length}`
+    };
+    """
+
+    private static let authorizedDeviceRemovalScript = """
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const deviceIDValue = normalizeText(typeof deviceID === 'string' ? deviceID : '');
+    const numericDeviceID = Number.parseInt(deviceIDValue, 10);
+    const nativeRsiTokenValue = typeof nativeRsiToken === 'string' ? nativeRsiToken : '';
+    const nativeRsiDeviceValue = typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '';
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || nativeRsiTokenValue;
+    const rsiDevice = cookieValue('_rsi_device') || nativeRsiDeviceValue;
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    const headers = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+    if (rsiToken) headers['x-rsi-token'] = rsiToken;
+    if (rsiDevice) headers['x-rsi-device'] = rsiDevice;
+    if (csrfToken) headers['x-csrf-token'] = csrfToken;
+
+    const failureText = (payload, responseText) => normalizeText([
+      payload?.code,
+      payload?.msg,
+      payload?.message,
+      payload?.data?.message,
+      responseText
+    ].filter(Boolean).join(' ')).toLowerCase();
+    const isAuthenticationFailure = (payload, responseText) => {
+      const raw = failureText(payload, responseText);
+      return raw.includes('errnotauthenticated') || raw.includes('must be authenticated');
+    };
+    const isVerificationFailure = (payload, responseText, status) => {
+      if (status === 403) return true;
+      const raw = failureText(payload, responseText);
+      return raw.includes('settings_verified') || raw.includes('verification') || raw.includes('permission');
+    };
+
+    if (!Number.isSafeInteger(numericDeviceID) || numericDeviceID <= 0) {
+      return {
+        accessDenied: false,
+        verificationRequired: false,
+        status: 'invalid-device',
+        failureMessage: 'RSI returned an invalid logged-in device identifier.',
+        debugSummary: null
+      };
+    }
+
+    const response = await fetch('/api/security/device/delete', {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify({ id: numericDeviceID })
+    });
+    const responseText = await response.text();
+    let payload = null;
+    try {
+      payload = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      payload = null;
+    }
+
+    if (response.status === 401 || isAuthenticationFailure(payload, responseText)) {
+      return {
+        accessDenied: true,
+        verificationRequired: false,
+        status: 'access-denied',
+        failureMessage: normalizeText(payload?.msg || payload?.message || payload?.code || 'RSI rejected the authenticated session.'),
+        debugSummary: `httpStatus=${response.status}`
+      };
+    }
+
+    if (isVerificationFailure(payload, responseText, response.status)) {
+      return {
+        accessDenied: false,
+        verificationRequired: true,
+        status: 'verification-required',
+        failureMessage: null,
+        debugSummary: `httpStatus=${response.status}`
+      };
+    }
+
+    if (!response.ok || Number(payload?.success ?? 0) !== 1) {
+      return {
+        accessDenied: false,
+        verificationRequired: false,
+        status: 'failed',
+        failureMessage: normalizeText(payload?.data?.message || payload?.msg || payload?.message || payload?.code || 'RSI did not remove the selected logged-in device.'),
+        debugSummary: `httpStatus=${response.status}, responsePreview=${normalizeText(responseText).slice(0, 280) || 'n/a'}`
+      };
+    }
+
+    return {
+      accessDenied: false,
+      verificationRequired: false,
+      status: 'ok',
+      failureMessage: null,
+      debugSummary: `deviceID=${numericDeviceID}, httpStatus=${response.status}`
+    };
+    """
+
+    private static let legacyAuthorizedDevicesExtractionScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
     const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
     const nativeRsiTokenValue = typeof nativeRsiToken === 'string' ? nativeRsiToken : '';
@@ -10483,10 +10575,45 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
 
     private static let requestCharacterRepairScript = """
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-    const repairReason = typeof reason === 'string' && reason.trim() ? reason.trim() : 'Character reset';
+    const repairReason = typeof reason === 'string' && reason.trim()
+      ? reason.trim()
+      : 'My character is broken and needs repair.';
     const issueCouncilValue = typeof issueCouncilURL === 'string' ? issueCouncilURL.trim() : '';
-    const currentPasswordValue = typeof currentPassword === 'string' ? currentPassword : '';
-    const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+    const cookieValue = (name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      const match = document.cookie.match(new RegExp('(?:^|; )' + escapedName + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+    const errorMessageFromPayload = (payload) => {
+      if (!payload || typeof payload !== 'object') {
+        return '';
+      }
+
+      const errors = payload.errors;
+      if (Array.isArray(errors)) {
+        const message = errors.map(normalizeText).filter(Boolean).join('\\n');
+        if (message) {
+          return message;
+        }
+      } else if (errors && typeof errors === 'object') {
+        const message = Object.values(errors)
+          .flatMap((value) => Array.isArray(value) ? value : [value])
+          .map(normalizeText)
+          .filter(Boolean)
+          .join('\\n');
+        if (message) {
+          return message;
+        }
+      }
+
+      return normalizeText(payload.msg || payload.message || payload.code);
+    };
+    const responseData = (payload) => {
+      if (!payload || typeof payload !== 'object' || !('data' in payload)) {
+        return payload;
+      }
+      return payload.data;
+    };
 
     const hasAccessDeniedMarkup =
       document.title.toLowerCase().includes('access denied') ||
@@ -10501,171 +10628,192 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
       };
     }
 
-    if (!currentPasswordValue) {
+    if (repairReason.length > 1024) {
       return {
         accessDenied: false,
-        status: 'missing-password',
-        failureMessage: 'Hangar Express does not have a saved RSI password for the character repair request.',
-        debugSummary: 'passwordPresent=no'
+        status: 'reason-too-long',
+        failureMessage: 'Keep the repair reason under 1,024 characters.',
+        debugSummary: `reasonLength=${repairReason.length}`
       };
     }
 
-    const isVisible = (element) => {
-      if (!element) {
-        return false;
-      }
-      const style = window.getComputedStyle(element);
-      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
-        return false;
-      }
-      const rect = element.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    const rsiToken = cookieValue('Rsi-Token') || cookieValue('rsi-token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
+    const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
+    const requestHeaders = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json;charset=UTF-8',
+      'X-Requested-With': 'XMLHttpRequest'
     };
-
-    const setFieldValue = (element, value) => {
-      if (!element) {
-        return false;
-      }
-      element.focus?.();
-      element.value = value;
-      element.dispatchEvent(new Event('input', { bubbles: true }));
-      element.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    };
-
-    const findRequestRepairButton = () => {
-      const preferred = document.querySelector('.js-reset-account');
-      if (preferred) {
-        return preferred;
-      }
-
-      return Array.from(document.querySelectorAll('a, button'))
-        .find((element) => normalizeText(element.textContent).toLowerCase() === 'request repair') || null;
-    };
-
-    const findRepairForm = () => {
-      const forms = Array.from(document.querySelectorAll('form[name="reset-account"], form[action*="/account/reset"]'))
-        .filter((form) =>
-          form.querySelector('[name="reason"]') &&
-          form.querySelector('[name="link_council_report"]') &&
-          form.querySelector('[name="current_password"]')
-        );
-
-      if (!forms.length) {
-        return null;
-      }
-
-      const visibleForms = forms.filter(isVisible);
-      const candidates = visibleForms.length ? visibleForms : forms;
-      return candidates.find((form) => {
-        const action = normalizeText(form.getAttribute('action') || form.action || '');
-        return action.includes('/account/reset') || action === '';
-      }) || candidates[candidates.length - 1];
-    };
-
-    const requestButton = findRequestRepairButton();
-    if (requestButton) {
-      requestButton.click();
+    if (csrfToken) {
+      requestHeaders['x-csrf-token'] = csrfToken;
+    }
+    if (rsiToken) {
+      requestHeaders['x-rsi-token'] = rsiToken;
+    }
+    if (rsiDevice) {
+      requestHeaders['x-rsi-device'] = rsiDevice;
     }
 
-    let form = null;
-    for (let attempt = 0; attempt < 25; attempt += 1) {
-      form = findRepairForm();
-      if (form) {
-        break;
+    const postJSON = async (path, body) => {
+      const response = await fetch(path, {
+        method: 'POST',
+        credentials: 'include',
+        headers: requestHeaders,
+        body: JSON.stringify(body)
+      });
+      const responseText = await response.text();
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        payload = null;
       }
-      await wait(100);
-    }
-
-    if (!form) {
-      return {
-        accessDenied: false,
-        status: 'missing-form',
-        failureMessage: 'Hangar Express could not find the RSI character repair request form.',
-        debugSummary: normalizeText(document.body.innerText).slice(0, 700)
-      };
-    }
-
-    const reasonField = form.querySelector('[name="reason"]');
-    const issueCouncilField = form.querySelector('[name="link_council_report"]');
-    const passwordField = form.querySelector('[name="current_password"]');
-    setFieldValue(reasonField, repairReason);
-    setFieldValue(issueCouncilField, issueCouncilValue);
-    setFieldValue(passwordField, currentPasswordValue);
-
-    const formData = new FormData(form);
-    formData.set('reason', repairReason);
-    formData.set('link_council_report', issueCouncilValue);
-    formData.set('current_password', currentPasswordValue);
-
-    const submitURL = new URL(form.getAttribute('action') || window.location.href, window.location.href).toString();
-    const requestBody = new URLSearchParams(formData);
-    const response = await fetch(submitURL, {
-      method: 'POST',
-      credentials: 'include',
-      headers: {
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'
-      },
-      body: requestBody.toString(),
-      redirect: 'follow'
-    });
-
-    const responseText = await response.text();
-    const parsedDocument = new DOMParser().parseFromString(responseText, 'text/html');
-    const responseBodyText = normalizeText(parsedDocument.body?.innerText || responseText);
-    const resetScopes = Array.from(parsedDocument.querySelectorAll('#reset-account'))
-      .filter((element) =>
-        element.querySelector('form[name="reset-account"]') ||
-        element.querySelector('.error-message') ||
-        element.querySelector('.success-message')
+      const normalizedFailure = normalizeText(
+        errorMessageFromPayload(payload) || responseText
       );
-    const messageScopes = resetScopes.length ? resetScopes : [parsedDocument];
-    const collectMessages = (selector) => messageScopes
-      .flatMap((scope) => Array.from(scope.querySelectorAll(selector)))
-      .map((element) => normalizeText(element.textContent))
-      .filter(Boolean);
-    const errorMessages = collectMessages('.js-error-message, .error-message, .alert-danger, .flash-error');
-    const successMessages = collectMessages('.js-success-message, .success-message, .alert-success, .flash-success');
-    const responseLooksAccessDenied =
-      response.status === 401 ||
-      response.status === 403 ||
-      parsedDocument.title.toLowerCase().includes('access denied') ||
-      responseBodyText.includes('Access denied');
-
-    if (responseLooksAccessDenied) {
-      return {
-        accessDenied: true,
-        status: 'access-denied',
-        failureMessage: errorMessages[0] || `RSI rejected the character repair request with HTTP ${response.status}.`,
-        debugSummary: `httpStatus=${response.status}, responseURL=${response.url || 'n/a'}`
-      };
-    }
-
-    if (!response.ok) {
-      return {
-        accessDenied: false,
-        status: 'failed',
-        failureMessage: errorMessages[0] || `RSI returned HTTP ${response.status} while requesting character repair.`,
-        debugSummary: `httpStatus=${response.status}, responsePreview=${responseBodyText.slice(0, 500) || 'n/a'}`
-      };
-    }
-
-    if (errorMessages.length) {
-      return {
-        accessDenied: false,
-        status: 'failed',
-        failureMessage: errorMessages.join('\\n'),
-        debugSummary: `httpStatus=${response.status}, responseURL=${response.url || 'n/a'}, successMessages=${successMessages.length}`
-      };
-    }
-
-    return {
-      accessDenied: false,
-      status: 'ok',
-      failureMessage: null,
-      debugSummary: `httpStatus=${response.status}, responseURL=${response.url || 'n/a'}, requestButtonClicked=${requestButton ? 'yes' : 'no'}, successMessages=${successMessages.length}`
+      const accessDenied =
+        response.status === 401 ||
+        response.status === 403 ||
+        normalizedFailure.toLowerCase().includes('errnotauthenticated');
+      return { response, responseText, payload, normalizedFailure, accessDenied };
     };
+
+    try {
+      const pagesResult = await postJSON('/api/settings/Pages', {});
+      if (pagesResult.accessDenied) {
+        return {
+          accessDenied: true,
+          status: 'access-denied',
+          failureMessage: pagesResult.normalizedFailure || 'RSI rejected the character repair settings request.',
+          debugSummary: `stage=pages, httpStatus=${pagesResult.response.status}`
+        };
+      }
+      const pages = responseData(pagesResult.payload);
+      if (!pagesResult.response.ok || !Array.isArray(pages)) {
+        return {
+          accessDenied: false,
+          status: 'settings-unavailable',
+          failureMessage: pagesResult.normalizedFailure || 'RSI did not return the current account settings pages.',
+          debugSummary: `stage=pages, httpStatus=${pagesResult.response.status}, payloadType=${Array.isArray(pages) ? 'array' : typeof pages}`
+        };
+      }
+
+      const repairPage = pages.find((page) =>
+        normalizeText(page?.route).toLowerCase() === 'character-repair'
+      );
+      if (!repairPage?.id) {
+        return {
+          accessDenied: false,
+          status: 'missing-page',
+          failureMessage: 'RSI did not advertise the Character Repair settings page for this account.',
+          debugSummary: `availableRoutes=${pages.map((page) => normalizeText(page?.route)).filter(Boolean).join(',') || 'none'}`
+        };
+      }
+
+      const pageResult = await postJSON('/api/settings/Page', { pageId: repairPage.id });
+      if (pageResult.accessDenied) {
+        return {
+          accessDenied: true,
+          status: 'access-denied',
+          failureMessage: pageResult.normalizedFailure || 'RSI rejected the character repair page request.',
+          debugSummary: `stage=page, httpStatus=${pageResult.response.status}`
+        };
+      }
+      const page = responseData(pageResult.payload);
+      if (!pageResult.response.ok || !page?.config) {
+        return {
+          accessDenied: false,
+          status: 'page-unavailable',
+          failureMessage: pageResult.normalizedFailure || 'RSI did not return the current Character Repair settings.',
+          debugSummary: `stage=page, httpStatus=${pageResult.response.status}, pageId=${String(repairPage.id)}, payloadType=${Array.isArray(page) ? 'array' : typeof page}`
+        };
+      }
+
+      const collectFields = (fields) => (Array.isArray(fields) ? fields : []).flatMap((field) => [
+        field,
+        ...collectFields(field?.children),
+        ...collectFields(field?.fields)
+      ]);
+      const fields = (page.config.sections || [])
+        .flatMap((section) => collectFields(section?.fields));
+      const repairField = fields.find((field) => {
+        const id = normalizeText(field?.id).toLowerCase();
+        return field?.type === 'confirmation' && (
+          id.includes('repair') ||
+          id.includes('reset') ||
+          fields.filter((candidate) => candidate?.type === 'confirmation').length === 1
+        );
+      });
+      if (!repairField?.id) {
+        return {
+          accessDenied: false,
+          status: 'missing-field',
+          failureMessage: 'RSI did not return the Character Repair request control.',
+          debugSummary: `pageId=${String(repairPage.id)}, fieldTypes=${fields.map((field) => normalizeText(field?.type)).filter(Boolean).join(',') || 'none'}`
+        };
+      }
+
+      let fieldState = page.values?.[repairField.id] || {};
+      if (typeof fieldState === 'string') {
+        try {
+          fieldState = JSON.parse(fieldState);
+        } catch {
+          fieldState = {};
+        }
+      }
+      const remainingSeconds = Number(fieldState?.remainingSeconds || 0);
+      if (Number.isFinite(remainingSeconds) && remainingSeconds > 0) {
+        const remainingMinutes = Math.max(1, Math.ceil(remainingSeconds / 60));
+        return {
+          accessDenied: false,
+          status: 'cooldown',
+          failureMessage: `RSI will allow another Character Repair request in about ${remainingMinutes} minute(s).`,
+          debugSummary: `pageId=${String(repairPage.id)}, fieldId=${String(repairField.id)}, remainingSeconds=${remainingSeconds}`,
+          remainingSeconds: Math.ceil(remainingSeconds)
+        };
+      }
+
+      const repairValue = { reason: repairReason };
+      if (issueCouncilValue) {
+        repairValue.issue_council = issueCouncilValue;
+      }
+      const updateResult = await postJSON('/api/settings/UpdateField', {
+        pageId: repairPage.id,
+        fieldId: repairField.id,
+        value: JSON.stringify(repairValue)
+      });
+      if (updateResult.accessDenied) {
+        return {
+          accessDenied: true,
+          status: 'access-denied',
+          failureMessage: updateResult.normalizedFailure || 'RSI rejected the character repair request.',
+          debugSummary: `stage=update, httpStatus=${updateResult.response.status}`
+        };
+      }
+      if (!updateResult.response.ok || !updateResult.payload?.success) {
+        return {
+          accessDenied: false,
+          status: 'failed',
+          failureMessage: updateResult.normalizedFailure || `RSI returned HTTP ${updateResult.response.status} while requesting Character Repair.`,
+          debugSummary: `stage=update, httpStatus=${updateResult.response.status}, pageId=${String(repairPage.id)}, fieldId=${String(repairField.id)}, responseCode=${normalizeText(updateResult.payload?.code) || 'n/a'}`
+        };
+      }
+
+      return {
+        accessDenied: false,
+        status: 'ok',
+        failureMessage: null,
+        debugSummary: `httpStatus=${updateResult.response.status}, pageId=${String(repairPage.id)}, fieldId=${String(repairField.id)}`
+      };
+    } catch (error) {
+      return {
+        accessDenied: false,
+        status: 'failed',
+        failureMessage: normalizeText(error?.message || error) || 'RSI did not complete the Character Repair request.',
+        debugSummary: 'stage=exception'
+      };
+    }
     """
 
     private static let applyUpgradeScript = """
@@ -10948,7 +11096,7 @@ nonisolated enum HangarPledgeSummaryParser {
     }
 }
 
-private nonisolated struct RemotePledgePage: Decodable {
+nonisolated struct RemotePledgePage: Decodable, Sendable {
     let accessDenied: Bool
     let title: String
     let totalPages: Int?
@@ -10962,7 +11110,7 @@ private nonisolated struct RemotePledgePage: Decodable {
     }
 }
 
-private nonisolated struct RemotePledge: Decodable {
+nonisolated struct RemotePledge: Decodable, Sendable {
     let id: Int?
     let title: String
     let statusText: String
@@ -11006,7 +11154,7 @@ private nonisolated struct RemotePledge: Decodable {
     }
 }
 
-private nonisolated struct RemotePledgeUpgradeMetadata: Decodable {
+nonisolated struct RemotePledgeUpgradeMetadata: Decodable, Sendable {
     let id: Int?
     let name: String?
     let upgradeType: String?
@@ -11032,7 +11180,7 @@ private nonisolated struct RemotePledgeUpgradeMetadata: Decodable {
     }
 }
 
-private nonisolated struct RemotePledgeUpgradeMatchItem: Decodable {
+nonisolated struct RemotePledgeUpgradeMatchItem: Decodable, Sendable {
     let id: Int?
     let name: String?
 
@@ -11044,7 +11192,7 @@ private nonisolated struct RemotePledgeUpgradeMatchItem: Decodable {
     }
 }
 
-private nonisolated struct RemotePledgeItem: Decodable {
+nonisolated struct RemotePledgeItem: Decodable, Sendable {
     let title: String
     let kind: String
     let detail: String
@@ -11161,7 +11309,7 @@ private nonisolated struct RemoteStoreShip: Decodable {
     let imageURL: String?
 }
 
-private nonisolated struct RemoteBuybackPage: Decodable {
+nonisolated struct RemoteBuybackPage: Decodable, Sendable {
     let accessDenied: Bool
     let title: String
     let totalPages: Int?
@@ -11175,7 +11323,7 @@ private nonisolated struct RemoteBuybackPage: Decodable {
     }
 }
 
-private nonisolated struct RemoteBuybackPledge: Decodable {
+nonisolated struct RemoteBuybackPledge: Decodable, Sendable {
     let id: Int?
     let title: String
     let dateText: String

@@ -56,12 +56,31 @@ actor URLCachedImageStore: RemoteImageCaching {
     private let memoryCache: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
         cache.totalCostLimit = 128 * 1024 * 1024
+        cache.countLimit = 4096
         return cache
     }()
 
     private var inFlightRemoteTasks: [String: Task<UIImage, Error>] = [:]
     private var inFlightCompositeTasks: [String: Task<UIImage, Error>] = [:]
     private var inFlightFleetCardTasks: [String: Task<UIImage, Error>] = [:]
+
+    private nonisolated struct Version: Equatable, Sendable {
+        let global: UInt64
+        let dependencies: [String: UInt64]
+    }
+    private nonisolated struct Freshness: Codable, Sendable {
+        var validatedAt: Date
+        let fingerprint: String
+        let etag: String?
+        let lastModified: String?
+    }
+    private var epoch: UInt64 = 0
+    private var sourceEpochs: [String: UInt64] = [:]
+    private var descriptors: [String: ImageCacheDescriptor] = [:]
+    private var descriptorAccesses: UInt64 = 0
+    private var freshness: [String: Freshness] = [:]
+    private var validationFailures: [String: Date] = [:]
+    private var validationTasks: [String: Task<(Data, HTTPURLResponse), Error>] = [:]
 
     init(
         cache: URLCache = URLCachedImageStore.makeCache(),
@@ -99,6 +118,9 @@ actor URLCachedImageStore: RemoteImageCaching {
             displayScale: displayScale
         )
 
+        remember(cacheDescriptor)
+        let stamp = currentVersion(for: cacheDescriptor)
+
         if let cachedImage = memoryCache.object(forKey: cacheDescriptor.identifier as NSString) {
             return cachedImage
         }
@@ -116,7 +138,8 @@ actor URLCachedImageStore: RemoteImageCaching {
             try await loadRemoteImage(
                 for: url,
                 descriptor: cacheDescriptor,
-                maxRetries: maxRetries
+                maxRetries: maxRetries,
+                version: stamp
             )
         }
 
@@ -124,10 +147,10 @@ actor URLCachedImageStore: RemoteImageCaching {
 
         do {
             let image = try await task.value
-            inFlightRemoteTasks[cacheDescriptor.identifier] = nil
+            if isCurrent(stamp, for: cacheDescriptor) { inFlightRemoteTasks[cacheDescriptor.identifier] = nil }
             return image
         } catch {
-            inFlightRemoteTasks[cacheDescriptor.identifier] = nil
+            if isCurrent(stamp, for: cacheDescriptor) { inFlightRemoteTasks[cacheDescriptor.identifier] = nil }
             throw error
         }
     }
@@ -146,6 +169,9 @@ actor URLCachedImageStore: RemoteImageCaching {
             targetPointSize: normalizedTargetSize,
             displayScale: displayScale
         )
+
+        remember(compositeDescriptor)
+        let stamp = currentVersion(for: compositeDescriptor)
 
         if let cachedImage = memoryCache.object(forKey: compositeDescriptor.identifier as NSString) {
             return cachedImage
@@ -167,7 +193,8 @@ actor URLCachedImageStore: RemoteImageCaching {
                 descriptor: compositeDescriptor,
                 targetPointSize: normalizedTargetSize,
                 displayScale: displayScale,
-                maxRetries: maxRetries
+                maxRetries: maxRetries,
+                version: stamp
             )
         }
 
@@ -175,10 +202,10 @@ actor URLCachedImageStore: RemoteImageCaching {
 
         do {
             let image = try await task.value
-            inFlightCompositeTasks[compositeDescriptor.identifier] = nil
+            if isCurrent(stamp, for: compositeDescriptor) { inFlightCompositeTasks[compositeDescriptor.identifier] = nil }
             return image
         } catch {
-            inFlightCompositeTasks[compositeDescriptor.identifier] = nil
+            if isCurrent(stamp, for: compositeDescriptor) { inFlightCompositeTasks[compositeDescriptor.identifier] = nil }
             throw error
         }
     }
@@ -189,6 +216,9 @@ actor URLCachedImageStore: RemoteImageCaching {
         maxRetries: Int = 5
     ) async throws -> UIImage {
         let descriptor = fleetCardCacheDescriptor(for: recipe, displayScale: displayScale)
+
+        remember(descriptor)
+        let stamp = currentVersion(for: descriptor)
 
         if let cachedImage = memoryCache.object(forKey: descriptor.identifier as NSString) {
             return cachedImage
@@ -208,7 +238,8 @@ actor URLCachedImageStore: RemoteImageCaching {
                 for: recipe,
                 descriptor: descriptor,
                 displayScale: displayScale,
-                maxRetries: maxRetries
+                maxRetries: maxRetries,
+                version: stamp
             )
         }
 
@@ -216,10 +247,10 @@ actor URLCachedImageStore: RemoteImageCaching {
 
         do {
             let image = try await task.value
-            inFlightFleetCardTasks[descriptor.identifier] = nil
+            if isCurrent(stamp, for: descriptor) { inFlightFleetCardTasks[descriptor.identifier] = nil }
             return image
         } catch {
-            inFlightFleetCardTasks[descriptor.identifier] = nil
+            if isCurrent(stamp, for: descriptor) { inFlightFleetCardTasks[descriptor.identifier] = nil }
             throw error
         }
     }
@@ -274,6 +305,9 @@ actor URLCachedImageStore: RemoteImageCaching {
     }
 
     func clear() async {
+        epoch &+= 1
+        sourceEpochs.removeAll(); descriptors.removeAll(); freshness.removeAll(); validationFailures.removeAll()
+        validationTasks.values.forEach { $0.cancel() }; validationTasks.removeAll()
         cancelInFlightTasks()
         memoryCache.removeAllObjects()
         cache.removeAllCachedResponses()
@@ -285,7 +319,8 @@ actor URLCachedImageStore: RemoteImageCaching {
     private func loadRemoteImage(
         for url: URL,
         descriptor: ImageCacheDescriptor,
-        maxRetries: Int
+        maxRetries: Int,
+        version: Version
     ) async throws -> UIImage {
         let data = try await resolvedImageData(for: url, maxRetries: maxRetries)
         let image = try await decodeImage(
@@ -293,6 +328,8 @@ actor URLCachedImageStore: RemoteImageCaching {
             sourceURL: url,
             targetPixelSize: descriptor.pixelSize
         )
+        try Task.checkCancellation()
+        guard isCurrent(version, for: descriptor) else { throw CancellationError() }
         try persistImage(image, to: descriptor.fileURL, preferredPathExtension: url.pathExtension)
         storeInMemory(image, identifier: descriptor.identifier)
         return image
@@ -304,7 +341,8 @@ actor URLCachedImageStore: RemoteImageCaching {
         descriptor: ImageCacheDescriptor,
         targetPointSize: CGSize,
         displayScale: CGFloat,
-        maxRetries: Int
+        maxRetries: Int,
+        version: Version
     ) async throws -> UIImage {
         let sourceImage = try await loadCompositeSliceImage(
             from: sourceURL,
@@ -326,6 +364,8 @@ actor URLCachedImageStore: RemoteImageCaching {
             displayScale: displayScale
         )
 
+        try Task.checkCancellation()
+        guard isCurrent(version, for: descriptor) else { throw CancellationError() }
         try persistImage(compositeImage, to: descriptor.fileURL)
         storeInMemory(compositeImage, identifier: descriptor.identifier)
         return compositeImage
@@ -335,7 +375,8 @@ actor URLCachedImageStore: RemoteImageCaching {
         for recipe: FleetCardBaseSnapshotRecipe,
         descriptor: ImageCacheDescriptor,
         displayScale: CGFloat,
-        maxRetries: Int
+        maxRetries: Int,
+        version: Version
     ) async throws -> UIImage {
         async let backdropImage = loadFleetCardComponentImage(
             from: recipe.backdropURL,
@@ -361,32 +402,163 @@ actor URLCachedImageStore: RemoteImageCaching {
             displayScale: displayScale
         )
 
+        try Task.checkCancellation()
+        guard isCurrent(version, for: descriptor) else { throw CancellationError() }
         try persistImage(renderedImage, to: descriptor.fileURL, preferredPathExtension: "png")
         storeInMemory(renderedImage, identifier: descriptor.identifier)
         return renderedImage
     }
 
     func clear(urls: [URL]) async {
-        let uniqueURLs = Array(Set(urls))
-        guard !uniqueURLs.isEmpty else {
-            return
+        invalidateSources(Set(urls), removeRaw: true)
+    }
+
+    private func remember(_ descriptor: ImageCacheDescriptor) {
+        descriptors[descriptor.identifier] = descriptor
+        descriptorAccesses &+= 1
+        guard descriptors.count > 1024, descriptorAccesses % 256 == 0 else { return }
+        descriptors = descriptors.filter { key, _ in
+            memoryCache.object(forKey: key as NSString) != nil || inFlightRemoteTasks[key] != nil
+                || inFlightCompositeTasks[key] != nil || inFlightFleetCardTasks[key] != nil
         }
+        let retained = Set(descriptors.values.flatMap(\.dependencies)).union(validationTasks.keys)
+        freshness = freshness.filter { retained.contains($0.key) }
+        validationFailures = validationFailures.filter { retained.contains($0.key) }
+    }
 
-        cancelInFlightTasks()
-        memoryCache.removeAllObjects()
-
-        for url in uniqueURLs {
-            cache.removeCachedResponse(for: Self.makeRequest(for: url))
-            let remoteURLHash = Self.hash(url.absoluteString)
-            removeItemIfPresent(
-                at: remoteDirectoryURL.appendingPathComponent(remoteURLHash, isDirectory: true)
-            )
+    private func currentVersion(for descriptor: ImageCacheDescriptor) -> Version {
+        Version(global: epoch, dependencies: Dictionary(uniqueKeysWithValues: descriptor.dependencies.map { ($0, sourceEpochs[$0, default: 0]) }))
+    }
+    private func isCurrent(_ version: Version, for descriptor: ImageCacheDescriptor) -> Bool {
+        version == currentVersion(for: descriptor)
+    }
+    private func invalidateSources(_ urls: Set<URL>, removeRaw: Bool) {
+        let hashes = Set(urls.map { Self.hash($0.absoluteString) })
+        guard !hashes.isEmpty else { return }
+        for hash in hashes {
+            sourceEpochs[hash, default: 0] &+= 1
+            validationTasks.removeValue(forKey: hash)?.cancel()
         }
+        for (key, descriptor) in descriptors where !descriptor.dependencies.isDisjoint(with: hashes) {
+            inFlightRemoteTasks.removeValue(forKey: key)?.cancel()
+            inFlightCompositeTasks.removeValue(forKey: key)?.cancel()
+            inFlightFleetCardTasks.removeValue(forKey: key)?.cancel()
+            memoryCache.removeObject(forKey: key as NSString)
+            removeItemIfPresent(at: descriptor.fileURL)
+        }
+        descriptors = descriptors.filter { $0.value.dependencies.isDisjoint(with: hashes) }
+        for url in urls {
+            let hash = Self.hash(url.absoluteString)
+            if removeRaw { cache.removeCachedResponse(for: Self.makeRequest(for: url)) }
+            freshness.removeValue(forKey: hash); validationFailures.removeValue(forKey: hash)
+            removeItemIfPresent(at: remoteDirectoryURL.appendingPathComponent(hash, isDirectory: true))
+        }
+        // Dependency hashes are part of derived filenames, including entries
+        // created in earlier processes and not yet loaded into this process.
+        for directory in [compositeDirectoryURL, fleetCardDirectoryURL] {
+            for file in (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+                where hashes.contains(where: { file.lastPathComponent.contains($0) }) {
+                removeItemIfPresent(at: file)
+            }
+        }
+    }
 
-        // Composite thumbnails can depend on multiple ship images, so any targeted invalidation
-        // drops the derived composites as well.
-        removeItemIfPresent(at: compositeDirectoryURL)
-        removeItemIfPresent(at: fleetCardDirectoryURL)
+    /// Validation is scheduled by AppModel after refresh, never on the critical
+    /// path for presenting an already processed image.
+    /// Only sources already present in the processed cache are revalidated.
+    /// A no-op inventory refresh within the ten-minute image freshness window
+    /// issues no requests and keeps decoded/derived variants intact.
+    func revalidate(urls: [URL], force: Bool = false) async -> Set<URL> {
+        var changed: Set<URL> = []
+        for url in Set(urls) {
+            guard !Task.isCancelled else { break }
+            let hash = Self.hash(url.absoluteString)
+            guard let old = readFreshness(url: url) else { continue }
+            if !force, Date.now.timeIntervalSince(old.validatedAt) < 600 { continue }
+            if !force, let failure = validationFailures[hash], Date.now.timeIntervalSince(failure) < 60 { continue }
+            let originalEpoch = epoch
+            let originalSourceEpoch = sourceEpochs[hash, default: 0]
+            let task: Task<(Data, HTTPURLResponse), Error>
+            if let pending = validationTasks[hash] { task = pending }
+            else {
+                let session = session
+                task = Task {
+                    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+                    if let etag = old.etag { request.setValue(etag, forHTTPHeaderField: "If-None-Match") }
+                    else if let modified = old.lastModified { request.setValue(modified, forHTTPHeaderField: "If-Modified-Since") }
+                    let (data, response) = try await session.data(for: request)
+                    guard let response = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+                    return (data, response)
+                }
+                validationTasks[hash] = task
+            }
+            do {
+                let (data, response) = try await task.value
+                guard epoch == originalEpoch else { continue }
+                guard sourceEpochs[hash, default: 0] == originalSourceEpoch else { changed.insert(url); continue }
+                validationTasks[hash] = nil
+                if response.statusCode == 304 {
+                    guard old.etag != nil || old.lastModified != nil else { throw URLError(.badServerResponse) }
+                    var updated = old; updated.validatedAt = .now
+                    writeFreshness(updated, url: url)
+                } else {
+                    guard (200..<300).contains(response.statusCode), Self.isImageData(data) else { throw URLError(.cannotDecodeContentData) }
+                    let updated = Self.makeFreshness(data: data, response: response)
+                    if updated.fingerprint != old.fingerprint {
+                        invalidateSources([url], removeRaw: true)
+                        changed.insert(url)
+                    }
+                    cache.storeCachedResponse(CachedURLResponse(response: response, data: data), for: Self.makeRequest(for: url))
+                    writeFreshness(updated, url: url)
+                }
+                validationFailures[hash] = nil
+            } catch {
+                if epoch == originalEpoch, sourceEpochs[hash, default: 0] == originalSourceEpoch {
+                    validationTasks[hash] = nil; validationFailures[hash] = .now
+                }
+                // Offline validation retains a usable processed image.
+            }
+        }
+        return changed
+    }
+
+    private func metadataURL(_ url: URL) -> URL {
+        remoteDirectoryURL.appendingPathComponent(Self.hash(url.absoluteString), isDirectory: true).appendingPathComponent("metadata.json")
+    }
+    private func readFreshness(url: URL) -> Freshness? {
+        let hash = Self.hash(url.absoluteString)
+        if let value = freshness[hash] { return value }
+        if let data = try? Data(contentsOf: metadataURL(url)), let value = try? JSONDecoder().decode(Freshness.self, from: data) {
+            freshness[hash] = value; return value
+        }
+        // Migrate legacy processed files without discarding them. Their oldest
+        // modification time provides a conservative initial freshness date.
+        let folder = metadataURL(url).deletingLastPathComponent()
+        let dates = ((try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
+            .filter { $0.pathExtension == "img" }.compactMap { try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }
+        guard let date = dates.min() else { return nil }
+        let cached = cache.cachedResponse(for: Self.makeRequest(for: url))
+        let response = cached?.response as? HTTPURLResponse
+        let value = Freshness(validatedAt: date, fingerprint: cached.map { Self.fingerprint($0.data) } ?? "",
+            etag: response?.value(forHTTPHeaderField: "ETag"), lastModified: response?.value(forHTTPHeaderField: "Last-Modified"))
+        writeFreshness(value, url: url); return value
+    }
+    private func writeFreshness(_ value: Freshness, url: URL) {
+        freshness[Self.hash(url.absoluteString)] = value
+        let file = metadataURL(url)
+        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(value) { try? data.write(to: file, options: .atomic) }
+    }
+    private nonisolated static func makeFreshness(data: Data, response: URLResponse) -> Freshness {
+        let http = response as? HTTPURLResponse
+        return Freshness(validatedAt: .now, fingerprint: fingerprint(data), etag: http?.value(forHTTPHeaderField: "ETag"),
+                         lastModified: http?.value(forHTTPHeaderField: "Last-Modified"))
+    }
+    private nonisolated static func fingerprint(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+    private nonisolated static func isImageData(_ data: Data) -> Bool {
+        data.isLikelySVGImageData || CGImageSourceCreateWithData(data as CFData, nil) != nil
     }
 
     private func resolvedImageData(for url: URL, maxRetries: Int) async throws -> Data {
@@ -394,6 +566,9 @@ actor URLCachedImageStore: RemoteImageCaching {
 
         if let cachedResponse = cache.cachedResponse(for: request),
            !cachedResponse.data.isEmpty {
+            if freshness[Self.hash(url.absoluteString)] == nil {
+                writeFreshness(Self.makeFreshness(data: cachedResponse.data, response: cachedResponse.response), url: url)
+            }
             return cachedResponse.data
         }
 
@@ -401,6 +576,7 @@ actor URLCachedImageStore: RemoteImageCaching {
         let attempts = max(1, maxRetries)
 
         for attempt in 1 ... attempts {
+            try Task.checkCancellation()
             do {
                 let (data, response) = try await session.data(for: request)
 
@@ -409,6 +585,9 @@ actor URLCachedImageStore: RemoteImageCaching {
                     throw URLError(.badServerResponse)
                 }
 
+                try Task.checkCancellation()
+                guard Self.isImageData(data) else { throw URLError(.cannotDecodeContentData) }
+                writeFreshness(Self.makeFreshness(data: data, response: response), url: url)
                 cache.storeCachedResponse(
                     CachedURLResponse(response: response, data: data),
                     for: request
@@ -416,6 +595,7 @@ actor URLCachedImageStore: RemoteImageCaching {
 
                 return data
             } catch {
+                if Task.isCancelled || error is CancellationError { throw CancellationError() }
                 lastError = error
 
                 guard attempt < attempts else {
@@ -730,7 +910,7 @@ actor URLCachedImageStore: RemoteImageCaching {
         let fileURL = remoteDirectoryURL
             .appendingPathComponent(urlHash, isDirectory: true)
             .appendingPathComponent("\(variantKey).img", isDirectory: false)
-        return ImageCacheDescriptor(identifier: identifier, fileURL: fileURL, pixelSize: pixelSize)
+        return ImageCacheDescriptor(identifier: identifier, fileURL: fileURL, pixelSize: pixelSize, dependencies: [urlHash])
     }
 
     private func compositeCacheDescriptor(
@@ -747,9 +927,11 @@ actor URLCachedImageStore: RemoteImageCaching {
             Self.cacheVariantKey(for: pixelSize)
         ].joined(separator: "|")
         let compositeHash = Self.hash(payload)
-        let identifier = "composite:\(compositeHash)"
-        let fileURL = compositeDirectoryURL.appendingPathComponent("\(compositeHash).img", isDirectory: false)
-        return ImageCacheDescriptor(identifier: identifier, fileURL: fileURL, pixelSize: pixelSize)
+        let dependencies = Set([sourceURL, targetURL].compactMap { $0 }.map { Self.hash($0.absoluteString) })
+        let compositeKey = ([compositeHash] + dependencies.sorted()).joined(separator: "-")
+        let identifier = "composite:\(compositeKey)"
+        let fileURL = compositeDirectoryURL.appendingPathComponent("\(compositeKey).img", isDirectory: false)
+        return ImageCacheDescriptor(identifier: identifier, fileURL: fileURL, pixelSize: pixelSize, dependencies: dependencies)
     }
 
     private func fleetCardCacheDescriptor(
@@ -763,9 +945,11 @@ actor URLCachedImageStore: RemoteImageCaching {
             Self.cacheVariantKey(for: pixelSize)
         ].joined(separator: "|")
         let renderedHash = Self.hash(payload)
-        let identifier = "fleet-card:\(renderedHash)"
-        let fileURL = fleetCardDirectoryURL.appendingPathComponent("\(renderedHash).img", isDirectory: false)
-        return ImageCacheDescriptor(identifier: identifier, fileURL: fileURL, pixelSize: pixelSize)
+        let dependencies = Set([recipe.backdropURL, recipe.logoURL].compactMap { $0 }.map { Self.hash($0.absoluteString) })
+        let renderedKey = ([renderedHash] + dependencies.sorted()).joined(separator: "-")
+        let identifier = "fleet-card:\(renderedKey)"
+        let fileURL = fleetCardDirectoryURL.appendingPathComponent("\(renderedKey).img", isDirectory: false)
+        return ImageCacheDescriptor(identifier: identifier, fileURL: fileURL, pixelSize: pixelSize, dependencies: dependencies)
     }
 
     private nonisolated static func normalizedPixelSize(
@@ -996,10 +1180,11 @@ private final class SVGImageRasterizer: NSObject, WKNavigationDelegate {
     }
 }
 
-private struct ImageCacheDescriptor: Sendable {
+private nonisolated struct ImageCacheDescriptor: Sendable {
     let identifier: String
     let fileURL: URL
     let pixelSize: CGSize?
+    let dependencies: Set<String>
 }
 
 enum RemoteImageStoreError: LocalizedError {

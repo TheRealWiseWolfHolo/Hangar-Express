@@ -43,11 +43,11 @@ struct HangarDashboardView: View {
 
     let appModel: AppModel
     let snapshot: HangarSnapshot
-    private let allPackageGroups: [GroupedHangarPackage]
+    private var allPackageGroups: [GroupedHangarPackage] { appModel.readyInventoryPresentation?.packages ?? [] }
 
     @Environment(\.displayScale) private var displayScale
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
-    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
+    @AppStorage(HangarItemTranslationMissMode.storageKey) private var itemTranslationMissModeRawValue = HangarItemTranslationMissMode.onDevice.rawValue
     @AppStorage(DisplayPreferences.hangarUpgradedShipDisplayModeKey) private var showsUpgradedShipInHangar = DisplayPreferences.hangarUpgradedShipDisplayEnabledByDefault
     @AppStorage(DisplayPreferences.compositeUpgradeThumbnailModeKey) private var usesCompositeUpgradeThumbnails = DisplayPreferences.compositeUpgradeThumbnailsEnabledByDefault
     @AppStorage(DisplayPreferences.hangarGiftedHighlightKey) private var highlightsGiftedHangarRows = DisplayPreferences.hangarGiftedHighlightEnabledByDefault
@@ -68,7 +68,8 @@ struct HangarDashboardView: View {
     @State private var isGeneratingSharePicture = false
     @State private var itemTranslationState = HangarItemTranslationViewState()
     @State private var translationService = OnDeviceHangarItemTranslationService.shared
-    @State private var searchHaystackCache = HangarPackageSearchHaystackCache()
+    @State private var inventorySearchIndex: InventorySearchIndex?
+    @State private var queryCache = InventoryQueryCache<InventoryQuerySignature, [GroupedHangarPackage]>()
     @State private var hangarImagePrefetchTask: Task<Void, Never>?
 
     private static let hangarImagePrefetchLookaheadCount = 10
@@ -77,7 +78,6 @@ struct HangarDashboardView: View {
     init(appModel: AppModel, snapshot: HangarSnapshot) {
         self.appModel = appModel
         self.snapshot = snapshot
-        allPackageGroups = snapshot.packages.groupedForInventoryDisplay
     }
 
     var body: some View {
@@ -246,6 +246,17 @@ struct HangarDashboardView: View {
                 id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
             ) {
                 await loadItemTranslationDictionary()
+            }
+            .task(id: searchIndexKey) { await warmSearchIndex() }
+            .overlay {
+                if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && activeSearchIndex == nil && !appModel.isPreparingInventoryPresentation {
+                    ProgressView("Preparing search...").padding(18)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .allowsHitTesting(false)
+                }
+            }
+            .onChange(of: appModel.readyInventoryPresentation?.key) { _, key in
+                if key != nil { pruneSelectionToVisibleGroups() }
             }
             .task(id: hangarImagePrefetchID(for: visiblePackageGroups)) {
                 await prefetchHangarImages(startingAt: 0, in: visiblePackageGroups)
@@ -497,49 +508,26 @@ struct HangarDashboardView: View {
     }
 
     private var filteredPackageGroups: [GroupedHangarPackage] {
-        let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
-        let currentItemTranslator = itemTranslator
-        let searchSignature = HangarPackageSearchHaystackCache.Signature(
-            snapshotLastSyncedAt: snapshot.lastSyncedAt,
-            languageRawValue: currentItemTranslator.language.rawValue,
-            dictionaryLocale: currentItemTranslator.dictionary?.locale,
-            dictionaryVersion: currentItemTranslator.dictionary?.version,
-            translationCacheGeneration: translationService.cacheGeneration,
-            showsUpgradedShipInHangar: showsUpgradedShipInHangar
-        )
-
-        return allPackageGroups.filter { packageGroup in
-            let package = packageGroup.representative
-            let matchesFilter: Bool
+        let presentation = appModel.readyInventoryPresentation
+        let index = activeSearchIndex
+        let query = InventorySearchQuery(searchText)
+        var flags: InventoryFilterFlags = []
+        switch filter { case .all: break; case .giftable: flags.insert(.giftable); case .reclaimable: flags.insert(.reclaimable) }
+        for filter in searchFilters {
             switch filter {
-            case .all:
-                matchesFilter = true
-            case .giftable:
-                matchesFilter = package.canGift
-            case .reclaimable:
-                matchesFilter = package.canReclaim
+            case .lti: flags.insert(.lifetimeInsurance)
+            case .upgrades: flags.insert(.upgrade)
+            case .packages: flags.insert(.package)
             }
-
-            guard matchesFilter else {
-                return false
+        }
+        let signature = InventoryQuerySignature(presentation: presentation?.key, search: index?.key, query: query.value, requiredFlags: flags)
+        return queryCache.result(for: signature) {
+            PerformanceTrace.measure("HangarSearch") {
+                allPackageGroups.filter { group in
+                    guard (presentation?.packageFlags[group.id] ?? []).isSuperset(of: flags) else { return false }
+                    return query.isEmpty || index?.packages[group.id]?.contains(query) == true
+                }
             }
-
-            guard matchesSearchFilters(for: package) else {
-                return false
-            }
-
-            guard !normalizedSearchText.isEmpty else {
-                return true
-            }
-
-            let haystack = searchHaystackCache.haystack(
-                for: packageGroup,
-                signature: searchSignature,
-                itemTranslator: currentItemTranslator,
-                translationService: translationService
-            )
-
-            return haystack.contains(normalizedSearchText)
         }
     }
 
@@ -547,24 +535,39 @@ struct HangarDashboardView: View {
         itemTranslationState.translator(for: hangarItemLanguageRawValue)
     }
 
+    private var hangarItemLanguageRawValue: String {
+        HangarItemLanguage.resolved(
+            forAppLanguageRawValue: appLanguageRawValue
+        ).rawValue
+    }
+
     private func loadItemTranslationDictionary() async {
         await itemTranslationState.loadDictionary(
             for: hangarItemLanguageRawValue,
             refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
         )
+        await warmSearchIndex()
     }
 
-    private func matchesSearchFilters(for package: HangarPackage) -> Bool {
-        searchFilters.allSatisfy { searchFilter in
-            switch searchFilter {
-            case .lti:
-                return package.hasLifetimeInsurance
-            case .upgrades:
-                return package.hasUpgradeItems
-            case .packages:
-                return package.isMultiShipPackage
-            }
-        }
+    private var searchIndexKey: InventorySearchKey? {
+        guard let presentation = appModel.readyInventoryPresentation else { return nil }
+        let translator = itemTranslator
+        return InventorySearchKey(presentation: presentation.key, language: translator.language.rawValue,
+            dictionaryLocale: translator.dictionary?.locale, dictionaryVersion: translator.dictionary?.version,
+            cacheGeneration: translationService.cacheGeneration, upgradedNames: showsUpgradedShipInHangar, section: .hangar)
+    }
+    private var activeSearchIndex: InventorySearchIndex? {
+        inventorySearchIndex?.key == searchIndexKey ? inventorySearchIndex : nil
+    }
+    private func warmSearchIndex() async {
+        guard let presentation = appModel.readyInventoryPresentation, let key = searchIndexKey else { return }
+        do {
+            let value = try await appModel.inventorySearchBuilder.index(presentation: presentation,
+                context: translationService.searchContext(using: itemTranslator), key: key)
+            guard !Task.isCancelled, key == searchIndexKey else { return }
+            inventorySearchIndex = value
+            pruneSelectionToVisibleGroups()
+        } catch { }
     }
 
     private func toggle(_ searchFilter: SearchFilter) {
@@ -598,6 +601,8 @@ struct HangarDashboardView: View {
     }
 
     private func pruneSelectionToVisibleGroups() {
+        guard !appModel.isPreparingInventoryPresentation else { return }
+        if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, activeSearchIndex == nil { return }
         guard isSelectingPackages else {
             return
         }
@@ -656,7 +661,9 @@ struct HangarDashboardView: View {
             let fileURL = try await HangarSharePictureGenerator.makeJPEG(
                 for: packageGroup,
                 fleet: snapshot.fleet,
-                itemTranslator: itemTranslator
+                itemTranslator: itemTranslator,
+                translationMissMode: HangarItemTranslationMissMode.resolved(from: itemTranslationMissModeRawValue),
+                showsUpgradedShipInHangar: showsUpgradedShipInHangar
             )
             sharePicturePayload = HangarSharePicturePayload(fileURL: fileURL)
         } catch {
@@ -683,7 +690,9 @@ struct HangarDashboardView: View {
             let fileURL = try await HangarSharePictureGenerator.makeJPEG(
                 for: packageGroup,
                 fleet: snapshot.fleet,
-                itemTranslator: itemTranslator
+                itemTranslator: itemTranslator,
+                translationMissMode: HangarItemTranslationMissMode.resolved(from: itemTranslationMissModeRawValue),
+                showsUpgradedShipInHangar: showsUpgradedShipInHangar
             )
             try await PHPhotoLibrary.shared().performChanges {
                 PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: fileURL)
@@ -1346,6 +1355,7 @@ private struct PriceSummaryView: View {
 struct HangarPackageDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(DisplayPreferences.sharePictureAutoCopiesDebugLogKey) private var autoCopiesSharePictureDebugLog = DisplayPreferences.sharePictureAutoCopiesDebugLogEnabledByDefault
+    @AppStorage(HangarItemTranslationMissMode.storageKey) private var itemTranslationMissModeRawValue = HangarItemTranslationMissMode.onDevice.rawValue
 
     private enum PresentedActionSheet: String, Identifiable {
         case melt
@@ -1597,6 +1607,7 @@ struct HangarPackageDetailView: View {
                     HangarUpgradeTargetPickerView(
                         appModel: appModel,
                         packageGroup: packageGroup,
+                        itemTranslator: itemTranslator,
                         reloadToken: reloadToken,
                         completionHandler: HangarActionCompletionHandler {
                             presentedActionSheet = nil
@@ -1654,7 +1665,9 @@ struct HangarPackageDetailView: View {
             let fileURL = try await HangarSharePictureGenerator.makeJPEG(
                 for: packageGroup,
                 fleet: appModel.snapshot?.fleet ?? [],
-                itemTranslator: itemTranslator
+                itemTranslator: itemTranslator,
+                translationMissMode: HangarItemTranslationMissMode.resolved(from: itemTranslationMissModeRawValue),
+                showsUpgradedShipInHangar: appModel.showsUpgradedShipInHangar
             )
             sharePicturePayload = HangarSharePicturePayload(fileURL: fileURL)
         } catch {
@@ -1676,60 +1689,6 @@ struct HangarPackageDetailView: View {
 }
 
 @MainActor
-private final class HangarPackageSearchHaystackCache {
-    struct Signature: Equatable {
-        let snapshotLastSyncedAt: Date
-        let languageRawValue: String
-        let dictionaryLocale: String?
-        let dictionaryVersion: Int?
-        let translationCacheGeneration: Int
-        let showsUpgradedShipInHangar: Bool
-    }
-
-    private var activeSignature: Signature?
-    private var entries: [String: String] = [:]
-
-    func haystack(
-        for packageGroup: GroupedHangarPackage,
-        signature: Signature,
-        itemTranslator: HangarItemTranslator,
-        translationService: OnDeviceHangarItemTranslationService
-    ) -> String {
-        if activeSignature != signature {
-            activeSignature = signature
-            entries.removeAll(keepingCapacity: true)
-        }
-
-        let package = packageGroup.representative
-        if let haystack = entries[packageGroup.id] {
-            return haystack
-        }
-
-        let itemTitleSources = package.contents.flatMap { item -> [String] in
-            var titles = [item.title]
-            if let pricing = item.upgradePricing {
-                titles.append(pricing.sourceShipName)
-                titles.append(pricing.targetShipName)
-            }
-            return titles
-        }
-
-        let haystack = [
-            translationService.searchableText(for: package.title, using: itemTranslator),
-            translationService.searchableText(
-                for: package.debugDisplayTitle(showsUpgradedShipInHangar: signature.showsUpgradedShipInHangar),
-                using: itemTranslator
-            ),
-            package.status,
-            package.searchableInsuranceText,
-            translationService.searchableText(for: itemTitleSources, using: itemTranslator)
-        ].joined(separator: " ").localizedLowercase
-
-        entries[packageGroup.id] = haystack
-        return haystack
-    }
-}
-
 private struct HangarSharePicturePayload: Identifiable {
     let id = UUID()
     let fileURL: URL
@@ -1774,6 +1733,19 @@ private struct HangarSharePictureProgressOverlay: View {
 
 @MainActor
 private enum HangarSharePictureGenerator {
+    private struct ShareTextContext {
+        let itemTranslator: HangarItemTranslator
+        let translationMissMode: HangarItemTranslationMissMode
+
+        func displayText(_ source: String) -> String {
+            HangarItemDisplayText.text(
+                for: source,
+                using: itemTranslator,
+                missMode: translationMissMode
+            )
+        }
+    }
+
     private struct ShareImages {
         let primary: UIImage?
         let source: UIImage?
@@ -1862,15 +1834,26 @@ private enum HangarSharePictureGenerator {
     static func makeJPEG(
         for packageGroup: GroupedHangarPackage,
         fleet: [FleetShip],
-        itemTranslator: HangarItemTranslator
+        itemTranslator: HangarItemTranslator,
+        translationMissMode: HangarItemTranslationMissMode,
+        showsUpgradedShipInHangar: Bool
     ) async throws -> URL {
         let package = packageGroup.representative
         let upgradePricing = package.shareUpgradePricing
-        let packageTitle = displayText(package.title, using: itemTranslator)
+        let textContext = ShareTextContext(
+            itemTranslator: itemTranslator,
+            translationMissMode: translationMissMode
+        )
+        let titleSource = package.debugDisplayTitle(
+            showsUpgradedShipInHangar: showsUpgradedShipInHangar
+        )
+        let packageTitle = textContext.displayText(
+            HangarCouponParser.info(from: titleSource)?.cardTitle ?? titleSource
+        )
         let contentSections = contentSections(
             for: package,
             shipValues: shipValueLookup(from: fleet),
-            itemTranslator: itemTranslator
+            textContext: textContext
         )
         let images = await loadImages(
             for: package,
@@ -1893,7 +1876,7 @@ private enum HangarSharePictureGenerator {
             contentSections: contentSections,
             images: images,
             size: size,
-            itemTranslator: itemTranslator
+            textContext: textContext
         )
 
         guard let data = image.jpegData(compressionQuality: 0.92) else {
@@ -1989,7 +1972,7 @@ private enum HangarSharePictureGenerator {
     private static func contentSections(
         for package: HangarPackage,
         shipValues: ShipValueLookup,
-        itemTranslator: HangarItemTranslator
+        textContext: ShareTextContext
     ) -> ShareContentSections {
         let visibleItems = package.contents
             .filter { HangarPledgeSummaryParser.shouldRenderContentTitle($0.title) }
@@ -1999,12 +1982,12 @@ private enum HangarSharePictureGenerator {
             .map { item in
                 ShareVisualContentRow(
                     id: item.id,
-                    title: displayText(item.title, using: itemTranslator),
+                    title: textContext.displayText(item.title),
                     detail: visualDetail(
                         for: item,
                         package: package,
                         shipValues: shipValues,
-                        itemTranslator: itemTranslator
+                        textContext: textContext
                     ),
                     imageURL: item.imageURL,
                     fallbackSystemImage: item.isShipLike ? "airplane" : "paintpalette.fill"
@@ -2021,7 +2004,7 @@ private enum HangarSharePictureGenerator {
 
         let otherRows = visibleItems
             .filter { !isVisualContentItem($0) && !isInsuranceItem($0) }
-            .map { plainContentRow(for: $0, itemTranslator: itemTranslator) }
+            .map { plainContentRow(for: $0, textContext: textContext) }
 
         return ShareContentSections(
             visualRows: visualRows,
@@ -2063,15 +2046,15 @@ private enum HangarSharePictureGenerator {
         for item: PackageItem,
         package: HangarPackage,
         shipValues: ShipValueLookup,
-        itemTranslator: HangarItemTranslator
+        textContext: ShareTextContext
     ) -> String? {
         if item.isShipLike {
             return shipValues.valueText(for: item, in: package)
         }
 
         let detailParts = [
-            displayText(AppLocalizer.string(item.category.rawValue), using: itemTranslator),
-            cleanedDetail(item.detail).map { displayText($0, using: itemTranslator) }
+            textContext.displayText(AppLocalizer.string(item.category.rawValue)),
+            cleanedDetail(item.detail).map { textContext.displayText($0) }
         ].compactMap { $0 }
 
         return detailParts.isEmpty ? nil : detailParts.joined(separator: " - ")
@@ -2115,15 +2098,15 @@ private enum HangarSharePictureGenerator {
 
     private static func plainContentRow(
         for item: PackageItem,
-        itemTranslator: HangarItemTranslator
+        textContext: ShareTextContext
     ) -> ShareContentRow {
         let detailParts = [
-            displayText(AppLocalizer.string(item.category.rawValue), using: itemTranslator),
-            cleanedDetail(item.detail).map { displayText($0, using: itemTranslator) }
+            textContext.displayText(AppLocalizer.string(item.category.rawValue)),
+            cleanedDetail(item.detail).map { textContext.displayText($0) }
         ].compactMap { $0 }
 
         return ShareContentRow(
-            title: displayText(item.title, using: itemTranslator),
+            title: textContext.displayText(item.title),
             detail: detailParts.isEmpty ? nil : detailParts.joined(separator: " - ")
         )
     }
@@ -2166,7 +2149,7 @@ private enum HangarSharePictureGenerator {
         contentSections: ShareContentSections,
         images: ShareImages,
         size: CGSize,
-        itemTranslator: HangarItemTranslator
+        textContext: ShareTextContext
     ) -> UIImage {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
@@ -2194,7 +2177,7 @@ private enum HangarSharePictureGenerator {
                     pricing: upgradePricing,
                     images: images,
                     context: cgContext,
-                    itemTranslator: itemTranslator
+                    textContext: textContext
                 )
                 y += upgradeHeroHeight + 34
             } else {
@@ -2215,7 +2198,7 @@ private enum HangarSharePictureGenerator {
             }
 
             y += footerTopSpacing
-            drawWatermark(at: y, language: itemTranslator.language)
+            drawWatermark(at: y, language: textContext.itemTranslator.language)
         }
     }
 
@@ -2355,7 +2338,7 @@ private enum HangarSharePictureGenerator {
         pricing: PackageItem.UpgradePricing,
         images: ShareImages,
         context: CGContext,
-        itemTranslator: HangarItemTranslator
+        textContext: ShareTextContext
     ) {
         let imageRect = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: upgradeImageHeight)
         drawUpgradeStepFourBothMasksPanel(
@@ -2388,14 +2371,14 @@ private enum HangarSharePictureGenerator {
             height: rect.maxY - captionY
         )
         drawUpgradeShipCaption(
-            title: displayText(pricing.sourceShipName, using: itemTranslator),
+            title: textContext.displayText(pricing.sourceShipName),
             label: AppLocalizer.string("From"),
             msrp: pricing.sourceShipMSRPUSD,
             in: sourceCaptionRect,
             alignment: .left
         )
         drawUpgradeShipCaption(
-            title: displayText(pricing.targetShipName, using: itemTranslator),
+            title: textContext.displayText(pricing.targetShipName),
             label: AppLocalizer.string("To"),
             msrp: pricing.targetShipMSRPUSD,
             in: targetCaptionRect,
@@ -2996,16 +2979,6 @@ private enum HangarSharePictureGenerator {
                 color: tertiaryTextColor
             )
         }
-    }
-
-    private static func displayText(
-        _ source: String,
-        using itemTranslator: HangarItemTranslator
-    ) -> String {
-        OnDeviceHangarItemTranslationService.shared.displayText(
-            for: source,
-            using: itemTranslator
-        )
     }
 
     private static func drawBrandLogo(in rect: CGRect) {
@@ -4213,6 +4186,7 @@ private struct HangarUpgradeTargetPickerView: View {
 
     let appModel: AppModel
     let packageGroup: GroupedHangarPackage
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
     let completionHandler: HangarActionCompletionHandler
 
@@ -4233,8 +4207,9 @@ private struct HangarUpgradeTargetPickerView: View {
         let needle = searchText.localizedLowercase
         return targets.filter { target in
             [
-                target.title,
+                itemTranslator.searchableText(for: target.title),
                 target.status ?? "",
+                target.status.map(AppLocalizer.string) ?? "",
                 target.insurance ?? ""
             ]
             .joined(separator: " ")
@@ -4246,11 +4221,14 @@ private struct HangarUpgradeTargetPickerView: View {
     var body: some View {
         List {
             Section {
-                Text(package.title)
+                HangarTranslatedText(source: package.title, itemTranslator: itemTranslator)
                     .font(.headline)
 
                 if packageGroup.containsMultipleCopies {
-                    Text("This grouped stack contains \(packageGroup.quantity) identical copies. Hangar Express will apply one copy in this first release.")
+                    Text(AppLocalizer.format(
+                        "This grouped stack contains %lld identical copies. Hangar Express will apply one copy in this first release.",
+                        packageGroup.quantity
+                    ))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -4290,11 +4268,12 @@ private struct HangarUpgradeTargetPickerView: View {
                                 appModel: appModel,
                                 packageGroup: packageGroup,
                                 target: target,
+                                itemTranslator: itemTranslator,
                                 reloadToken: reloadToken,
                                 completionHandler: completionHandler
                             )
                         } label: {
-                            UpgradeTargetRow(target: target, reloadToken: reloadToken)
+                            UpgradeTargetRow(target: target, itemTranslator: itemTranslator, reloadToken: reloadToken)
                         }
                     }
                 } header: {
@@ -4343,6 +4322,7 @@ private struct HangarUpgradeTargetPickerView: View {
 
 private struct UpgradeTargetRow: View {
     let target: UpgradeTargetCandidate
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
 
     var body: some View {
@@ -4355,12 +4335,12 @@ private struct UpgradeTargetRow: View {
             )
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(target.title)
+                HangarTranslatedText(source: target.title, itemTranslator: itemTranslator)
                     .font(.headline)
 
                 if let status = target.status,
                    !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text(status)
+                    Text(AppLocalizer.string(status))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -4396,6 +4376,7 @@ private struct HangarUpgradeConfirmationView: View {
     let appModel: AppModel
     let packageGroup: GroupedHangarPackage
     let target: UpgradeTargetCandidate
+    let itemTranslator: HangarItemTranslator
     let reloadToken: UUID?
     let completionHandler: HangarActionCompletionHandler
 
@@ -4425,11 +4406,14 @@ private struct HangarUpgradeConfirmationView: View {
     var body: some View {
         List {
             Section {
-                Text(package.title)
+                HangarTranslatedText(source: package.title, itemTranslator: itemTranslator)
                     .font(.headline)
 
                 if packageGroup.containsMultipleCopies {
-                    Text("Hangar Express will consume one copy from this grouped stack of \(packageGroup.quantity) identical upgrades.")
+                    Text(AppLocalizer.format(
+                        "Hangar Express will consume one copy from this grouped stack of %lld identical upgrades.",
+                        packageGroup.quantity
+                    ))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -4440,12 +4424,16 @@ private struct HangarUpgradeConfirmationView: View {
             Section {
                 if let fromShip = upgradePath.from,
                    !fromShip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    LabeledContent("From", value: fromShip)
+                    LabeledContent("From") {
+                        HangarTranslatedText(source: fromShip, itemTranslator: itemTranslator)
+                    }
                 }
 
                 if let toShip = upgradePath.to,
                    !toShip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    LabeledContent("To", value: toShip)
+                    LabeledContent("To") {
+                        HangarTranslatedText(source: toShip, itemTranslator: itemTranslator)
+                    }
                 }
             } header: {
                 Text("Upgrade Path")
@@ -4461,12 +4449,12 @@ private struct HangarUpgradeConfirmationView: View {
                     )
 
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(target.title)
+                        HangarTranslatedText(source: target.title, itemTranslator: itemTranslator)
                             .font(.headline)
 
                         if let status = target.status,
                            !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            Text(status)
+                            Text(AppLocalizer.string(status))
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }

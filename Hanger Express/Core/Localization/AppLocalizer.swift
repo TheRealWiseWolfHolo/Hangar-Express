@@ -2,15 +2,18 @@ import Foundation
 
 enum AppLocalizer {
     nonisolated private static let defaultBundle = Bundle.main
+    nonisolated private static let cache = LocalizationCache(defaultBundle: defaultBundle)
 
     nonisolated static var currentLanguage: AppLanguage {
-        AppLanguage.resolved(
-            from: UserDefaults.standard.string(forKey: AppLanguage.storageKey) ?? AppLanguage.system.rawValue
-        )
+        cache.currentLanguage
     }
 
     nonisolated static var currentLocale: Locale {
-        currentLanguage.locale
+        cache.currentLocale
+    }
+
+    nonisolated static func updateCurrentLanguage(rawValue: String) {
+        cache.updateLanguage(rawValue: rawValue)
     }
 
     nonisolated static func string(_ key: String) -> String {
@@ -59,13 +62,7 @@ enum AppLocalizer {
     }
 
     nonisolated private static var resolvedBundle: Bundle {
-        guard let localizationIdentifier = currentLanguage.bundleLocalizationIdentifier,
-              let path = defaultBundle.path(forResource: localizationIdentifier, ofType: "lproj"),
-              let bundle = Bundle(path: path) else {
-            return defaultBundle
-        }
-
-        return bundle
+        cache.bundle(for: currentLanguage)
     }
 
     nonisolated private static var usesChineseDateFormat: Bool {
@@ -78,5 +75,72 @@ enum AppLocalizer {
         formatter.timeZone = .current
         formatter.dateFormat = format
         return formatter
+    }
+}
+
+private nonisolated final class LocalizationCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private let defaultBundle: Bundle
+    private let localizedBundles: [String: Bundle]
+    private var language: AppLanguage?
+    private var locale: Locale?
+
+    init(defaultBundle: Bundle) {
+        self.defaultBundle = defaultBundle
+        localizedBundles = ["en", "zh-Hans"].reduce(into: [:]) { bundles, identifier in
+            guard let path = defaultBundle.path(forResource: identifier, ofType: "lproj"),
+                  let bundle = Bundle(path: path) else {
+                return
+            }
+            bundles[identifier] = bundle
+        }
+    }
+
+    var currentLanguage: AppLanguage {
+        lock.withLock {
+            if let language {
+                return language
+            }
+
+            let resolved = AppLanguage.resolved(
+                from: UserDefaults.standard.string(forKey: AppLanguage.storageKey)
+                    ?? AppLanguage.system.rawValue
+            )
+            language = resolved
+            locale = resolved.locale
+            return resolved
+        }
+    }
+
+    var currentLocale: Locale {
+        lock.withLock {
+            if let locale {
+                return locale
+            }
+
+            let resolvedLanguage = language ?? AppLanguage.resolved(
+                from: UserDefaults.standard.string(forKey: AppLanguage.storageKey)
+                    ?? AppLanguage.system.rawValue
+            )
+            let resolvedLocale = resolvedLanguage.locale
+            language = resolvedLanguage
+            locale = resolvedLocale
+            return resolvedLocale
+        }
+    }
+
+    func updateLanguage(rawValue: String) {
+        let resolved = AppLanguage.resolved(from: rawValue)
+        lock.withLock {
+            language = resolved
+            locale = resolved.locale
+        }
+    }
+
+    func bundle(for language: AppLanguage) -> Bundle {
+        guard let identifier = language.bundleLocalizationIdentifier else {
+            return defaultBundle
+        }
+        return localizedBundles[identifier] ?? defaultBundle
     }
 }

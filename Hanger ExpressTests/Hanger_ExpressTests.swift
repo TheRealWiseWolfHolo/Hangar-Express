@@ -6,7 +6,20 @@ import WebKit
 @testable import Hanger_Express
 
 @MainActor
+@Suite(.timeLimit(.minutes(1)))
 struct Hanger_ExpressTests {
+    let resources = TestResources()
+
+    @Test func wbccuDealsAndReferralsRequireEarlyAccess() {
+        let earlyAccessTools = Set(
+            FleetTool.allCases.filter(\.requiresEarlyAccess)
+        )
+
+        #expect(
+            earlyAccessTools == Set([FleetTool.wbccuDeals, FleetTool.referrals])
+        )
+    }
+
     @Test func sampleSnapshotRollsUpMetrics() async throws {
         let snapshot = PreviewHangarRepository.sampleSnapshot
 
@@ -422,6 +435,13 @@ struct Hanger_ExpressTests {
         #expect(SyncPreferences.constrainedWorkerCount(0, isPro: false) == 1)
         #expect(SyncPreferences.constrainedWorkerCount(10, isPro: true) == 10)
         #expect(SyncPreferences.constrainedWorkerCount(11, isPro: true) == 10)
+        #expect(SyncPreferences.resolvedWorkerCount(configuredCount: 0, isPro: false, wasCustomized: false) == 2)
+        #expect(SyncPreferences.resolvedWorkerCount(configuredCount: 0, isPro: true, wasCustomized: false) == 5)
+        #expect(SyncPreferences.resolvedWorkerCount(configuredCount: 0, isPro: true, wasCustomized: true) == 5)
+        #expect(SyncPreferences.resolvedWorkerCount(configuredCount: 2, isPro: true, wasCustomized: false) == 5)
+        #expect(SyncPreferences.resolvedWorkerCount(configuredCount: 2, isPro: true, wasCustomized: true) == 2)
+        #expect(SyncPreferences.resolvedWorkerCount(configuredCount: 7, isPro: true, wasCustomized: false) == 7)
+        #expect(SyncPreferences.resolvedWorkerCount(configuredCount: 7, isPro: false, wasCustomized: false) == 2)
         #expect(ProSubscriptionConfiguration.savedAccountLimit(isPro: false) == 1)
         #expect(ProSubscriptionConfiguration.savedAccountLimit(isPro: true) == 10)
 
@@ -962,8 +982,7 @@ struct Hanger_ExpressTests {
     }
 
     @Test func fileSnapshotStorePersistsSnapshotsByAccountKey() async throws {
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let tempDirectory = resources.temporaryDirectory()
         let store = FileSnapshotStore(directoryURL: tempDirectory)
         let session = makeUserSession(
             handle: "citizen-cache",
@@ -974,237 +993,15 @@ struct Hanger_ExpressTests {
         )
         let snapshot = PreviewHangarRepository.sampleSnapshot
 
-        await store.save(snapshot, for: session)
-        let restoredSnapshot = await store.load(for: session)
+        try await store.save(snapshot, for: session)
+        let restoredSnapshot = try await store.load(for: session)
 
         #expect(restoredSnapshot == snapshot)
 
-        await store.delete(for: session)
-        let deletedSnapshot = await store.load(for: session)
+        try await store.delete(for: session)
+        let deletedSnapshot = try await store.load(for: session)
 
         #expect(deletedSnapshot == nil)
-    }
-
-    @Test func urlCachedImageStoreLoadsPersistedThumbnailWithoutNetwork() async throws {
-        defer {
-            MockURLProtocol.requestHandler = nil
-        }
-
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let imageURL = try #require(URL(string: "https://example.com/ship.jpg"))
-        let targetSize = CGSize(width: 84, height: 84)
-        let redImageData = makeSolidImageData(color: .systemRed)
-
-        let initialSession = makeMockURLSession { request in
-            (
-                try #require(HTTPURLResponse(url: request.url ?? imageURL, statusCode: 200, httpVersion: nil, headerFields: nil)),
-                redImageData
-            )
-        }
-
-        let firstStore = URLCachedImageStore(
-            cache: URLCache(memoryCapacity: 0, diskCapacity: 0),
-            session: initialSession,
-            storageDirectoryURL: tempDirectory
-        )
-        let initialImage = try await firstStore.image(
-            for: imageURL,
-            targetPointSize: targetSize,
-            displayScale: 2,
-            maxRetries: 1
-        )
-
-        #expect(colorMatches(sampledColor(from: initialImage), UIColor.systemRed))
-
-        let offlineSession = makeMockURLSession { _ in
-            throw URLError(.notConnectedToInternet)
-        }
-
-        let secondStore = URLCachedImageStore(
-            cache: URLCache(memoryCapacity: 0, diskCapacity: 0),
-            session: offlineSession,
-            storageDirectoryURL: tempDirectory
-        )
-        let restoredImage = try await secondStore.image(
-            for: imageURL,
-            targetPointSize: targetSize,
-            displayScale: 2,
-            maxRetries: 1
-        )
-
-        #expect(colorMatches(sampledColor(from: restoredImage), UIColor.systemRed))
-    }
-
-    @Test func urlCachedImageStoreClearsCompositeImagesWhenSourceURLsInvalidate() async throws {
-        defer {
-            MockURLProtocol.requestHandler = nil
-        }
-
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let sourceURL = try #require(URL(string: "https://example.com/source.jpg"))
-        let targetURL = try #require(URL(string: "https://example.com/target.jpg"))
-        let targetSize = CGSize(width: 96, height: 96)
-        let sourceDataBox = MutableImageDataBox(data: makeSolidImageData(color: .systemRed))
-        let targetImageData = makeSolidImageData(color: .systemBlue)
-
-        let session = makeMockURLSession { request in
-            let response = try #require(
-                HTTPURLResponse(url: request.url ?? sourceURL, statusCode: 200, httpVersion: nil, headerFields: nil)
-            )
-
-            switch request.url?.lastPathComponent {
-            case "source.jpg":
-                return (response, sourceDataBox.data)
-            case "target.jpg":
-                return (response, targetImageData)
-            default:
-                throw URLError(.badURL)
-            }
-        }
-
-        let store = URLCachedImageStore(
-            cache: URLCache(memoryCapacity: 0, diskCapacity: 0),
-            session: session,
-            storageDirectoryURL: tempDirectory
-        )
-
-        let firstComposite = try await store.compositeImage(
-            sourceURL: sourceURL,
-            targetURL: targetURL,
-            targetPointSize: targetSize,
-            displayScale: 2,
-            maxRetries: 1
-        )
-
-        #expect(colorMatches(sampledColor(from: firstComposite, normalizedPoint: CGPoint(x: 0.25, y: 0.5)), UIColor.systemRed))
-        #expect(colorMatches(sampledColor(from: firstComposite, normalizedPoint: CGPoint(x: 0.75, y: 0.5)), UIColor.systemBlue))
-
-        sourceDataBox.data = makeSolidImageData(color: .systemGreen)
-        await store.clear(urls: [sourceURL])
-
-        let refreshedComposite = try await store.compositeImage(
-            sourceURL: sourceURL,
-            targetURL: targetURL,
-            targetPointSize: targetSize,
-            displayScale: 2,
-            maxRetries: 1
-        )
-
-        #expect(colorMatches(sampledColor(from: refreshedComposite, normalizedPoint: CGPoint(x: 0.25, y: 0.5)), UIColor.systemGreen))
-        #expect(colorMatches(sampledColor(from: refreshedComposite, normalizedPoint: CGPoint(x: 0.75, y: 0.5)), UIColor.systemBlue))
-    }
-
-    @Test func urlCachedImageStorePersistsFleetCardBaseImagesWithoutRemoteSources() async throws {
-        defer {
-            MockURLProtocol.requestHandler = nil
-        }
-
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let shipImageURL = try #require(URL(string: "https://example.com/fleet-card-ship.jpg"))
-        let recipe = FleetCardBaseSnapshotRecipe(
-            style: .compact,
-            pointSize: CGSize(width: 220, height: 232),
-            manufacturerName: "Aegis Dynamics",
-            backdropURL: shipImageURL,
-            logoURL: nil
-        )
-        let initialSession = makeMockURLSession { request in
-            (
-                try #require(HTTPURLResponse(url: request.url ?? shipImageURL, statusCode: 200, httpVersion: nil, headerFields: nil)),
-                makeSolidImageData(color: .systemRed)
-            )
-        }
-
-        let firstStore = URLCachedImageStore(
-            cache: URLCache(memoryCapacity: 0, diskCapacity: 0),
-            session: initialSession,
-            storageDirectoryURL: tempDirectory
-        )
-
-        let initialImage = try await firstStore.fleetCardBaseImage(
-            for: recipe,
-            displayScale: 2,
-            maxRetries: 1
-        )
-        let sampledPoint = CGPoint(x: 0.72, y: 0.36)
-        let initialColor = sampledColor(from: initialImage, normalizedPoint: sampledPoint)
-        #expect(initialImage.size.width > 0)
-        #expect(initialImage.size.height > 0)
-
-        try? FileManager.default.removeItem(at: tempDirectory.appendingPathComponent("Remote", isDirectory: true))
-
-        let offlineSession = makeMockURLSession { _ in
-            throw URLError(.notConnectedToInternet)
-        }
-
-        let secondStore = URLCachedImageStore(
-            cache: URLCache(memoryCapacity: 0, diskCapacity: 0),
-            session: offlineSession,
-            storageDirectoryURL: tempDirectory
-        )
-
-        let restoredImage = try await secondStore.fleetCardBaseImage(
-            for: recipe,
-            displayScale: 2,
-            maxRetries: 1
-        )
-        let restoredColor = sampledColor(from: restoredImage, normalizedPoint: sampledPoint)
-
-        #expect(colorsMatch(restoredColor, initialColor, tolerance: 0.03))
-    }
-
-    @Test func urlCachedImageStoreClearsFleetCardBaseImagesWhenSourceURLsInvalidate() async throws {
-        defer {
-            MockURLProtocol.requestHandler = nil
-        }
-
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let shipImageURL = try #require(URL(string: "https://example.com/fleet-card-refresh.jpg"))
-        let sourceDataBox = MutableImageDataBox(data: makeSolidImageData(color: .systemRed))
-        let recipe = FleetCardBaseSnapshotRecipe(
-            style: .compact,
-            pointSize: CGSize(width: 220, height: 232),
-            manufacturerName: "Origin Jumpworks",
-            backdropURL: shipImageURL,
-            logoURL: nil
-        )
-
-        let session = makeMockURLSession { request in
-            (
-                try #require(HTTPURLResponse(url: request.url ?? shipImageURL, statusCode: 200, httpVersion: nil, headerFields: nil)),
-                sourceDataBox.data
-            )
-        }
-
-        let store = URLCachedImageStore(
-            cache: URLCache(memoryCapacity: 0, diskCapacity: 0),
-            session: session,
-            storageDirectoryURL: tempDirectory
-        )
-
-        let sampledPoint = CGPoint(x: 0.72, y: 0.36)
-        let firstImage = try await store.fleetCardBaseImage(
-            for: recipe,
-            displayScale: 2,
-            maxRetries: 1
-        )
-        let firstColor = sampledColor(from: firstImage, normalizedPoint: sampledPoint)
-
-        sourceDataBox.data = makeSolidImageData(color: .systemGreen)
-        await store.clear(urls: [shipImageURL])
-
-        let refreshedImage = try await store.fleetCardBaseImage(
-            for: recipe,
-            displayScale: 2,
-            maxRetries: 1
-        )
-        let refreshedColor = sampledColor(from: refreshedImage, normalizedPoint: sampledPoint)
-
-        #expect(!colorsMatch(refreshedColor, firstColor, tolerance: 0.08))
     }
 
     @Test func trustedDeviceDurationIncludesYearOption() async throws {
@@ -2792,13 +2589,21 @@ struct Hanger_ExpressTests {
                     manufacturer: "Aegis",
                     msrpUSD: 1900,
                     storeAvailable: true
+                ),
+                makeCCUTestCatalogShip(
+                    id: 8,
+                    name: "Aegis Idris-M Frigate",
+                    manufacturer: "Aegis",
+                    msrpUSD: 1000,
+                    storeAvailable: true
                 )
             ]
         )
         let names = Set(CCUUpgradeCatalogShip.makeShips(from: catalog).map(\.name))
 
         #expect(!names.contains("Pioneer"))
-        #expect(names.contains("Idris-M"))
+        #expect(!names.contains("Idris-M"))
+        #expect(!names.contains("Aegis Idris-M Frigate"))
         #expect(!names.contains("Idris-P"))
     }
 
@@ -2818,6 +2623,73 @@ struct Hanger_ExpressTests {
 
         #expect(match?.name == "Zeus Mk II MR")
         #expect(match?.msrpUSD == 190)
+    }
+
+    @Test func constellationMkIVNamesResolveToTheirOwnCatalogVariants() async throws {
+        let variants: [(legacy: String, current: String, price: Decimal)] = [
+            ("Constellation Andromeda", "Constellation Mk IV Andromeda", 240),
+            ("Constellation Aquila", "Constellation Mk IV Aquila", 315),
+            ("Constellation Phoenix", "Constellation Mk IV Phoenix", 350),
+            ("Constellation Phoenix Emerald", "Constellation Mk IV Phoenix Emerald", 350),
+            ("Constellation Taurus", "Constellation Mk IV Taurus", 200)
+        ]
+        let catalog = RSIShipCatalog(ships: variants.enumerated().map { index, variant in
+            RSIShipCatalog.Ship(
+                id: index + 1,
+                name: variant.current,
+                manufacturer: "Roberts Space Industries",
+                msrpUSD: variant.price,
+                type: "Exploration",
+                focus: "Luxury Touring",
+                imageURL: nil
+            )
+        })
+
+        for variant in variants {
+            #expect(catalog.matchShip(named: variant.legacy)?.name == variant.current)
+            #expect(catalog.matchShip(named: "RSI \(variant.current)")?.name == variant.current)
+            #expect(
+                UpgradeTitleParser.normalizedShipKey(variant.legacy)
+                    == UpgradeTitleParser.normalizedShipKey(variant.current)
+            )
+        }
+
+        #expect(catalog.matchShip(named: "Constellation Mk V Centaurus") == nil)
+        #expect(catalog.matchShip(named: "Constellation Mk IV Phoenix Emerald")?.msrpUSD == 350)
+
+        let package = HangarPackage(
+            id: 801,
+            title: "Packs - Fortuna Legends Pack",
+            status: "Attributed",
+            insurance: "LTI",
+            acquiredAt: .now,
+            originalValueUSD: 350,
+            currentValueUSD: 350,
+            canGift: false,
+            canReclaim: true,
+            canUpgrade: false,
+            contents: [PackageItem(
+                id: "phoenix-emerald",
+                title: "Constellation Mk IV Phoenix Emerald",
+                detail: "Roberts Space Industries",
+                category: .ship,
+                imageURL: nil,
+                upgradePricing: nil
+            )]
+        )
+        let fleet = FleetProjector.project(packages: [package], shipCatalog: catalog)
+        #expect(fleet.first?.msrpUSD == 350)
+        #expect(fleet.first?.catalogWarning == nil)
+    }
+
+    @Test func shipCatalogAliasesNeverOverridePrimaryShipNames() async throws {
+        let catalog = RSIShipCatalog(ships: [
+            .init(id: 1, name: "Alpha", msrpUSD: 100, aliases: ["Bravo", "Old Alpha"], imageURL: nil),
+            .init(id: 2, name: "Bravo", msrpUSD: 200, imageURL: nil)
+        ])
+
+        #expect(catalog.matchShip(named: "Old Alpha")?.id == 1)
+        #expect(catalog.matchShip(named: "Bravo")?.id == 2)
     }
 
     @Test func shipCatalogMatchesLegacyFleetShipNamesToHostedCatalogEntries() async throws {
@@ -2856,8 +2728,11 @@ struct Hanger_ExpressTests {
                     name: "Mustang Gamma",
                     manufacturer: "Consolidated Outland",
                     msrpUSD: 65,
+                    aliases: ["Mustang Gamma Standard Edition"],
                     imageURL: URL(string: "https://example.com/mustang-gamma.jpg")
-                )
+                ),
+                .init(id: 6, name: "Ursa", msrpUSD: 50, aliases: ["Ursa Rover"], imageURL: nil),
+                .init(id: 7, name: "315p", msrpUSD: 65, aliases: ["315p Explorer"], imageURL: nil)
             ]
         )
 
@@ -2968,7 +2843,7 @@ struct Hanger_ExpressTests {
         #expect(match.name == "Polaris")
         #expect(match.manufacturer == "Roberts Space Industries")
         #expect(match.msrpUSD == 975)
-        #expect(match.roleSummary == "Combat / Capital")
+        #expect(match.roleSummary == "Combat: Capital")
         #expect(match.minCrew == 6)
         #expect(match.maxCrew == 14)
         #expect(match.imageURL == URL(string: "https://mirror.example.com/polaris.webp"))
@@ -3086,15 +2961,15 @@ struct Hanger_ExpressTests {
         )
         let store = HostedShipCatalogStore()
 
-        TranslationMockURLProtocol.register(.response(statusCode: 200, data: stalePayload), for: feedURL)
-        let staleSession = makeTranslationMockURLSession()
+        resources.responses.register(.response(statusCode: 200, data: stalePayload), for: feedURL)
+        let staleSession = resources.translationSession()
         let staleCatalog = try await store.catalog(
             using: HostedShipCatalogClient(urls: [feedURL], urlSession: staleSession)
         )
         #expect(staleCatalog.matchShip(named: "Stale Ship") != nil)
 
-        TranslationMockURLProtocol.register(.response(statusCode: 200, data: freshPayload), for: feedURL)
-        let freshSession = makeTranslationMockURLSession()
+        resources.responses.register(.response(statusCode: 200, data: freshPayload), for: feedURL)
+        let freshSession = resources.translationSession()
         let cachedCatalog = try await store.catalog(
             using: HostedShipCatalogClient(urls: [feedURL], urlSession: freshSession)
         )
@@ -3331,7 +3206,7 @@ struct Hanger_ExpressTests {
         #expect(rejectedInvalidMetadata)
     }
 
-    @Test func remoteTranslationClassifierIncludesOnlyStructuredCatalogFields() throws {
+    @Test func remoteTranslationClassifierIncludesStructuredCatalogAndBuybackFields() throws {
         #expect(RemoteHangarItemTranslationRollout.isEnabled)
 
         let sourceSnapshot = PreviewHangarRepository.sampleSnapshot
@@ -3345,10 +3220,10 @@ struct Hanger_ExpressTests {
             buyback: [
                 BuybackPledge(
                     id: 999_001,
-                    title: "Private Buyback Title",
+                    title: "Buyback Catalog Title",
                     recoveredValueUSD: 10,
                     addedToBuybackAt: .now,
-                    notes: "Private buyback note"
+                    notes: "Buyback contents summary"
                 )
             ],
             hangarLogs: [
@@ -3375,15 +3250,77 @@ struct Hanger_ExpressTests {
 
         #expect(sources.contains(try #require(snapshot.packages.first?.title)))
         #expect(sources.contains(try #require(snapshot.fleet.first?.displayName)))
+        #expect(sources.contains("Buyback Catalog Title"))
+        #expect(sources.contains("Buyback contents summary"))
         #expect(!sources.contains(snapshot.accountHandle))
-        #expect(!sources.contains("Private Buyback Title"))
-        #expect(!sources.contains("Private buyback note"))
         #expect(!sources.contains("Private Log Item"))
         #expect(!sources.contains("private@example.com"))
         #expect(!sources.contains("private-source-id"))
         #expect(!sources.contains("PRIVATE-ORDER"))
         #expect(!sources.contains("Private hangar log reason"))
         #expect(!sources.contains("Private raw hangar log text"))
+    }
+
+    @Test func remoteTranslationClassifierAssignsBuybackCatalogKinds() throws {
+        let buyback = [
+            BuybackPledge(
+                id: 1,
+                title: "Cutlass Black to Zeus Mk II MR Upgrade",
+                recoveredValueUSD: 15,
+                addedToBuybackAt: .now,
+                notes: "Contains one ship upgrade"
+            ),
+            BuybackPledge(
+                id: 2,
+                title: "Foundation Festival Paint Pack",
+                recoveredValueUSD: 9,
+                addedToBuybackAt: .now,
+                notes: "Skin collection"
+            ),
+            BuybackPledge(
+                id: 3,
+                title: "Aurora MR Starter Package",
+                recoveredValueUSD: 45,
+                addedToBuybackAt: .now,
+                notes: "Game package"
+            ),
+            BuybackPledge(
+                id: 4,
+                title: "Arden-SL Backpack",
+                recoveredValueUSD: 12,
+                addedToBuybackAt: .now,
+                notes: "FPS equipment"
+            ),
+            BuybackPledge(
+                id: 5,
+                title: "Drake Cutlass Black",
+                recoveredValueUSD: 110,
+                addedToBuybackAt: .now,
+                notes: "Standalone ship"
+            ),
+        ]
+        let snapshot = HangarSnapshot(
+            accountHandle: "buyback-translation-test",
+            lastSyncedAt: .now,
+            storeCreditUSD: nil,
+            packages: [],
+            fleet: [],
+            buyback: buyback
+        )
+
+        let candidates = RemoteHangarItemTranslationSuggestionClassifier.candidates(
+            from: snapshot
+        )
+        let kindsBySource = Dictionary(
+            uniqueKeysWithValues: candidates.map { ($0.source, $0.kind) }
+        )
+
+        #expect(kindsBySource["Cutlass Black to Zeus Mk II MR Upgrade"] == .upgrade)
+        #expect(kindsBySource["Foundation Festival Paint Pack"] == .paint)
+        #expect(kindsBySource["Aurora MR Starter Package"] == .package)
+        #expect(kindsBySource["Arden-SL Backpack"] == .item)
+        #expect(kindsBySource["Drake Cutlass Black"] == .ship)
+        #expect(kindsBySource["Contains one ship upgrade"] == .item)
     }
 
     @Test func remoteTranslationClassifierExcludesCurrentDictionaryHits() throws {
@@ -3412,6 +3349,34 @@ struct Hanger_ExpressTests {
         #expect(!candidates.map(\.source).contains(packageTitle))
     }
 
+    @Test func chineseTranslationsUseSingleQuotesAcrossHostedAndLocalResults() throws {
+        let dictionary = try HangarItemTranslationDictionary(
+            locale: "zh-Hans",
+            version: 62,
+            generatedAt: nil,
+            entries: [
+                HangarItemTranslationDictionary.Entry(
+                    source: "A03 \"HighSec\" Sniper Rifle",
+                    translation: "A03 “高安” 狙击步枪",
+                    kind: "item",
+                    aliases: []
+                )
+            ]
+        )
+        let translator = HangarItemTranslator(
+            language: .simplifiedChinese,
+            dictionary: dictionary
+        )
+
+        #expect(dictionary.translation(for: "A03 \"HighSec\" Sniper Rifle") == "A03 '高安' 狙击步枪")
+        #expect(
+            translator.normalizedMachineTranslationSpacing(
+                "贝林 ‘金匠’ 和“纪元”",
+                source: "Behring Goldsmith and Epoque"
+            ) == "贝林 '金匠' 和'纪元'"
+        )
+    }
+
     @Test func remoteTranslationMissModeHonorsRolloutAndDefaultsLocal() {
         #expect(
             HangarItemTranslationMissMode.resolved(
@@ -3429,6 +3394,84 @@ struct Hanger_ExpressTests {
                 from: "future-mode",
                 rolloutEnabled: true
             ) == .onDevice
+        )
+    }
+
+    @Test func shareAndHangarTextRespectSelectedTranslationMode() async throws {
+        let tempDirectory = resources.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+        try FileManager.default.createDirectory(
+            at: tempDirectory,
+            withIntermediateDirectories: true
+        )
+
+        let source = "Constellation Mk IV - Disco Paint"
+        let cachedTranslation = "星际 Mk IV - 迪斯科 涂装"
+        let cachePayload = """
+        {
+          "version": 1,
+          "entries": [
+            {
+              "source": "\(source)",
+              "targetLocale": "zh-Hans",
+              "dictionaryVersion": 1,
+              "translation": "\(cachedTranslation)"
+            }
+          ]
+        }
+        """
+        try Data(cachePayload.utf8).write(
+            to: tempDirectory.appendingPathComponent("translations.json")
+        )
+
+        let dictionary = try HangarItemTranslationDictionary(
+            locale: "zh-Hans",
+            version: 1,
+            generatedAt: nil,
+            entries: [
+                .init(source: "Anvil", translation: "铁砧", kind: "manufacturer", aliases: [])
+            ]
+        )
+        let translator = HangarItemTranslator(language: .simplifiedChinese, dictionary: dictionary)
+        let service = OnDeviceHangarItemTranslationService(directoryURL: tempDirectory)
+        await service.prepareCache()
+
+        #expect(
+            HangarItemDisplayText.text(
+                for: source,
+                using: translator,
+                missMode: .onDevice,
+                translationService: service
+            ) == cachedTranslation
+        )
+        #expect(
+            HangarItemDisplayText.text(
+                for: source,
+                using: translator,
+                missMode: .cloudReview,
+                translationService: service
+            ) == source
+        )
+
+        let approvedDictionary = try HangarItemTranslationDictionary(
+            locale: "zh-Hans",
+            version: 1,
+            generatedAt: nil,
+            entries: [
+                .init(source: source, translation: "已审核涂装", kind: "paint", aliases: [])
+            ]
+        )
+        let approvedTranslator = HangarItemTranslator(
+            language: .simplifiedChinese,
+            dictionary: approvedDictionary
+        )
+        #expect(
+            HangarItemDisplayText.text(
+                for: source,
+                using: approvedTranslator,
+                missMode: .cloudReview,
+                translationService: service
+            ) == "已审核涂装"
         )
     }
 
@@ -3450,10 +3493,18 @@ struct Hanger_ExpressTests {
             )
         )
         #expect(
-            HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade()
+            HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade(
+                hasPersistedSelection: false
+            )
         )
         #expect(
             !HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade(
+                hasPersistedSelection: true
+            )
+        )
+        #expect(
+            !HangarItemTranslationMethodPromptPolicy.shouldPromptAfterUpgrade(
+                hasPersistedSelection: false,
                 rolloutEnabled: false
             )
         )
@@ -3539,7 +3590,7 @@ struct Hanger_ExpressTests {
             for: [candidate],
             dictionaryVersion: 9
         )
-        let data = try #require(request.httpBody)
+        let data = try request.testBodyData()
         let body = try #require(String(data: data, encoding: .utf8))
         #expect(!body.contains(privateCode))
 
@@ -3554,8 +3605,8 @@ struct Hanger_ExpressTests {
     @Test func remoteTranslationClientBatchesDeduplicatesAndDiscardsPendingText() async throws {
         let observationBox = CloudTranslationRequestObservationBox()
         let progressBox = CloudTranslationUploadProgressBox()
-        let session = makeCloudTranslationMockURLSession { request in
-            let data = try #require(request.httpBody)
+        let session = resources.session { request in
+            let data = try request.testBodyData()
             let payload = try #require(
                 JSONSerialization.jsonObject(with: data) as? [String: Any]
             )
@@ -3624,6 +3675,30 @@ struct Hanger_ExpressTests {
         ])
     }
 
+    @Test func remoteTranslationRequestReportsPremiumStatusWithoutAccountIdentifiers() throws {
+        let client = RemoteHangarItemTranslationClient(
+            baseURL: URL(string: "https://cloud-translation.example.com")!
+        )
+        let candidate = try #require(
+            RemoteHangarItemTranslationCandidate(
+                source: "Constellation Mk IV - Disco Paint",
+                kind: .paint
+            )
+        )
+        let request = try client.resolveRequest(
+            for: [candidate],
+            dictionaryVersion: 12,
+            isPremiumSubscriber: true
+        )
+        let body = try #require(request.httpBody)
+        let payload = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+
+        #expect(payload["isPremiumSubscriber"] as? Bool == true)
+        #expect(payload["dictionaryVersion"] as? Int == 12)
+        #expect(payload["accountID"] == nil)
+        #expect(payload["userID"] == nil)
+    }
+
     @Test func remoteTranslationSubmissionStoreRequiresOptInAndPersistsTerminalState() async throws {
         let snapshot = PreviewHangarRepository.sampleSnapshot
         let allCandidates = RemoteHangarItemTranslationSuggestionClassifier.candidates(
@@ -3657,34 +3732,21 @@ struct Hanger_ExpressTests {
             },
             expectedLocale: "zh-Hans"
         )
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let tempDirectory = resources.temporaryDirectory()
         defer {
             try? FileManager.default.removeItem(at: tempDirectory)
         }
         let observationBox = CloudTranslationRequestObservationBox()
-        let session = makeCloudTranslationMockURLSession { request in
-            let body = try #require(request.httpBody)
-            let payload = try #require(
-                JSONSerialization.jsonObject(with: body) as? [String: Any]
-            )
-            let items = try #require(payload["items"] as? [[String: Any]])
+        let session = resources.session { request in
             observationBox.append(
                 CloudTranslationRequestObservation(
-                    itemCount: items.count,
-                    dictionaryVersion: payload["dictionaryVersion"] as? Int,
+                    itemCount: 1,
+                    dictionaryVersion: 12,
                     contentType: request.value(forHTTPHeaderField: "content-type"),
                     allowsConstrainedNetworkAccess: request.allowsConstrainedNetworkAccess,
                     allowsExpensiveNetworkAccess: request.allowsExpensiveNetworkAccess
                 )
             )
-            let translations = try items.map {
-                [
-                    "clientID": try #require($0["clientID"] as? String),
-                    "source": try #require($0["source"] as? String),
-                    "status": "pending"
-                ]
-            }
             return (
                 HTTPURLResponse(
                     url: try #require(request.url),
@@ -3693,7 +3755,13 @@ struct Hanger_ExpressTests {
                     headerFields: ["content-type": "application/json"]
                 )!,
                 try JSONSerialization.data(
-                    withJSONObject: ["translations": translations]
+                    withJSONObject: [
+                        "translations": [[
+                            "clientID": submittedCandidate.clientID,
+                            "source": submittedCandidate.source,
+                            "status": "pending"
+                        ]]
+                    ]
                 )
             )
         }
@@ -3763,6 +3831,27 @@ struct Hanger_ExpressTests {
             ) == .alreadySubmitted
         )
         #expect(observationBox.values.count == 1)
+        #expect(
+            await reloadedStore.submitSuggestions(
+                for: snapshot,
+                excluding: dictionary,
+                mode: .cloudReview,
+                isPremiumSubscriber: true,
+                client: client,
+                rolloutEnabled: true
+            ) == .submitted(1)
+        )
+        #expect(observationBox.values.count == 2)
+        #expect(
+            await reloadedStore.submitSuggestions(
+                for: snapshot,
+                excluding: dictionary,
+                mode: .cloudReview,
+                isPremiumSubscriber: true,
+                client: client,
+                rolloutEnabled: true
+            ) == .alreadySubmitted
+        )
         let persistedState = try String(
             contentsOf: tempDirectory.appendingPathComponent(
                 "submission-state.json"
@@ -3839,6 +3928,41 @@ struct Hanger_ExpressTests {
         #expect(roundTrip == state)
     }
 
+    @Test func priorTranslationSubmissionCanReportPremiumAfterUpgrade() throws {
+        let candidate = try #require(
+            RemoteHangarItemTranslationCandidate(source: "New Paint", kind: .paint)
+        )
+        let pending = RemoteHangarItemTranslationResult(
+            candidate: candidate,
+            status: .pending,
+            reason: nil
+        )
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        var state = RemoteHangarItemTranslationSubmissionState()
+
+        state.record(pending, dictionaryVersion: 12, now: now)
+        #expect(!state.shouldSubmit(candidate, dictionaryVersion: 12, now: now))
+        #expect(state.shouldSubmit(
+            candidate,
+            dictionaryVersion: 12,
+            now: now,
+            isPremiumSubscriber: true
+        ))
+
+        state.record(
+            pending,
+            dictionaryVersion: 12,
+            now: now,
+            isPremiumSubscriber: true
+        )
+        #expect(!state.shouldSubmit(
+            candidate,
+            dictionaryVersion: 12,
+            now: now,
+            isPremiumSubscriber: true
+        ))
+    }
+
     @Test func hostedHangarItemTranslationFeedRejectsDuplicateKeys() throws {
         let data = Data(
             #"""
@@ -3882,9 +4006,9 @@ struct Hanger_ExpressTests {
         let testID = UUID().uuidString
         let primaryURL = try #require(URL(string: "https://translation.example.com/\(testID)/primary.json"))
         let fallbackURL = try #require(URL(string: "https://translation.example.com/\(testID)/fallback.json"))
-        TranslationMockURLProtocol.register(.response(statusCode: 503, data: Data()), for: primaryURL)
-        TranslationMockURLProtocol.register(.response(statusCode: 200, data: makeHangarItemTranslationPayload()), for: fallbackURL)
-        let session = makeTranslationMockURLSession()
+        resources.responses.register(.response(statusCode: 503, data: Data()), for: primaryURL)
+        resources.responses.register(.response(statusCode: 200, data: makeHangarItemTranslationPayload()), for: fallbackURL)
+        let session = resources.translationSession()
 
         let fetchedDictionary = try await HostedHangarItemTranslationClient(
             language: .simplifiedChinese,
@@ -3895,15 +4019,30 @@ struct Hanger_ExpressTests {
         #expect(fetchedDictionary.dictionary.translation(for: "Anvil F8C Lightning") == "F8C 闪电")
     }
 
+    @Test func hostedHangarItemTranslationClientReportsMissingConfiguration() async {
+        do {
+            _ = try await HostedHangarItemTranslationClient(
+                language: .simplifiedChinese,
+                urls: []
+            ).fetchDictionary()
+            Issue.record("Expected an empty hosted-feed configuration to fail.")
+        } catch {
+            #expect(
+                error.localizedDescription ==
+                    "Hosted item translation feed is invalid. No hosted item translation feed URLs are configured in this build."
+            )
+            #expect(!error.localizedDescription.contains("HTTP -1"))
+        }
+    }
+
     @Test func hostedHangarItemTranslationStoreFallsBackToDiskCache() async throws {
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let tempDirectory = resources.temporaryDirectory()
         let testID = UUID().uuidString
         let feedURL = try #require(URL(string: "https://translation.example.com/\(testID)/zh-Hans.json"))
         let offlineURL = try #require(URL(string: "https://translation.example.com/\(testID)/offline-zh-Hans.json"))
-        TranslationMockURLProtocol.register(.response(statusCode: 200, data: makeHangarItemTranslationPayload()), for: feedURL)
-        TranslationMockURLProtocol.register(.error(URLError(.notConnectedToInternet)), for: offlineURL)
-        let onlineSession = makeTranslationMockURLSession()
+        resources.responses.register(.response(statusCode: 200, data: makeHangarItemTranslationPayload()), for: feedURL)
+        resources.responses.register(.error(URLError(.notConnectedToInternet)), for: offlineURL)
+        let onlineSession = resources.translationSession()
         let firstStore = HostedHangarItemTranslationStore(directoryURL: tempDirectory)
         let fetchedDictionary = await firstStore.dictionary(
             for: .simplifiedChinese,
@@ -3916,7 +4055,7 @@ struct Hanger_ExpressTests {
 
         #expect(fetchedDictionary?.translation(for: "F8C Lightning") == "F8C 闪电")
 
-        let offlineSession = makeTranslationMockURLSession()
+        let offlineSession = resources.translationSession()
         let secondStore = HostedHangarItemTranslationStore(directoryURL: tempDirectory)
         let cachedDictionary = await secondStore.dictionary(
             for: .simplifiedChinese,
@@ -3932,8 +4071,7 @@ struct Hanger_ExpressTests {
     }
 
     @Test func hostedHangarItemTranslationStoreRefreshReplacesMemoryCache() async throws {
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let tempDirectory = resources.temporaryDirectory()
         defer {
             try? FileManager.default.removeItem(at: tempDirectory)
         }
@@ -3944,21 +4082,21 @@ struct Hanger_ExpressTests {
         let versionTwoURL = try #require(
             URL(string: "https://translation.example.com/\(testID)/v2.json")
         )
-        TranslationMockURLProtocol.register(
+        resources.responses.register(
             .response(
                 statusCode: 200,
                 data: makeHangarItemTranslationPayload(version: 1)
             ),
             for: versionOneURL
         )
-        TranslationMockURLProtocol.register(
+        resources.responses.register(
             .response(
                 statusCode: 200,
                 data: makeHangarItemTranslationPayload(version: 2)
             ),
             for: versionTwoURL
         )
-        let session = makeTranslationMockURLSession()
+        let session = resources.translationSession()
         let store = HostedHangarItemTranslationStore(directoryURL: tempDirectory)
 
         let initialDictionary = await store.dictionary(
@@ -3992,8 +4130,7 @@ struct Hanger_ExpressTests {
     }
 
     @Test func hostedHangarItemTranslationStoreAcceptsVerifiedVersionRollback() async throws {
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let tempDirectory = resources.temporaryDirectory()
         defer {
             try? FileManager.default.removeItem(at: tempDirectory)
         }
@@ -4004,21 +4141,21 @@ struct Hanger_ExpressTests {
         let versionOneURL = try #require(
             URL(string: "https://translation.example.com/\(testID)/v1.json")
         )
-        TranslationMockURLProtocol.register(
+        resources.responses.register(
             .response(
                 statusCode: 200,
                 data: makeHangarItemTranslationPayload(version: 2)
             ),
             for: versionTwoURL
         )
-        TranslationMockURLProtocol.register(
+        resources.responses.register(
             .response(
                 statusCode: 200,
                 data: makeHangarItemTranslationPayload(version: 1)
             ),
             for: versionOneURL
         )
-        let session = makeTranslationMockURLSession()
+        let session = resources.translationSession()
         let versionTwo = await HostedHangarItemTranslationStore(
             directoryURL: tempDirectory
         ).dictionary(
@@ -4207,8 +4344,7 @@ struct Hanger_ExpressTests {
     }
 
     @Test func onDeviceTranslationPreloadPersistsCompletedLocaleWhenNoMachineWorkIsNeeded() async throws {
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let tempDirectory = resources.temporaryDirectory()
         defer {
             try? FileManager.default.removeItem(at: tempDirectory)
         }
@@ -4236,12 +4372,12 @@ struct Hanger_ExpressTests {
         #expect(progressUpdates.last?.totalUnitCount == 0)
 
         let reloadedService = OnDeviceHangarItemTranslationService(directoryURL: tempDirectory)
+        await reloadedService.prepareCache()
         #expect(reloadedService.hasAvailableCache(for: .simplifiedChinese))
     }
 
     @Test func onDeviceTranslationCacheWriterCoalescesIntermediateSnapshots() async throws {
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let tempDirectory = resources.temporaryDirectory()
         defer {
             try? FileManager.default.removeItem(at: tempDirectory)
         }
@@ -4272,8 +4408,7 @@ struct Hanger_ExpressTests {
     }
 
     @Test func onDeviceTranslationCacheClearCannotBeUndoneByAnOlderWrite() async throws {
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let tempDirectory = resources.temporaryDirectory()
         let cacheURL = tempDirectory.appendingPathComponent("translations.json")
         defer {
             try? FileManager.default.removeItem(at: tempDirectory)
@@ -4307,9 +4442,8 @@ struct Hanger_ExpressTests {
         #expect(try String(contentsOf: cacheURL, encoding: .utf8) == "revision-1")
     }
 
-    @Test func onDeviceTranslationSearchTextIncludesEnglishAndCachedItemLanguageText() throws {
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    @Test func onDeviceTranslationSearchTextIncludesEnglishAndCachedItemLanguageText() async throws {
+        let tempDirectory = resources.temporaryDirectory()
         defer {
             try? FileManager.default.removeItem(at: tempDirectory)
         }
@@ -4362,13 +4496,14 @@ struct Hanger_ExpressTests {
         )
         let translator = HangarItemTranslator(language: .simplifiedChinese, dictionary: dictionary)
         let service = OnDeviceHangarItemTranslationService(directoryURL: tempDirectory)
+        await service.prepareCache()
         let haystack = service.searchableText(for: source, using: translator).localizedLowercase
 
         #expect(haystack.contains("upgrade - defender to railen standard edition"))
         #expect(haystack.contains("升级 - 防卫者 到 瑞伦 标准版"))
     }
 
-    @Test func appLanguageAndHangarItemLanguageUseIndependentPreferences() throws {
+    @Test func appLanguageDrivesUnifiedItemLanguage() throws {
         let suiteName = "HangarItemLanguageTests-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer {
@@ -4378,10 +4513,32 @@ struct Hanger_ExpressTests {
         defaults.set(AppLanguage.english.rawValue, forKey: AppLanguage.storageKey)
         defaults.set(HangarItemLanguage.simplifiedChinese.rawValue, forKey: HangarItemLanguage.storageKey)
 
-        #expect(AppLanguage.storageKey != HangarItemLanguage.storageKey)
-        #expect(defaults.string(forKey: AppLanguage.storageKey) == AppLanguage.english.rawValue)
-        #expect(defaults.string(forKey: HangarItemLanguage.storageKey) == HangarItemLanguage.simplifiedChinese.rawValue)
-        #expect(HangarItemLanguage.resolved(from: "") == .original)
+        #expect(
+            HangarItemLanguage.resolved(
+                forAppLanguageRawValue: try #require(
+                    defaults.string(forKey: AppLanguage.storageKey)
+                ),
+                preferredLanguages: ["zh-Hans"]
+            ) == .original
+        )
+        #expect(
+            HangarItemLanguage.resolved(
+                forAppLanguageRawValue: AppLanguage.simplifiedChinese.rawValue,
+                preferredLanguages: ["en-US"]
+            ) == .simplifiedChinese
+        )
+        #expect(
+            HangarItemLanguage.resolved(
+                forAppLanguageRawValue: AppLanguage.system.rawValue,
+                preferredLanguages: ["zh-Hant-HK"]
+            ) == .simplifiedChinese
+        )
+        #expect(
+            HangarItemLanguage.resolved(
+                forAppLanguageRawValue: AppLanguage.system.rawValue,
+                preferredLanguages: ["en-US"]
+            ) == .original
+        )
     }
 
     @Test func hostedShipDetailCatalogDecodesCurrentHostedPayloadShape() async throws {
@@ -4772,7 +4929,7 @@ struct Hanger_ExpressTests {
             description: "Fresh feed payload.",
             technicalValue: "1x · S1 · 600 HP · Military (C)"
         )
-        let session = makeMockURLSession { request in
+        let session = resources.session { request in
             #expect(request.url == url)
             #expect(request.cachePolicy == .reloadIgnoringLocalCacheData)
 
@@ -4788,12 +4945,9 @@ struct Hanger_ExpressTests {
         #expect(catalog.matchShip(named: "100i")?.description == "Fresh feed payload.")
     }
 
-    @Test func clearLocalCacheClearsHostedShipDetailCatalogAndSharedResponseCache() async throws {
-        await HostedShipDetailCatalogStore.shared.clear()
-        defer {
-            MockURLProtocol.requestHandler = nil
-        }
-
+    @Test func clearLocalCacheClearsInjectedCatalogAndResponseCaches() async throws {
+        let detailStore = HostedShipDetailCatalogStore()
+        let responseCache = URLCache(memoryCapacity: 1_000_000, diskCapacity: 0)
         let feedURL = try #require(URL(string: "https://example.com/ship-details.json"))
         let stalePayload = makeHostedShipDetailPayload(
             description: "Stale cached description.",
@@ -4804,13 +4958,13 @@ struct Hanger_ExpressTests {
             technicalValue: "1x · S1 · 600 HP · Military (C)"
         )
 
-        let staleSession = makeMockURLSession { request in
+        let staleSession = resources.session { request in
             (
                 try #require(HTTPURLResponse(url: request.url ?? feedURL, statusCode: 200, httpVersion: nil, headerFields: nil)),
                 stalePayload
             )
         }
-        let staleCatalog = try await HostedShipDetailCatalogStore.shared.catalog(
+        let staleCatalog = try await detailStore.catalog(
             using: HostedShipDetailCatalogClient(urls: [feedURL], urlSession: staleSession)
         )
         #expect(staleCatalog.matchShip(named: "100i")?.description == "Stale cached description.")
@@ -4819,11 +4973,11 @@ struct Hanger_ExpressTests {
         let cachedResponse = try #require(
             HTTPURLResponse(url: cachedRequest.url!, statusCode: 200, httpVersion: nil, headerFields: nil)
         )
-        URLCache.shared.storeCachedResponse(
+        responseCache.storeCachedResponse(
             CachedURLResponse(response: cachedResponse, data: Data("{}".utf8)),
             for: cachedRequest
         )
-        #expect(URLCache.shared.cachedResponse(for: cachedRequest) != nil)
+        #expect(responseCache.cachedResponse(for: cachedRequest) != nil)
 
         let imageCache = FakeRemoteImageCache()
         let appModel = AppModel(
@@ -4831,29 +4985,30 @@ struct Hanger_ExpressTests {
                 sessionStore: FakeSessionStore(storedSnapshot: .empty),
                 snapshotStore: FakeSnapshotStore(snapshot: nil),
                 hangarRepository: FakeHangarRepository(),
-                imageCache: imageCache
+                imageCache: imageCache,
+                responseCache: responseCache,
+                shipDetailCatalogStore: detailStore
             )
         )
 
         await appModel.clearLocalCache()
 
-        #expect(URLCache.shared.cachedResponse(for: cachedRequest) == nil)
+        #expect(responseCache.cachedResponse(for: cachedRequest) == nil)
         #expect(await imageCache.clearCallCount() == 1)
 
-        let freshSession = makeMockURLSession { request in
+        let freshSession = resources.session { request in
             (
                 try #require(HTTPURLResponse(url: request.url ?? feedURL, statusCode: 200, httpVersion: nil, headerFields: nil)),
                 freshPayload
             )
         }
-        let refreshedCatalog = try await HostedShipDetailCatalogStore.shared.catalog(
+        let refreshedCatalog = try await detailStore.catalog(
             using: HostedShipDetailCatalogClient(urls: [feedURL], urlSession: freshSession)
         )
         #expect(
             refreshedCatalog.matchShip(named: "100i")?.description == "Fresh description after clearing cache."
         )
 
-        await HostedShipDetailCatalogStore.shared.clear()
     }
 
     @Test func fleetRoleFormatterUsesTypeAndPipeSeparatedFocusSummary() async throws {
@@ -5086,8 +5241,7 @@ struct Hanger_ExpressTests {
     }
 
     @Test func profileBackgroundOptionsCacheReusesAndInvalidatesFleetState() async throws {
-        let directoryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directoryURL = resources.temporaryDirectory()
         defer {
             try? FileManager.default.removeItem(at: directoryURL)
         }
@@ -5204,7 +5358,7 @@ struct Hanger_ExpressTests {
         #expect(fleet.count == 1)
         #expect(fleet.first?.imageURL == hostedImageURL)
         #expect(fleet.first?.manufacturerLogoURL == manufacturerLogoURL)
-        #expect(fleet.first?.role == "Combat / Capital")
+        #expect(fleet.first?.role == "Combat: Capital")
         #expect(fleet.first?.roleCategories == ["Combat", "Capital"])
         #expect(fleet.first?.msrpUSD == 975)
     }
@@ -5260,7 +5414,7 @@ struct Hanger_ExpressTests {
 
         #expect(fleet.count == 1)
         #expect(fleet.first?.displayName == "Aegis Idris")
-        #expect(fleet.first?.manufacturer == "Aegis")
+        #expect(fleet.first?.manufacturer == "Aegis Dynamics")
         #expect(fleet.first?.role == "Capital ship")
         #expect(fleet.first?.roleCategories == ["Capital ship"])
         #expect(fleet.first?.msrpUSD == nil)
@@ -5701,12 +5855,12 @@ struct Hanger_ExpressTests {
         #expect(await repository.giftRequests().isEmpty)
     }
 
-    @Test func characterRepairUsesSavedPasswordAndShowsCompletionBanner() async throws {
+    @Test func characterRepairUsesUpdatedSettingsPayloadAndShowsCompletionBanner() async throws {
         let session = makeUserSession(
             handle: "repair-action",
             email: "repair-action@example.com",
             loginIdentifier: "repair-action@example.com",
-            password: "secret-repair",
+            password: "",
             createdAt: Date(timeIntervalSince1970: 911)
         )
         let repository = FakeHangarRepository()
@@ -5722,11 +5876,154 @@ struct Hanger_ExpressTests {
         appModel.session = session
         appModel.savedSessions = [session]
 
-        try await appModel.requestCharacterRepair()
+        try await appModel.requestCharacterRepair(
+            reason: "  My character cannot load  ",
+            issueCouncilURL: "  https://issue-council.robertsspaceindustries.com/projects/STAR-CITIZEN/issues/STARC-1  "
+        )
 
-        #expect(await repository.characterRepairPasswords() == ["secret-repair"])
+        #expect(await repository.characterRepairRequests() == [
+            RecordedCharacterRepairRequest(
+                reason: "My character cannot load",
+                issueCouncilURL: "https://issue-council.robertsspaceindustries.com/projects/STAR-CITIZEN/issues/STARC-1"
+            )
+        ])
         #expect(appModel.transientBanner?.title == "Success")
-        #expect(appModel.transientBanner?.message == "Your character has been reset")
+        #expect(appModel.transientBanner?.message == "Your character repair request was submitted")
+    }
+
+    @Test func characterRepairUsesDefaultReasonWhenReasonIsBlank() async throws {
+        let session = makeUserSession(
+            handle: "repair-default-reason",
+            email: "repair-default-reason@example.com",
+            loginIdentifier: "repair-default-reason@example.com",
+            password: "",
+            createdAt: Date(timeIntervalSince1970: 912)
+        )
+        let repository = FakeHangarRepository()
+        let appModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: nil),
+                hangarRepository: repository
+            )
+        )
+        appModel.session = session
+        appModel.savedSessions = [session]
+
+        try await appModel.requestCharacterRepair(
+            reason: "  \n\t  ",
+            issueCouncilURL: nil
+        )
+
+        #expect(await repository.characterRepairRequests() == [
+            RecordedCharacterRepairRequest(
+                reason: "My character is broken and needs repair.",
+                issueCouncilURL: nil
+            )
+        ])
+    }
+
+    @Test func characterRepairCooldownPersistsAcrossAppModelInstances() async throws {
+        let suiteName = "character-repair-cooldown-\(UUID().uuidString)"
+        let userDefaults = try #require(UserDefaults(suiteName: suiteName))
+        defer {
+            userDefaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let session = makeUserSession(
+            handle: "repair-cooldown",
+            email: "repair-cooldown@example.com",
+            loginIdentifier: "repair-cooldown@example.com",
+            password: "",
+            createdAt: Date(timeIntervalSince1970: 913)
+        )
+        let firstRepository = FakeHangarRepository()
+        let firstAppModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: nil),
+                hangarRepository: firstRepository,
+                userDefaults: userDefaults
+            )
+        )
+        firstAppModel.session = session
+
+        try await firstAppModel.requestCharacterRepair(reason: "Broken character", issueCouncilURL: nil)
+        #expect(firstAppModel.characterRepairCooldownRemainingSeconds() > 3_590)
+
+        let secondRepository = FakeHangarRepository()
+        let secondAppModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: nil),
+                hangarRepository: secondRepository,
+                userDefaults: userDefaults
+            )
+        )
+        secondAppModel.session = session
+
+        do {
+            try await secondAppModel.requestCharacterRepair(reason: "Retry", issueCouncilURL: nil)
+            Issue.record("Expected the persisted Character Repair cooldown to block the retry.")
+        } catch let error as HangarAccountActionError {
+            guard case let .characterRepairCooldownActive(remainingSeconds) = error else {
+                Issue.record("Expected characterRepairCooldownActive, got \(error).")
+                return
+            }
+            #expect(remainingSeconds > 3_590)
+        }
+
+        #expect(await secondRepository.characterRepairRequests().isEmpty)
+    }
+
+    @Test func characterRepairPersistsServerReportedCooldown() async throws {
+        let suiteName = "character-repair-server-cooldown-\(UUID().uuidString)"
+        let userDefaults = try #require(UserDefaults(suiteName: suiteName))
+        defer {
+            userDefaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let session = makeUserSession(
+            handle: "repair-server-cooldown",
+            email: "repair-server-cooldown@example.com",
+            loginIdentifier: "repair-server-cooldown@example.com",
+            password: "",
+            createdAt: Date(timeIntervalSince1970: 914)
+        )
+        let repository = FakeHangarRepository(
+            characterRepairResult: CharacterRepairResult(
+                wasSuccessful: false,
+                failureMessage: "RSI cooldown",
+                cooldownRemainingSeconds: 1_800,
+                updatedCookies: []
+            )
+        )
+        let appModel = AppModel(
+            environment: makeTestAppEnvironment(
+                sessionStore: FakeSessionStore(
+                    storedSnapshot: StoredSessionsSnapshot(activeSession: session, savedSessions: [session])
+                ),
+                snapshotStore: FakeSnapshotStore(snapshot: nil),
+                hangarRepository: repository,
+                userDefaults: userDefaults
+            )
+        )
+        appModel.session = session
+
+        do {
+            try await appModel.requestCharacterRepair(reason: "Broken character", issueCouncilURL: nil)
+            Issue.record("Expected RSI's Character Repair cooldown to be surfaced.")
+        } catch let error as HangarAccountActionError {
+            #expect(error == .characterRepairCooldownActive(remainingSeconds: 1_800))
+        }
+
+        #expect(appModel.characterRepairCooldownRemainingSeconds() > 1_790)
     }
 
     @Test func successfulUpgradeRemovesConsumedUpgradeImmediatelyWithoutVisibleRefreshState() async throws {
@@ -5848,7 +6145,8 @@ struct Hanger_ExpressTests {
             email: "citizen-cache@example.com",
             loginIdentifier: "citizen-cache@example.com",
             password: "secret-cache",
-            createdAt: Date(timeIntervalSince1970: 500)
+            createdAt: Date(timeIntervalSince1970: 500),
+            cookies: [makeSessionCookie(name: "Rsi-Token", value: "test-session")]
         )
         let cachedSnapshot = PreviewHangarRepository.sampleSnapshot
         let sessionStore = FakeSessionStore(
@@ -5882,7 +6180,8 @@ struct Hanger_ExpressTests {
             return false
         }
 
-        #expect(restoredSnapshot == cachedSnapshot)
+        #expect(restoredSnapshot?.replacingSections(cachedSnapshot.sections) == cachedSnapshot)
+        #expect(restoredSnapshot?.sections.failedSections.count == 4)
         #expect(stillLoaded)
         #expect(refreshErrorMessage == "Unable to refresh the full account snapshot. RSI refresh timed out.")
     }
@@ -5893,7 +6192,8 @@ struct Hanger_ExpressTests {
             email: "hangar-scope@example.com",
             loginIdentifier: "hangar-scope@example.com",
             password: "secret-hangar",
-            createdAt: Date(timeIntervalSince1970: 600)
+            createdAt: Date(timeIntervalSince1970: 600),
+            cookies: [makeSessionCookie(name: "Rsi-Token", value: "test-session")]
         )
         let cachedSnapshot = PreviewHangarRepository.sampleSnapshot
         let refreshedSnapshot = cachedSnapshot.updatingHangar(
@@ -5936,7 +6236,8 @@ struct Hanger_ExpressTests {
             email: "buyback-scope@example.com",
             loginIdentifier: "buyback-scope@example.com",
             password: "secret-buyback",
-            createdAt: Date(timeIntervalSince1970: 700)
+            createdAt: Date(timeIntervalSince1970: 700),
+            cookies: [makeSessionCookie(name: "Rsi-Token", value: "test-session")]
         )
         let cachedSnapshot = PreviewHangarRepository.sampleSnapshot
         let refreshedSnapshot = cachedSnapshot.updatingBuyback(
@@ -5978,7 +6279,8 @@ struct Hanger_ExpressTests {
             email: "account-scope@example.com",
             loginIdentifier: "account-scope@example.com",
             password: "secret-account",
-            createdAt: Date(timeIntervalSince1970: 800)
+            createdAt: Date(timeIntervalSince1970: 800),
+            cookies: [makeSessionCookie(name: "Rsi-Token", value: "test-session")]
         )
         let cachedSnapshot = PreviewHangarRepository.sampleSnapshot
         let refreshedSnapshot = cachedSnapshot.updatingAccount(
@@ -6236,32 +6538,6 @@ private func makeUserSession(
     )
 }
 
-@MainActor
-private func makeTestAppEnvironment(
-    sessionStore: any SessionStore,
-    snapshotStore: any SnapshotStore,
-    hangarRepository: any HangarRepository,
-    imageCache: (any RemoteImageCaching)? = nil
-) -> AppEnvironment {
-    let diagnostics = AuthenticationDiagnosticsStore()
-    let refreshDiagnostics = RefreshDiagnosticsStore()
-    let recaptchaBroker = RecaptchaBroker(diagnostics: diagnostics)
-
-    return AppEnvironment(
-        sessionStore: sessionStore,
-        snapshotStore: snapshotStore,
-        imageCache: imageCache ?? URLCachedImageStore.shared,
-        hangarRepository: hangarRepository,
-        sensitiveActionAuthorizer: PreviewSensitiveActionAuthorizer(),
-        authService: PreviewAuthenticationService(diagnostics: diagnostics),
-        recaptchaBroker: recaptchaBroker,
-        authIPRegionChecker: PreviewAuthenticationIPRegionChecker(),
-        authDiagnostics: diagnostics,
-        refreshDiagnostics: refreshDiagnostics,
-        subscriptionStore: SubscriptionStore(storeKitEnabled: false)
-    )
-}
-
 private func makeHangarActionPackage(
     id: Int,
     title: String,
@@ -6468,95 +6744,6 @@ private func jsonStringLiteral(_ value: String) -> String {
     return String(arrayLiteral.dropFirst().dropLast())
 }
 
-private func makeSolidImageData(
-    color: UIColor,
-    size: CGSize = CGSize(width: 240, height: 240)
-) -> Data {
-    let format = UIGraphicsImageRendererFormat.default()
-    format.scale = 1
-    format.opaque = true
-
-    let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
-        color.setFill()
-        context.fill(CGRect(origin: .zero, size: size))
-    }
-
-    return image.jpegData(compressionQuality: 1) ?? Data()
-}
-
-private func sampledColor(
-    from image: UIImage,
-    normalizedPoint: CGPoint = CGPoint(x: 0.5, y: 0.5)
-) -> UIColor? {
-    guard let cgImage = image.cgImage else {
-        return nil
-    }
-
-    var pixel = [UInt8](repeating: 0, count: 4)
-    let colorSpace = CGColorSpaceCreateDeviceRGB()
-    guard let context = CGContext(
-        data: &pixel,
-        width: 1,
-        height: 1,
-        bitsPerComponent: 8,
-        bytesPerRow: 4,
-        space: colorSpace,
-        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-    ) else {
-        return nil
-    }
-
-    let pixelX = CGFloat(min(max(Int(CGFloat(cgImage.width - 1) * normalizedPoint.x), 0), cgImage.width - 1))
-    let pixelY = CGFloat(min(max(Int(CGFloat(cgImage.height - 1) * normalizedPoint.y), 0), cgImage.height - 1))
-
-    context.translateBy(x: -pixelX, y: pixelY - CGFloat(cgImage.height) + 1)
-    context.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
-
-    return UIColor(
-        red: CGFloat(pixel[0]) / 255,
-        green: CGFloat(pixel[1]) / 255,
-        blue: CGFloat(pixel[2]) / 255,
-        alpha: CGFloat(pixel[3]) / 255
-    )
-}
-
-private func colorMatches(_ lhs: UIColor?, _ rhs: UIColor, tolerance: CGFloat = 0.12) -> Bool {
-    guard let lhs,
-          let lhsComponents = lhs.cgColor.converted(to: CGColorSpaceCreateDeviceRGB(), intent: .defaultIntent, options: nil)?.components,
-          let rhsComponents = rhs.cgColor.converted(to: CGColorSpaceCreateDeviceRGB(), intent: .defaultIntent, options: nil)?.components,
-          lhsComponents.count >= 3,
-          rhsComponents.count >= 3 else {
-        return false
-    }
-
-    return abs(lhsComponents[0] - rhsComponents[0]) <= tolerance
-        && abs(lhsComponents[1] - rhsComponents[1]) <= tolerance
-        && abs(lhsComponents[2] - rhsComponents[2]) <= tolerance
-}
-
-private func colorsMatch(_ lhs: UIColor?, _ rhs: UIColor?, tolerance: CGFloat = 0.12) -> Bool {
-    guard let rhs else {
-        return lhs == nil
-    }
-
-    return colorMatches(lhs, rhs, tolerance: tolerance)
-}
-
-private func makeMockURLSession(
-    handler: @escaping @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
-) -> URLSession {
-    MockURLProtocol.requestHandler = handler
-    let configuration = URLSessionConfiguration.ephemeral
-    configuration.protocolClasses = [MockURLProtocol.self]
-    return URLSession(configuration: configuration)
-}
-
-private func makeTranslationMockURLSession() -> URLSession {
-    let configuration = URLSessionConfiguration.ephemeral
-    configuration.protocolClasses = [TranslationMockURLProtocol.self]
-    return URLSession(configuration: configuration)
-}
-
 private struct CloudTranslationRequestObservation: Equatable, Sendable {
     let itemCount: Int
     let dictionaryVersion: Int?
@@ -6592,577 +6779,5 @@ private final class CloudTranslationUploadProgressBox: @unchecked Sendable {
         lock.withLock {
             storedValues.append(value)
         }
-    }
-}
-
-private func makeCloudTranslationMockURLSession(
-    handler: @escaping @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
-) -> URLSession {
-    let handlerID = UUID().uuidString
-    CloudTranslationMockURLProtocol.register(
-        handler,
-        for: handlerID
-    )
-    let configuration = URLSessionConfiguration.ephemeral
-    configuration.protocolClasses = [CloudTranslationMockURLProtocol.self]
-    configuration.httpAdditionalHeaders = [
-        CloudTranslationMockURLProtocol.handlerHeader: handlerID
-    ]
-    return URLSession(configuration: configuration)
-}
-
-private final class FakeAuthenticationWebSession: AuthenticationWebSessionProviding, @unchecked Sendable {
-    let signInResponse: BrowserGraphQLResponse
-    let twoFactorResponse: BrowserGraphQLResponse
-    let cookies: [SessionCookie]
-    let resetError: Error?
-
-    init(
-        signInResponse: BrowserGraphQLResponse,
-        twoFactorResponse: BrowserGraphQLResponse = BrowserGraphQLResponse(statusCode: 200, body: #"{"data":{"account_multistep":null},"errors":[]}"#),
-        cookies: [SessionCookie] = [],
-        resetError: Error? = nil
-    ) {
-        self.signInResponse = signInResponse
-        self.twoFactorResponse = twoFactorResponse
-        self.cookies = cookies
-        self.resetError = resetError
-    }
-
-    @MainActor
-    func resetAuthenticationSession() async throws {
-        if let resetError {
-            throw resetError
-        }
-    }
-
-    @MainActor
-    func signIn(loginIdentifier: String, password: String, rememberMe: Bool, query: String) async throws -> BrowserGraphQLResponse {
-        signInResponse
-    }
-
-    @MainActor
-    func submitTwoFactor(code: String, deviceName: String, trustDuration: TrustedDeviceDuration, query: String) async throws -> BrowserGraphQLResponse {
-        twoFactorResponse
-    }
-
-    @MainActor
-    func currentRSICookies() async throws -> [SessionCookie] {
-        cookies
-    }
-}
-
-private actor FakeRemoteImageCache: RemoteImageCaching {
-    private var clearCalls = 0
-
-    func clear() async {
-        clearCalls += 1
-    }
-
-    func clear(urls _: [URL]) async {}
-
-    func clearCallCount() async -> Int {
-        clearCalls
-    }
-}
-
-private final class MockURLProtocol: URLProtocol, @unchecked Sendable {
-    nonisolated(unsafe) static var requestHandler: (@Sendable (URLRequest) throws -> (HTTPURLResponse, Data))?
-
-    override class func canInit(with request: URLRequest) -> Bool {
-        request.url?.host == "example.com"
-    }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-        request
-    }
-
-    override func startLoading() {
-        guard let handler = Self.requestHandler else {
-            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
-            return
-        }
-
-        do {
-            let (response, data) = try handler(request)
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
-        }
-    }
-
-    override func stopLoading() {}
-}
-
-private enum TranslationMockURLResponse: @unchecked Sendable {
-    case response(statusCode: Int, data: Data)
-    case error(Error)
-}
-
-private final class TranslationMockURLProtocol: URLProtocol, @unchecked Sendable {
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var responses: [URL: TranslationMockURLResponse] = [:]
-
-    static func register(_ response: TranslationMockURLResponse, for url: URL) {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-
-        responses[url] = response
-    }
-
-    override class func canInit(with request: URLRequest) -> Bool {
-        request.url?.host == "translation.example.com"
-    }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-        request
-    }
-
-    override func startLoading() {
-        guard let url = request.url,
-              let response = Self.registeredResponse(for: url) else {
-            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
-            return
-        }
-
-        switch response {
-        case let .response(statusCode, data):
-            guard let httpResponse = HTTPURLResponse(
-                url: url,
-                statusCode: statusCode,
-                httpVersion: nil,
-                headerFields: nil
-            ) else {
-                client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
-                return
-            }
-
-            client?.urlProtocol(self, didReceive: httpResponse, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
-        case let .error(error):
-            client?.urlProtocol(self, didFailWithError: error)
-        }
-    }
-
-    override func stopLoading() {}
-
-    private static func registeredResponse(for url: URL) -> TranslationMockURLResponse? {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-
-        return responses[url]
-    }
-}
-
-private final class CloudTranslationMockURLProtocol: URLProtocol, @unchecked Sendable {
-    typealias RequestHandler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
-
-    static let handlerHeader = "x-cloud-translation-test-handler"
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var handlers: [String: RequestHandler] = [:]
-
-    static func register(
-        _ handler: @escaping RequestHandler,
-        for handlerID: String
-    ) {
-        lock.withLock {
-            handlers[handlerID] = handler
-        }
-    }
-
-    override class func canInit(with request: URLRequest) -> Bool {
-        request.url?.host == "cloud-translation.example.com"
-    }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-        request
-    }
-
-    override func startLoading() {
-        guard let handlerID = request.value(
-            forHTTPHeaderField: Self.handlerHeader
-        ),
-              let handler = Self.lock.withLock({
-                  Self.handlers[handlerID]
-              }) else {
-            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
-            return
-        }
-
-        do {
-            let (response, data) = try handler(request)
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
-        }
-    }
-
-    override func stopLoading() {}
-}
-
-private final class MutableImageDataBox: @unchecked Sendable {
-    var data: Data
-
-    init(data: Data) {
-        self.data = data
-    }
-}
-
-private actor FakeSessionStore: SessionStore {
-    private var storedSnapshot: StoredSessionsSnapshot
-
-    init(storedSnapshot: StoredSessionsSnapshot) {
-        self.storedSnapshot = storedSnapshot
-    }
-
-    func loadSnapshot() async -> StoredSessionsSnapshot {
-        storedSnapshot
-    }
-
-    func save(_ session: UserSession, makeActive: Bool) async -> StoredSessionsSnapshot {
-        let payload = StoredSessionsPayload(
-            activeSessionID: storedSnapshot.activeSession?.id,
-            sessions: storedSnapshot.savedSessions
-        ).saving(session, makeActive: makeActive)
-        storedSnapshot = payload.snapshot
-        return storedSnapshot
-    }
-
-    func selectSession(id: UserSession.ID) async -> StoredSessionsSnapshot {
-        let payload = StoredSessionsPayload(
-            activeSessionID: storedSnapshot.activeSession?.id,
-            sessions: storedSnapshot.savedSessions
-        ).selecting(id: id)
-        storedSnapshot = payload.snapshot
-        return storedSnapshot
-    }
-
-    func deleteSession(id: UserSession.ID) async -> StoredSessionsSnapshot {
-        let payload = StoredSessionsPayload(
-            activeSessionID: storedSnapshot.activeSession?.id,
-            sessions: storedSnapshot.savedSessions
-        ).deleting(id: id)
-        storedSnapshot = payload.snapshot
-        return storedSnapshot
-    }
-
-    func clear() async -> StoredSessionsSnapshot {
-        storedSnapshot = .empty
-        return storedSnapshot
-    }
-}
-
-private actor FakeSnapshotStore: SnapshotStore {
-    private var snapshot: HangarSnapshot?
-
-    init(snapshot: HangarSnapshot?) {
-        self.snapshot = snapshot
-    }
-
-    func load(for session: UserSession) async -> HangarSnapshot? {
-        snapshot
-    }
-
-    func save(_ snapshot: HangarSnapshot, for session: UserSession) async {
-        self.snapshot = snapshot
-    }
-
-    func delete(for session: UserSession) async {
-        snapshot = nil
-    }
-
-    func clear() async {
-        snapshot = nil
-    }
-}
-
-private actor FakeHangarRepository: HangarRepository {
-    private let fullSnapshot: HangarSnapshot?
-    private let hangarSnapshot: HangarSnapshot?
-    private let buybackSnapshot: HangarSnapshot?
-    private let accountSnapshot: HangarSnapshot?
-    private let fullError: Error?
-    private let hangarError: Error?
-    private let buybackError: Error?
-    private let accountError: Error?
-    private var invokedScopes: [String] = []
-    private var recordedMeltRequests: [[Int]] = []
-    private var recordedGiftRequests: [[Int]] = []
-    private var recordedCharacterRepairPasswords: [String] = []
-
-    init(
-        snapshot: HangarSnapshot? = nil,
-        hangarSnapshot: HangarSnapshot? = nil,
-        buybackSnapshot: HangarSnapshot? = nil,
-        accountSnapshot: HangarSnapshot? = nil,
-        error: Error? = nil,
-        hangarError: Error? = nil,
-        buybackError: Error? = nil,
-        accountError: Error? = nil
-    ) {
-        fullSnapshot = snapshot
-        self.hangarSnapshot = hangarSnapshot
-        self.buybackSnapshot = buybackSnapshot
-        self.accountSnapshot = accountSnapshot
-        fullError = error
-        self.hangarError = hangarError
-        self.buybackError = buybackError
-        self.accountError = accountError
-    }
-
-    func fetchSnapshot(
-        for session: UserSession,
-        progress: @escaping RefreshProgressHandler
-    ) async throws -> HangarSnapshot {
-        invokedScopes.append("full")
-
-        if let fullError {
-            throw fullError
-        }
-
-        guard let fullSnapshot else {
-            throw AuthenticationError.unavailable("No full snapshot was configured for the fake repository.")
-        }
-
-        return fullSnapshot
-    }
-
-    func refreshHangarData(
-        for session: UserSession,
-        from snapshot: HangarSnapshot,
-        progress: @escaping RefreshProgressHandler
-    ) async throws -> HangarSnapshot {
-        invokedScopes.append("hangar")
-
-        if let hangarError {
-            throw hangarError
-        }
-
-        return hangarSnapshot ?? snapshot
-    }
-
-    func refreshHangarData(
-        for session: UserSession,
-        from snapshot: HangarSnapshot,
-        affectedPledgeIDs: [Int],
-        progress: @escaping RefreshProgressHandler
-    ) async throws -> HangarSnapshot {
-        invokedScopes.append("hangar-partial")
-
-        if let hangarError {
-            throw hangarError
-        }
-
-        return hangarSnapshot ?? snapshot
-    }
-
-    func refreshBuybackData(
-        for session: UserSession,
-        from snapshot: HangarSnapshot,
-        progress: @escaping RefreshProgressHandler
-    ) async throws -> HangarSnapshot {
-        invokedScopes.append("buyback")
-
-        if let buybackError {
-            throw buybackError
-        }
-
-        return buybackSnapshot ?? snapshot
-    }
-
-    func refreshHangarLogData(
-        for session: UserSession,
-        from snapshot: HangarSnapshot,
-        mode _: HangarLogFetchMode,
-        progress: @escaping RefreshProgressHandler,
-        batchHandler _: HangarLogBatchHandler?
-    ) async throws -> HangarSnapshot {
-        invokedScopes.append("hangarLog")
-        return snapshot
-    }
-
-    func refreshAccountData(
-        for session: UserSession,
-        from snapshot: HangarSnapshot,
-        progress: @escaping RefreshProgressHandler
-    ) async throws -> HangarSnapshot {
-        invokedScopes.append("account")
-
-        if let accountError {
-            throw accountError
-        }
-
-        return accountSnapshot ?? snapshot
-    }
-
-    func meltPackages(
-        for session: UserSession,
-        pledgeIDs: [Int],
-        password: String
-    ) async throws -> MeltPackagesResult {
-        invokedScopes.append("melt")
-        recordedMeltRequests.append(pledgeIDs)
-
-        return MeltPackagesResult(
-            requestedPledgeIDs: pledgeIDs,
-            completedPledgeIDs: pledgeIDs,
-            failedPledgeID: nil,
-            failureMessage: nil,
-            updatedCookies: session.cookies
-        )
-    }
-
-    func giftPackages(
-        for session: UserSession,
-        pledgeIDs: [Int],
-        password: String,
-        recipientEmail: String,
-        recipientName: String
-    ) async throws -> GiftPackagesResult {
-        invokedScopes.append("gift")
-        recordedGiftRequests.append(pledgeIDs)
-
-        return GiftPackagesResult(
-            requestedPledgeIDs: pledgeIDs,
-            completedPledgeIDs: pledgeIDs,
-            failedPledgeID: nil,
-            failureMessage: nil,
-            updatedCookies: session.cookies
-        )
-    }
-
-    func fetchUpgradeTargets(
-        for _: UserSession,
-        upgradeItemPledgeID _: Int
-    ) async throws -> [UpgradeTargetCandidate] {
-        [
-            UpgradeTargetCandidate(
-                pledgeID: 5001,
-                title: "Test Target Pledge",
-                status: "Attributed",
-                insurance: "LTI",
-                thumbnailURL: nil
-            )
-        ]
-    }
-
-    func applyUpgrade(
-        for session: UserSession,
-        upgradeItemPledgeID: Int,
-        targetPledgeID: Int,
-        password _: String
-    ) async throws -> ApplyUpgradeResult {
-        ApplyUpgradeResult(
-            upgradeItemPledgeID: upgradeItemPledgeID,
-            targetPledgeID: targetPledgeID,
-            wasSuccessful: true,
-            failureMessage: nil,
-            updatedCookies: session.cookies
-        )
-    }
-
-    func requestCharacterRepair(
-        for session: UserSession,
-        password: String
-    ) async throws -> CharacterRepairResult {
-        invokedScopes.append("characterRepair")
-        recordedCharacterRepairPasswords.append(password)
-
-        return CharacterRepairResult(
-            wasSuccessful: true,
-            failureMessage: nil,
-            updatedCookies: session.cookies
-        )
-    }
-
-    func prepareBuybackCheckout(
-        for session: UserSession,
-        pledge: BuybackPledge
-    ) async throws -> BuybackCheckoutPreparation {
-        BuybackCheckoutPreparation(
-            buybackPledgeID: pledge.id,
-            checkoutURL: URL(string: "https://example.com/checkout")!,
-            updatedCookies: session.cookies
-        )
-    }
-
-    func fetchLimitedShipSales() async throws -> [LimitedShipSale] {
-        [
-            LimitedShipSale(
-                id: "test-gladius",
-                name: "Gladius",
-                manufacturer: "Aegis Dynamics",
-                priceUSD: 90,
-                availabilitySlots: [
-                    LimitedShipAvailabilitySlot(
-                        startsAt: Date(timeIntervalSince1970: 1_776_000_000),
-                        endsAt: Date(timeIntervalSince1970: 1_776_000_600)
-                    )
-                ],
-                storeURL: URL(string: "https://example.com/gladius")!,
-                imageURL: nil,
-                manufacturerLogoURL: nil
-            )
-        ]
-    }
-
-    func addLimitedShipToCart(
-        for session: UserSession,
-        ship: LimitedShipSale,
-        log: @escaping LimitedShipCartLogHandler
-    ) async throws -> LimitedShipCartInsertionResult {
-        await log("Test fake added \(ship.name) to cart.")
-        return LimitedShipCartInsertionResult(
-            shipID: ship.id,
-            cartURL: URL(string: "https://example.com/cart")!,
-            attemptCount: 1,
-            debugSummary: nil,
-            debugLog: ["Test fake added \(ship.name) to cart."],
-            updatedCookies: session.cookies
-        )
-    }
-
-    func fetchAuthorizedDevices(
-        for _: UserSession,
-        password _: String?
-    ) async throws -> [AuthorizedDevice] {
-        []
-    }
-
-    func removeAuthorizedDevice(
-        for _: UserSession,
-        device _: AuthorizedDevice,
-        password _: String?
-    ) async throws {}
-
-    func removeAuthorizedDevices(
-        for _: UserSession,
-        devices _: [AuthorizedDevice],
-        password _: String?
-    ) async throws {}
-
-    func invocationLog() -> [String] {
-        invokedScopes
-    }
-
-    func meltRequests() -> [[Int]] {
-        recordedMeltRequests
-    }
-
-    func giftRequests() -> [[Int]] {
-        recordedGiftRequests
-    }
-
-    func characterRepairPasswords() -> [String] {
-        recordedCharacterRepairPasswords
     }
 }

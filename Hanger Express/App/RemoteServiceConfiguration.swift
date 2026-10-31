@@ -5,12 +5,14 @@ nonisolated struct RemoteServiceConfiguration: Equatable, Sendable {
     let fallbackBaseURL: URL?
     let translationBaseURL: URL?
     let ipRegionURL: URL?
+    var referralRewardsBaseURL: URL? = nil
 
     static let live = RemoteServiceConfiguration(
         primaryBaseURL: configuredURL(forInfoDictionaryKey: "RemotePrimaryBaseURL"),
         fallbackBaseURL: configuredURL(forInfoDictionaryKey: "RemoteFallbackBaseURL"),
         translationBaseURL: configuredURL(forInfoDictionaryKey: "RemoteTranslationBaseURL"),
-        ipRegionURL: configuredURL(forInfoDictionaryKey: "RemoteIPRegionURL")
+        ipRegionURL: configuredURL(forInfoDictionaryKey: "RemoteIPRegionURL"),
+        referralRewardsBaseURL: configuredURL(forInfoDictionaryKey: "RemoteReferralRewardsBaseURL")
     )
 
     private static func configuredURL(forInfoDictionaryKey key: String) -> URL? {

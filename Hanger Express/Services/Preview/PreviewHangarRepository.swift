@@ -246,11 +246,13 @@ struct PreviewHangarRepository: HangarRepository {
 
     func requestCharacterRepair(
         for session: UserSession,
-        password _: String
+        reason _: String,
+        issueCouncilURL _: String?
     ) async throws -> CharacterRepairResult {
         CharacterRepairResult(
             wasSuccessful: true,
             failureMessage: nil,
+            cooldownRemainingSeconds: nil,
             updatedCookies: session.cookies
         )
     }
@@ -318,6 +320,25 @@ struct PreviewHangarRepository: HangarRepository {
                 duration: "month"
             )
         ]
+    }
+
+    func requestAuthorizedDevicesVerificationCode(
+        for session: UserSession
+    ) async throws -> [SessionCookie] {
+        session.cookies
+    }
+
+    func verifyAuthorizedDevices(
+        for session: UserSession,
+        code: String
+    ) async throws -> [SessionCookie] {
+        guard AuthorizedDevicesVerification.normalizedCode(code).count == AuthorizedDevicesVerification.codeLength else {
+            throw HangarAccountActionError.authorizedDevicesUnavailable(
+                message: AppLocalizer.string("Enter the six-digit verification code from RSI.")
+            )
+        }
+
+        return session.cookies
     }
 
     func removeAuthorizedDevice(

@@ -2,7 +2,10 @@ import Foundation
 
 nonisolated struct CCUUpgradeCatalogShip: Identifiable, Hashable, Sendable {
     private static let maximumUpgradeableMSRPUSD: Decimal = 1000
-    private static let pioneerKey = UpgradeTitleParser.normalizedShipKey("Pioneer")
+    private static let nonUpgradeableShipKeys: Set<String> = [
+        UpgradeTitleParser.normalizedShipKey("Pioneer"),
+        UpgradeTitleParser.normalizedShipKey("Idris-M")
+    ]
 
     let numericID: Int
     let key: String
@@ -87,7 +90,7 @@ nonisolated struct CCUUpgradeCatalogShip: Identifiable, Hashable, Sendable {
             }
 
             guard msrpUSD.isLessThanOrEqual(to: Self.maximumUpgradeableMSRPUSD),
-                  !Self.isPioneerShip(name: ship.name, key: key) else {
+                  !Self.nonUpgradeableShipKeys.contains(key) else {
                 continue
             }
 
@@ -125,13 +128,6 @@ nonisolated struct CCUUpgradeCatalogShip: Identifiable, Hashable, Sendable {
 
             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
-    }
-
-    private static func isPioneerShip(name: String, key: String) -> Bool {
-        key == pioneerKey
-            || UpgradeTitleParser.normalizedShipKey(
-                UpgradeTitleParser.stripManufacturerPrefix(from: name)
-            ) == pioneerKey
     }
 
     private func isPreferredCatalogEntry(over other: CCUUpgradeCatalogShip) -> Bool {
@@ -324,6 +320,9 @@ nonisolated enum CCUUpgradePlanner {
         selectedSourceMeltValueUSD: Decimal? = nil,
         excludedCandidateIDs: Set<String> = []
     ) -> CCUUpgradeRoute? {
+        let performanceInterval = PerformanceTrace.begin("CCURoute")
+        defer { PerformanceTrace.end("CCURoute", performanceInterval) }
+
         guard sourceShip.msrpUSD.isLessThan(destinationShip.msrpUSD) else {
             return nil
         }

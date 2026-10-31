@@ -48,10 +48,10 @@ private struct CloudTranslationCoverage {
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
-    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
     @AppStorage(HangarItemTranslationMissMode.storageKey) private var itemTranslationMissModeRawValue = HangarItemTranslationMissMode.onDevice.rawValue
     @AppStorage(AppAppearance.storageKey) private var appAppearanceRawValue = AppAppearance.system.rawValue
     @AppStorage(SyncPreferences.workerCountKey) private var syncWorkerCount = Double(SyncPreferences.defaultWorkerCount)
+    @AppStorage(SyncPreferences.workerCountWasCustomizedKey) private var wasWorkerCountCustomized = false
     @AppStorage(SyncPreferences.inventoryAutoRefreshIntervalKey) private var inventoryAutoRefreshIntervalRawValue = SyncPreferences.defaultInventoryAutoRefreshInterval.rawValue
     @AppStorage(DisplayPreferences.compositeUpgradeThumbnailModeKey) private var usesCompositeUpgradeThumbnails = DisplayPreferences.compositeUpgradeThumbnailsEnabledByDefault
     @AppStorage(DisplayPreferences.hangarUpgradedShipDisplayModeKey) private var showsUpgradedShipInHangar = DisplayPreferences.hangarUpgradedShipDisplayEnabledByDefault
@@ -86,24 +86,18 @@ struct SettingsView: View {
                 )
 
                 Section {
-                    Picker("App Language", selection: $appLanguageRawValue) {
+                    Picker("Language", selection: $appLanguageRawValue) {
                         ForEach(AppLanguage.allCases) { language in
                             language.label
                                 .tag(language.rawValue)
                         }
                     }
                     .pickerStyle(.menu)
-
-                    Picker("Item Language", selection: $hangarItemLanguageRawValue) {
-                        ForEach(HangarItemLanguage.allCases) { language in
-                            language.label
-                                .tag(language.rawValue)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .onChange(of: hangarItemLanguageRawValue) { _, newValue in
+                    .onChange(of: appLanguageRawValue) { _, newValue in
                         handleItemLanguageChange(
-                            HangarItemLanguage.resolved(from: newValue)
+                            HangarItemLanguage.resolved(
+                                forAppLanguageRawValue: newValue
+                            )
                         )
                     }
 
@@ -119,9 +113,7 @@ struct SettingsView: View {
                 }
 
                 if RemoteHangarItemTranslationRollout.isEnabled,
-                   HangarItemLanguage.resolved(
-                       from: hangarItemLanguageRawValue
-                   ) == .simplifiedChinese {
+                   resolvedItemLanguage == .simplifiedChinese {
                     Section {
                         Picker(
                             "Translation Mode",
@@ -158,10 +150,10 @@ struct SettingsView: View {
                                 }
                             )
                             .task(
-                                id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
+                                id: "\(resolvedItemLanguage.rawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
                             ) {
                                 await itemTranslationState.loadDictionary(
-                                    for: hangarItemLanguageRawValue,
+                                    for: resolvedItemLanguage.rawValue,
                                     refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
                                 )
                             }
@@ -276,8 +268,8 @@ struct SettingsView: View {
                         Text("Auto inventory refresh controls when Hangar Express runs a full inventory refresh after opening the app. Manual refresh buttons are unaffected.")
                         Text(
                             appModel.isPro
-                                ? AppLocalizer.string("Early Access Labs can refresh up to 10 pages in parallel.")
-                                : AppLocalizer.string("Standard refreshes up to 2 pages in parallel. Early Access unlocks up to 10 while the feature is in Labs.")
+                                ? AppLocalizer.string("Early Access defaults to 5 refresh workers and can use up to 10.")
+                                : AppLocalizer.string("Standard defaults to 2 refresh workers. Early Access defaults to 5 and can use up to 10.")
                         )
                     }
                 }
@@ -384,12 +376,6 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
-            .onAppear {
-                clampStoredWorkerCount()
-            }
-            .onChange(of: appModel.isPro) { _, _ in
-                clampStoredWorkerCount()
-            }
             .alert("Clear Local Cache?", isPresented: $isShowingClearCacheAlert) {
                 Button("Cancel", role: .cancel) {}
                 Button("Clear and Reload", role: .destructive) {
@@ -467,9 +453,10 @@ struct SettingsView: View {
     }
 
     private var resolvedWorkerCount: Int {
-        SyncPreferences.constrainedWorkerCount(
-            Int(syncWorkerCount.rounded()),
-            isPro: appModel.isPro
+        SyncPreferences.resolvedWorkerCount(
+            configuredCount: Int(syncWorkerCount.rounded()),
+            isPro: appModel.isPro,
+            wasCustomized: wasWorkerCountCustomized
         )
     }
 
@@ -479,6 +466,7 @@ struct SettingsView: View {
                 Double(resolvedWorkerCount)
             },
             set: { newValue in
+                wasWorkerCountCustomized = true
                 syncWorkerCount = Double(
                     SyncPreferences.constrainedWorkerCount(
                         Int(newValue.rounded()),
@@ -489,10 +477,6 @@ struct SettingsView: View {
         )
     }
 
-    private func clampStoredWorkerCount() {
-        syncWorkerCount = Double(resolvedWorkerCount)
-    }
-
     private func refreshCloudTranslationDictionary() async {
         guard cloudDictionaryRefreshState != .refreshing else {
             return
@@ -501,13 +485,19 @@ struct SettingsView: View {
         cloudDictionaryRefreshState = .refreshing
         do {
             try await itemTranslationState.refreshDictionary(
-                for: hangarItemLanguageRawValue
+                for: resolvedItemLanguage.rawValue
             )
             appModel.didRefreshHostedItemTranslationDictionary()
             cloudDictionaryRefreshState = .succeeded(.now)
         } catch {
             cloudDictionaryRefreshState = .failed(error.localizedDescription)
         }
+    }
+
+    private var resolvedItemLanguage: HangarItemLanguage {
+        HangarItemLanguage.resolved(
+            forAppLanguageRawValue: appLanguageRawValue
+        )
     }
 }
 
@@ -620,7 +610,7 @@ private struct ProSubscriptionSection: View {
     }
 }
 
-private struct ProPlansSheet: View {
+struct ProPlansSheet: View {
     @Environment(\.dismiss) private var dismiss
     let subscriptionStore: SubscriptionStore
     @Binding var showsEarlyAccessBadge: Bool
@@ -907,9 +897,11 @@ private struct EarlyAccessDisclaimerCard: View {
 
 private struct ProFeatureComparisonCard: View {
     private let rows = [
-        FeatureComparisonRow(feature: "Sync Speed", standard: "2x", pro: "Up to 10x"),
-        FeatureComparisonRow(feature: "Hangar Log", standard: "Up to 5 Entries", pro: "Up to 500 Entries"),
-        FeatureComparisonRow(feature: "Account Switching", standard: "1 Account", pro: "Up to 10 Accounts")
+        FeatureComparisonRow(feature: "Sync Speed", standard: .text("2×"), pro: .text("10×")),
+        FeatureComparisonRow(feature: "Hangar Log", unit: "Entries", standard: .text("5"), pro: .text("500")),
+        FeatureComparisonRow(feature: "Account Switching", unit: "Accounts", standard: .text("1"), pro: .text("10")),
+        FeatureComparisonRow(feature: "WBCCU Deals", standard: .unavailable, pro: .included),
+        FeatureComparisonRow(feature: "Referrals", standard: .unavailable, pro: .included, expectedRelease: "1.2.0")
     ]
 
     var body: some View {
@@ -917,26 +909,54 @@ private struct ProFeatureComparisonCard: View {
             Text("Lab Features Access")
                 .font(.headline)
 
-            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 10) {
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 0) {
                 GridRow {
                     Text("Feature")
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     Text("Standard")
+                        .gridColumnAlignment(.center)
                     Text("Early Access")
+                        .gridColumnAlignment(.center)
+                    Text("Expected release")
+                        .gridColumnAlignment(.center)
                 }
-                .font(.caption.weight(.semibold))
+                .font(.caption2.weight(.semibold))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
                 .foregroundStyle(.secondary)
+                .padding(.bottom, 12)
 
                 Divider()
-                    .gridCellColumns(3)
+                    .gridCellColumns(4)
 
                 ForEach(rows) { row in
                     GridRow {
-                        Text(row.feature)
-                            .fontWeight(.medium)
-                        Text(row.standard)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(row.feature)
+                                .fontWeight(.medium)
+                            if let unit = row.unit {
+                                Text(unit)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        comparisonValue(row.standard)
                             .foregroundStyle(.secondary)
-                        Text(row.pro)
-                            .foregroundStyle(.primary)
+                        comparisonValue(row.pro)
+                            .fontWeight(.semibold)
+                        Text(row.expectedRelease)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .monospacedDigit()
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.vertical, 12)
+
+                    if row.id != rows.last?.id {
+                        Divider()
+                            .opacity(0.5)
+                            .gridCellColumns(4)
                     }
                 }
             }
@@ -945,6 +965,23 @@ private struct ProFeatureComparisonCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .earlyAccessCardStyle()
+    }
+
+    @ViewBuilder
+    private func comparisonValue(_ value: FeatureComparisonRow.Value) -> some View {
+        switch value {
+        case .text(let text):
+            Text(LocalizedStringKey(text))
+        case .included:
+            Image(systemName: "checkmark")
+                .fontWeight(.semibold)
+                .foregroundStyle(.green)
+                .accessibilityLabel("Included")
+        case .unavailable:
+            Image(systemName: "xmark")
+                .fontWeight(.semibold)
+                .accessibilityLabel("Unavailable")
+        }
     }
 }
 
@@ -1218,14 +1255,24 @@ private struct ProCurrentPlanSummary: View {
 private struct FeatureComparisonRow: Identifiable {
     let id: String
     let feature: LocalizedStringKey
-    let standard: LocalizedStringKey
-    let pro: LocalizedStringKey
+    let unit: LocalizedStringKey?
+    enum Value {
+        case text(String)
+        case included
+        case unavailable
+    }
 
-    init(feature: String, standard: String, pro: String) {
+    let standard: Value
+    let pro: Value
+    let expectedRelease: LocalizedStringKey
+
+    init(feature: String, unit: String? = nil, standard: Value, pro: Value, expectedRelease: String = "TBD") {
         id = feature
         self.feature = LocalizedStringKey(feature)
-        self.standard = LocalizedStringKey(standard)
-        self.pro = LocalizedStringKey(pro)
+        self.unit = unit.map { LocalizedStringKey($0) }
+        self.standard = standard
+        self.pro = pro
+        self.expectedRelease = LocalizedStringKey(expectedRelease)
     }
 }
 

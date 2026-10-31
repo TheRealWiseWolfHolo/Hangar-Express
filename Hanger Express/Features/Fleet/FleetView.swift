@@ -48,6 +48,7 @@ struct FleetView: View {
 
     let appModel: AppModel
     let snapshot: HangarSnapshot
+    private var allShipGroups: [GroupedFleetShip] { appModel.readyInventoryPresentation?.fleet ?? [] }
     @Environment(\.displayScale) private var displayScale
     @State private var searchText = ""
     @State private var sortMode: SortMode = .manufacturer
@@ -58,10 +59,17 @@ struct FleetView: View {
     @State private var fleetImagePrefetchTask: Task<Void, Never>?
     @Namespace private var shipCardTransitionNamespace
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
-    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
     @AppStorage("fleetDisplayMode") private var displayModeRawValue = DisplayMode.singleColumn.rawValue
     @State private var itemTranslationState = HangarItemTranslationViewState()
     @State private var translationService = OnDeviceHangarItemTranslationService.shared
+    @State private var inventorySearchIndex: InventorySearchIndex?
+    @State private var queryCache = InventoryQueryCache<InventoryQuerySignature, [GroupedFleetShip]>()
+    @State private var displaySectionCache = FleetDisplaySectionCache()
+
+    init(appModel: AppModel, snapshot: HangarSnapshot) {
+        self.appModel = appModel
+        self.snapshot = snapshot
+    }
 
     private var displayMode: DisplayMode {
         DisplayMode(rawValue: displayModeRawValue) ?? .singleColumn
@@ -124,6 +132,19 @@ struct FleetView: View {
                 id: "\(hangarItemLanguageRawValue)-\(appModel.itemTranslationDictionaryRefreshGeneration)"
             ) {
                 await loadItemTranslationDictionary()
+            }
+            .task(id: searchIndexKey) { await warmSearchIndex() }
+            .overlay {
+                if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && activeSearchIndex == nil && !appModel.isPreparingInventoryPresentation {
+                    ProgressView("Preparing search...").padding(18)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .allowsHitTesting(false)
+                }
+            }
+            .onChange(of: appModel.readyInventoryPresentation?.key) { _, key in
+                if key != nil, let selected = selectedShipGroup {
+                    selectedShipGroup = appModel.readyInventoryPresentation?.fleetByGroupID[selected.id]
+                }
             }
             .task(id: fleetImagePrefetchID(for: displayedShipGroups)) {
                 await prefetchFleetImages(startingAt: 0, in: displayedShipGroups)
@@ -351,7 +372,7 @@ struct FleetView: View {
 
     private func pledgeSheetContext(for shipGroup: GroupedFleetShip) -> FleetShipPledgeSheetContext? {
         let sourcePackageIDs = Set(shipGroup.ships.map(\.sourcePackageID))
-        let packageGroups = snapshot.packages.groupedForInventoryDisplay.filter { packageGroup in
+        let packageGroups = (appModel.readyInventoryPresentation?.packages ?? []).filter { packageGroup in
             packageGroup.packages.contains { package in
                 sourcePackageIDs.contains(package.id)
             }
@@ -368,26 +389,40 @@ struct FleetView: View {
     }
 
     private var displaySections: [FleetDisplaySection] {
-        switch sortMode {
-        case .manufacturer:
-            return groupedSections(for: sortedShipGroups) { shipGroup in
-                normalizedHeaderTitle(FleetPresentationFormatter.manufacturerDisplayName(shipGroup.representative.manufacturer))
-                    ?? AppLocalizer.string("Unknown Manufacturer")
+        let signature = FleetDisplaySectionCache.Signature(
+            inventoryKey: appModel.readyInventoryPresentation?.key,
+            searchKey: searchText.isEmpty ? nil : activeSearchIndex?.key,
+            query: searchText,
+            sortMode: sortMode.rawValue,
+            languageRawValue: itemTranslator.language.rawValue,
+            dictionaryLocale: itemTranslator.dictionary?.locale,
+            dictionaryVersion: itemTranslator.dictionary?.version,
+            translationCacheGeneration: translationService.cacheGeneration
+        )
+
+        return displaySectionCache.sections(for: signature) {
+            let filteredGroups = filteredShipGroups
+            switch sortMode {
+            case .manufacturer:
+                return groupedSections(for: sortedShipGroups(from: filteredGroups)) { shipGroup in
+                    normalizedHeaderTitle(FleetPresentationFormatter.manufacturerDisplayName(shipGroup.representative.manufacturer))
+                        ?? AppLocalizer.string("Unknown Manufacturer")
+                }
+            case .function:
+                return functionSections(from: filteredGroups)
+            case .msrp:
+                return [
+                    FleetDisplaySection(
+                        title: nil,
+                        shipGroups: sortedShipGroups(from: filteredGroups)
+                    )
+                ]
             }
-        case .function:
-            return functionSections(from: filteredShipGroups)
-        case .msrp:
-            return [
-                FleetDisplaySection(
-                    title: nil,
-                    shipGroups: sortedShipGroups
-                )
-            ]
         }
     }
 
-    private var sortedShipGroups: [GroupedFleetShip] {
-        filteredShipGroups.sorted { lhs, rhs in
+    private func sortedShipGroups(from groups: [GroupedFleetShip]) -> [GroupedFleetShip] {
+        groups.sorted { lhs, rhs in
             switch sortMode {
             case .manufacturer:
                 if lhs.representative.manufacturer != rhs.representative.manufacturer {
@@ -509,18 +544,14 @@ struct FleetView: View {
     }
 
     private var filteredShipGroups: [GroupedFleetShip] {
-        let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
-        _ = translationService.cacheGeneration
-
-        guard !normalizedSearchText.isEmpty else {
-            return snapshot.fleet.groupedForFleetDisplay
-        }
-
-        return snapshot.fleet.groupedForFleetDisplay.filter { shipGroup in
-            shipGroup.ships.contains {
-                translationService
-                    .fleetSearchableText(for: $0, using: itemTranslator)
-                    .contains(normalizedSearchText)
+        let query = InventorySearchQuery(searchText)
+        guard !query.isEmpty else { return allShipGroups }
+        let index = activeSearchIndex
+        let signature = InventoryQuerySignature(presentation: appModel.readyInventoryPresentation?.key, search: index?.key,
+            query: query.value, requiredFlags: [])
+        return queryCache.result(for: signature) {
+            PerformanceTrace.measure("FleetSearch") {
+                allShipGroups.filter { group in index?.fleet[group.id]?.contains(where: { $0.contains(query) }) == true }
             }
         }
     }
@@ -529,11 +560,38 @@ struct FleetView: View {
         itemTranslationState.translator(for: hangarItemLanguageRawValue)
     }
 
+    private var hangarItemLanguageRawValue: String {
+        HangarItemLanguage.resolved(
+            forAppLanguageRawValue: appLanguageRawValue
+        ).rawValue
+    }
+
     private func loadItemTranslationDictionary() async {
         await itemTranslationState.loadDictionary(
             for: hangarItemLanguageRawValue,
             refreshGeneration: appModel.itemTranslationDictionaryRefreshGeneration
         )
+        await warmSearchIndex()
+    }
+
+    private var searchIndexKey: InventorySearchKey? {
+        guard let presentation = appModel.readyInventoryPresentation else { return nil }
+        let translator = itemTranslator
+        return InventorySearchKey(presentation: presentation.key, language: translator.language.rawValue,
+            dictionaryLocale: translator.dictionary?.locale, dictionaryVersion: translator.dictionary?.version,
+            cacheGeneration: translationService.cacheGeneration, upgradedNames: false, section: .fleet)
+    }
+    private var activeSearchIndex: InventorySearchIndex? {
+        inventorySearchIndex?.key == searchIndexKey ? inventorySearchIndex : nil
+    }
+    private func warmSearchIndex() async {
+        guard let presentation = appModel.readyInventoryPresentation, let key = searchIndexKey else { return }
+        do {
+            let value = try await appModel.inventorySearchBuilder.index(presentation: presentation,
+                context: translationService.searchContext(using: itemTranslator), key: key)
+            guard !Task.isCancelled, key == searchIndexKey else { return }
+            inventorySearchIndex = value
+        } catch { }
     }
 
     private func cardSubtitle(for shipGroup: GroupedFleetShip) -> String? {
@@ -573,6 +631,7 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
     case ccuChainCalculator
     case resetCharacter
     case eventCalendar
+    case referrals
 
     var id: Self { self }
 
@@ -588,6 +647,8 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
             return AppLocalizer.string("CCU Calculator")
         case .resetCharacter:
             return AppLocalizer.string("Character Repair")
+        case .referrals:
+            return AppLocalizer.string("Referrals")
         case .eventCalendar:
             return AppLocalizer.string("Event Calendar")
         }
@@ -605,13 +666,20 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
             return "link.circle"
         case .resetCharacter:
             return "person.crop.circle.badge.exclamationmark"
+        case .referrals:
+            return "person.2.badge.plus"
         case .eventCalendar:
             return "calendar.badge.clock"
         }
     }
 
-    var badgeText: String? {
-        self == .wbccuDeals ? "BETA" : nil
+    var requiresEarlyAccess: Bool {
+        switch self {
+        case .wbccuDeals, .referrals:
+            return true
+        case .allShips, .authorizedDevices, .ccuChainCalculator, .resetCharacter, .eventCalendar:
+            return false
+        }
     }
 
     var isAvailable: Bool {
@@ -621,6 +689,29 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
             || self == .ccuChainCalculator
             || self == .resetCharacter
             || self == .eventCalendar
+            || self == .referrals
+    }
+}
+
+struct EarlyAccessBadgeIcon: View {
+    private let gold = Color(red: 0.92, green: 0.78, blue: 0.32)
+
+    var body: some View {
+        Image(systemName: "sparkles")
+            .font(.system(size: 12, weight: .bold))
+            .foregroundStyle(gold)
+            .frame(width: 30, height: 30)
+            .background(
+                Circle()
+                    .fill(Color.black.opacity(0.72))
+            )
+            .overlay {
+                Circle()
+                    .strokeBorder(gold.opacity(0.34), lineWidth: 1)
+            }
+            .shadow(color: Color.black.opacity(0.22), radius: 5, y: 2)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text("Early Access"))
     }
 }
 
@@ -663,10 +754,10 @@ struct FleetToolsSection: View {
 
             LazyVGrid(
                 columns: [
-                    GridItem(.flexible(), spacing: 12),
-                    GridItem(.flexible(), spacing: 12)
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
                 ],
-                spacing: 12
+                spacing: 10
             ) {
                 ForEach(orderedTools) { tool in
                     FleetToolTile(
@@ -767,7 +858,7 @@ struct FleetToolsSection: View {
             return
         }
 
-        let frame = toolFrames[tool] ?? CGRect(origin: .zero, size: CGSize(width: 164, height: 124))
+        let frame = toolFrames[tool] ?? CGRect(origin: .zero, size: CGSize(width: 164, height: 116))
         draggedToolLocation = CGPoint(x: frame.midX, y: frame.midY)
         draggedToolSize = frame.size
         draggedTool = tool
@@ -1021,52 +1112,71 @@ private struct FleetToolTile: View {
     let action: () -> Void
 
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: tool.systemImage)
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(tool.isAvailable && isEnabled ? Color.accentColor : .secondary)
-                .frame(width: 44, height: 44)
-                .background(
-                    Circle()
-                        .fill((tool.isAvailable && isEnabled ? Color.accentColor : Color.secondary).opacity(0.12))
-                )
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: tool.systemImage)
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(tool.isAvailable && isEnabled ? Color.accentColor : .secondary)
+                    .frame(width: 42, height: 42)
+                    .background(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .fill(
+                                (tool.isAvailable && isEnabled ? Color.accentColor : Color.secondary)
+                                    .opacity(0.13)
+                            )
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .strokeBorder(
+                                (tool.isAvailable && isEnabled ? Color.accentColor : Color.secondary)
+                                    .opacity(0.12)
+                            )
+                    }
 
-            HStack(spacing: 6) {
-                Text(tool.title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.85)
+                Spacer(minLength: 0)
 
-                if let badgeText = tool.badgeText {
-                    Text(badgeText)
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .foregroundStyle(Color.accentColor)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(Color.accentColor.opacity(0.14))
-                        )
-                        .accessibilityLabel(Text("Beta"))
+                if tool.requiresEarlyAccess {
+                    EarlyAccessBadgeIcon()
                 }
             }
+
+            Spacer(minLength: 14)
+
+            Text(tool.title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+                .multilineTextAlignment(.leading)
+                .lineLimit(2)
+                .minimumScaleFactor(0.82)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 16)
-        .frame(maxWidth: .infinity, minHeight: 124)
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 116, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Color(.secondarySystemGroupedBackground))
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+
+                RadialGradient(
+                    colors: [Color.accentColor.opacity(0.07), .clear],
+                    center: .topLeading,
+                    startRadius: 0,
+                    endRadius: 130
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
         )
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.055), lineWidth: 0.75)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .opacity(tool.isAvailable && isEnabled ? 1 : 0.62)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel(
-            tool.badgeText == nil
-                ? tool.title
-                : AppLocalizer.format("%@, Beta", tool.title)
+            tool.requiresEarlyAccess
+                ? AppLocalizer.format("%@, Early Access", tool.title)
+                : tool.title
         )
         .accessibilityAction {
             guard tool.isAvailable && isEnabled else {
@@ -1088,7 +1198,6 @@ struct AllShipsBrowserView: View {
     @State private var loadState: AllShipsLoadState = .idle
     @State private var isRefreshingCatalog = false
     @AppStorage(AppLanguage.storageKey) private var appLanguageRawValue = AppLanguage.system.rawValue
-    @AppStorage(HangarItemLanguage.storageKey) private var hangarItemLanguageRawValue = HangarItemLanguage.original.rawValue
     @State private var itemTranslationState = HangarItemTranslationViewState()
     @State private var translationService = OnDeviceHangarItemTranslationService.shared
 
@@ -1230,6 +1339,12 @@ struct AllShipsBrowserView: View {
 
     private var itemTranslator: HangarItemTranslator {
         itemTranslationState.translator(for: hangarItemLanguageRawValue)
+    }
+
+    private var hangarItemLanguageRawValue: String {
+        HangarItemLanguage.resolved(
+            forAppLanguageRawValue: appLanguageRawValue
+        ).rawValue
     }
 
     private func loadItemTranslationDictionary() async {
@@ -2601,10 +2716,6 @@ private struct FleetShipDetailHeroCard: View {
     }
 
     private var roleSummary: String? {
-        if let detail {
-            return FleetRoleFormatter.summary(type: detail.career, focus: detail.role)
-        }
-
         return FleetPresentationFormatter.roleSummary(
             role: ship.role,
             categories: ship.roleCategories
@@ -3267,6 +3378,37 @@ private struct FleetShipDetailPill: View {
                     .fill(tint)
             )
             .lineLimit(1)
+    }
+}
+
+@MainActor
+private final class FleetDisplaySectionCache {
+    struct Signature: Equatable {
+        let inventoryKey: InventoryPresentationKey?
+        let searchKey: InventorySearchKey?
+        let query: String
+        let sortMode: String
+        let languageRawValue: String
+        let dictionaryLocale: String?
+        let dictionaryVersion: Int?
+        let translationCacheGeneration: Int
+    }
+
+    private var activeSignature: Signature?
+    private var cachedSections: [FleetDisplaySection] = []
+
+    func sections(
+        for signature: Signature,
+        build: () -> [FleetDisplaySection]
+    ) -> [FleetDisplaySection] {
+        guard activeSignature != signature else {
+            return cachedSections
+        }
+
+        let sections = build()
+        activeSignature = signature
+        cachedSections = sections
+        return sections
     }
 }
 

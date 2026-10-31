@@ -1,6 +1,6 @@
 import Foundation
 
-nonisolated struct FileSnapshotStore: SnapshotStore {
+actor FileSnapshotStore: SnapshotStore {
     private let directoryURL: URL
 
     init(
@@ -10,39 +10,83 @@ nonisolated struct FileSnapshotStore: SnapshotStore {
         self.directoryURL = directoryURL ?? Self.defaultDirectoryURL(fileManager: fileManager)
     }
 
-    func load(for session: UserSession) async -> HangarSnapshot? {
-        let fileURL = fileURL(for: session)
-
-        guard let data = try? Data(contentsOf: fileURL) else {
-            return nil
-        }
-
-        guard let snapshot = try? Self.makeDecoder().decode(HangarSnapshot.self, from: data) else {
-            try? FileManager.default.removeItem(at: fileURL)
-            return nil
-        }
-
-        return snapshot
+    private nonisolated struct Envelope: Codable {
+        let schemaVersion: Int
+        let snapshot: HangarSnapshot
     }
 
-    func save(_ snapshot: HangarSnapshot, for session: UserSession) async {
+    func load(for session: UserSession) async throws -> HangarSnapshot? {
+        let interval = PerformanceTrace.begin("SnapshotLoad")
+        defer { PerformanceTrace.end("SnapshotLoad", interval) }
+        let data: Data
+        do { data = try Data(contentsOf: fileURL(for: session)) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile { return nil }
+        catch { throw SnapshotStorageError.unavailable }
+        do {
+            let decoder = Self.makeDecoder()
+            // Inspect the envelope before attempting legacy decoding: a future
+            // schema must never be mistaken for an old snapshot and overwritten.
+            if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               object["schemaVersion"] != nil {
+                guard object["schemaVersion"] as? Int == 1 else { throw SnapshotStorageError.unsupportedVersion }
+                let envelope = try decoder.decode(Envelope.self, from: data)
+                guard envelope.schemaVersion == 1 else { throw SnapshotStorageError.unsupportedVersion }
+                return envelope.snapshot
+            }
+            return try decoder.decode(HangarSnapshot.self, from: data)
+        } catch let error as SnapshotStorageError { throw error }
+        catch { throw SnapshotStorageError.corrupted }
+    }
+
+    func save(_ snapshot: HangarSnapshot, for session: UserSession) async throws {
+        let interval = PerformanceTrace.begin("SnapshotSave")
+        defer { PerformanceTrace.end("SnapshotSave", interval) }
         do {
             try ensureDirectoryExists()
-            let data = try Self.makeEncoder().encode(snapshot)
+            try preserveUnreadableFile(for: session)
+            let data = try Self.makeEncoder().encode(Envelope(schemaVersion: 1, snapshot: snapshot))
             try data.write(to: fileURL(for: session), options: [.atomic])
-        } catch {
-#if DEBUG
-            print("FileSnapshotStore failed to save snapshot for \(session.accountKey): \(error)")
-#endif
-        }
+        } catch let error as SnapshotStorageError { throw error }
+        catch { throw SnapshotStorageError.unavailable }
     }
 
-    func delete(for session: UserSession) async {
-        try? FileManager.default.removeItem(at: fileURL(for: session))
+    func delete(for session: UserSession) async throws {
+        let url = fileURL(for: session)
+        try removeIfPresent(url)
+        guard FileManager.default.fileExists(atPath: directoryURL.path) else { return }
+        do {
+            let prefix = url.deletingPathExtension().lastPathComponent + ".unreadable-"
+            for backup in try FileManager.default.contentsOfDirectory(at: directoryURL, includingPropertiesForKeys: nil)
+                where backup.lastPathComponent.hasPrefix(prefix) {
+                try removeIfPresent(backup)
+            }
+        } catch { throw SnapshotStorageError.unavailable }
     }
 
-    func clear() async {
-        try? FileManager.default.removeItem(at: directoryURL)
+    func clear() async throws {
+        try removeIfPresent(directoryURL)
+    }
+
+    private func removeIfPresent(_ url: URL) throws {
+        do { try FileManager.default.removeItem(at: url) }
+        catch let error as CocoaError where error.code == .fileNoSuchFile { return }
+        catch { throw SnapshotStorageError.unavailable }
+    }
+
+    private func preserveUnreadableFile(for session: UserSession) throws {
+        let url = fileURL(for: session)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let data = try Data(contentsOf: url)
+        let decoder = Self.makeDecoder()
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           object["schemaVersion"] != nil {
+            guard object["schemaVersion"] as? Int == 1 else { throw SnapshotStorageError.unsupportedVersion }
+            if (try? decoder.decode(Envelope.self, from: data)) != nil { return }
+        } else if (try? decoder.decode(HangarSnapshot.self, from: data)) != nil { return }
+        // Keep the recoverable original before replacing a damaged cache with a
+        // successful refresh. Unknown future versions are never overwritten.
+        try FileManager.default.copyItem(at: url, to: url.deletingPathExtension()
+            .appendingPathExtension("unreadable-\(UUID().uuidString).json"))
     }
 
     private func ensureDirectoryExists() throws {
@@ -61,7 +105,7 @@ nonisolated struct FileSnapshotStore: SnapshotStore {
             .replacingOccurrences(of: "=", with: "")
     }
 
-    private static func defaultDirectoryURL(fileManager: FileManager) -> URL {
+    private nonisolated static func defaultDirectoryURL(fileManager: FileManager) -> URL {
         let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fileManager.temporaryDirectory
 
@@ -70,13 +114,13 @@ nonisolated struct FileSnapshotStore: SnapshotStore {
             .appendingPathComponent("Snapshots", isDirectory: true)
     }
 
-    private static func makeEncoder() -> JSONEncoder {
+    private nonisolated static func makeEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return encoder
     }
 
-    private static func makeDecoder() -> JSONDecoder {
+    private nonisolated static func makeDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder

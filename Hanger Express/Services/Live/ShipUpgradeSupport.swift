@@ -158,6 +158,16 @@ nonisolated enum UpgradeTitleParser {
             index += 1
         }
 
+        // RSI's pledge listing added Mk IV to the original Constellation names,
+        // while older hangar pledges and the ship-detail feed still omit it.
+        if normalizedTokens.count >= 4,
+           normalizedTokens[0] == "constellation",
+           normalizedTokens[1] == "mk",
+           normalizedTokens[2] == "iv",
+           ["andromeda", "aquila", "phoenix", "taurus"].contains(normalizedTokens[3]) {
+            normalizedTokens.removeSubrange(1...2)
+        }
+
         let canonicalKey = normalizedTokens.joined(separator: " ")
         return legacyShipAliases[canonicalKey] ?? canonicalKey
     }
@@ -391,6 +401,15 @@ nonisolated struct RSIShipCatalog: Sendable {
             }
         }
 
+        // The hosted feed can retain historic names without letting an alias
+        // override another ship's primary name.
+        for ship in ships {
+            for alias in ship.aliases {
+                let key = UpgradeTitleParser.normalizedShipKey(alias)
+                keyedShips[key] = keyedShips[key] ?? ship
+            }
+        }
+
         shipsByKey = keyedShips
         mirroredImageURLsBySource = mirroredImages
         manufacturersBySlug = Dictionary(
@@ -517,26 +536,24 @@ nonisolated struct HostedShipCatalogClient: Sendable {
 
 actor HostedShipCatalogStore {
     static let shared = HostedShipCatalogStore()
-
-    private var cachedCatalog: RSIShipCatalog?
-
-    func catalog(
-        using client: HostedShipCatalogClient,
-        forceRefresh: Bool = false
-    ) async throws -> RSIShipCatalog {
-        if !forceRefresh,
-           let cachedCatalog {
-            return cachedCatalog
+    private let loader: ValidatedHostedFeedStore<RSIShipCatalog>
+    private let permitsCustomSessionPersistence: Bool
+    init(directoryURL: URL? = nil) {
+        permitsCustomSessionPersistence = directoryURL != nil
+        let root = directoryURL ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("HangerExpress/ValidatedFeeds/catalog", isDirectory: true)
+        loader = ValidatedHostedFeedStore(directory: root)
+    }
+    func catalog(using client: HostedShipCatalogClient, forceRefresh: Bool = false) async throws -> RSIShipCatalog {
+        try await loader.load(urls: client.urls, session: client.urlSession, forceRefresh: forceRefresh,
+            persistent: permitsCustomSessionPersistence || client.urlSession === URLSession.shared) { data in
+            let catalog = try HostedShipCatalogClient.decodeCatalog(from: data)
+            guard !catalog.ships.isEmpty else { throw ValidatedHostedFeedError.emptyFeed }
+            return catalog
         }
-
-        let catalog = try await client.fetchCatalog()
-        cachedCatalog = catalog
-        return catalog
     }
-
-    func clear() {
-        cachedCatalog = nil
-    }
+    func invalidateFreshness() async { await loader.invalidateFreshness() }
+    func clear() async { await loader.clear() }
 }
 
 nonisolated enum HostedShipCatalogError: Error, LocalizedError {
@@ -1064,22 +1081,24 @@ nonisolated struct HostedShipDetailCatalogClient: Sendable {
 
 actor HostedShipDetailCatalogStore {
     static let shared = HostedShipDetailCatalogStore()
-
-    private var cachedCatalog: RSIShipDetailCatalog?
-
+    private let loader: ValidatedHostedFeedStore<RSIShipDetailCatalog>
+    private let permitsCustomSessionPersistence: Bool
+    init(directoryURL: URL? = nil) {
+        permitsCustomSessionPersistence = directoryURL != nil
+        let root = directoryURL ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("HangerExpress/ValidatedFeeds/details", isDirectory: true)
+        loader = ValidatedHostedFeedStore(directory: root)
+    }
     func catalog(using client: HostedShipDetailCatalogClient) async throws -> RSIShipDetailCatalog {
-        if let cachedCatalog {
-            return cachedCatalog
+        try await loader.load(urls: client.urls, session: client.urlSession,
+            persistent: permitsCustomSessionPersistence || client.urlSession === URLSession.shared) { data in
+            let catalog = try HostedShipDetailCatalogClient.decodeCatalog(from: data)
+            guard !catalog.ships.isEmpty else { throw ValidatedHostedFeedError.emptyFeed }
+            return catalog
         }
-
-        let catalog = try await client.fetchCatalog()
-        cachedCatalog = catalog
-        return catalog
     }
-
-    func clear() {
-        cachedCatalog = nil
-    }
+    func invalidateFreshness() async { await loader.invalidateFreshness() }
+    func clear() async { await loader.clear() }
 }
 
 nonisolated struct HostedLimitedShipSaleClient: Sendable {
@@ -1162,6 +1181,11 @@ public nonisolated enum HostedShipFeedEndpoints {
 
     public static var limitedShipSaleURLs: [URL] {
         limitedShipSaleURLs(configuration: .live)
+    }
+
+    static var referralRewardsURLs: [URL] {
+        guard let base = RemoteServiceConfiguration.live.referralRewardsBaseURL else { return [] }
+        return [base.appendingPathComponent("referral-rewards.json")]
     }
 
     public static var eventCalendarURLs: [URL] {

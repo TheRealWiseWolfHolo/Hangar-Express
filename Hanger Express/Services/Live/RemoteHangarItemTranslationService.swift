@@ -32,9 +32,10 @@ nonisolated enum HangarItemTranslationMethodPromptPolicy {
     }
 
     static func shouldPromptAfterUpgrade(
+        hasPersistedSelection: Bool,
         rolloutEnabled: Bool = RemoteHangarItemTranslationRollout.isEnabled
     ) -> Bool {
-        rolloutEnabled
+        rolloutEnabled && !hasPersistedSelection
     }
 }
 
@@ -189,7 +190,32 @@ nonisolated enum RemoteHangarItemTranslationSuggestionClassifier {
             add(ship.sourcePackageName, kind: .package)
         }
 
+        for buybackPledge in snapshot.buyback {
+            let titleKind = buybackTranslationKind(for: buybackPledge)
+            add(buybackPledge.title, kind: titleKind)
+            add(buybackPledge.displayedNotes, kind: .item)
+            add(buybackPledge.sourceRawInfo?.titleText, kind: titleKind)
+        }
+
         return candidates
+    }
+
+    private static func buybackTranslationKind(
+        for pledge: BuybackPledge
+    ) -> RemoteHangarItemTranslationKind {
+        if pledge.isUpgrade {
+            return .upgrade
+        }
+        if pledge.isSkin {
+            return .paint
+        }
+        if pledge.isPackage {
+            return .package
+        }
+        if pledge.isGear {
+            return .item
+        }
+        return .ship
     }
 }
 
@@ -249,6 +275,7 @@ nonisolated struct RemoteHangarItemTranslationClient: Sendable {
     func submit(
         _ candidates: [RemoteHangarItemTranslationCandidate],
         dictionaryVersion: Int?,
+        isPremiumSubscriber: Bool = false,
         batchHandler: (
             @Sendable (
                 [RemoteHangarItemTranslationResult],
@@ -291,7 +318,8 @@ nonisolated struct RemoteHangarItemTranslationClient: Sendable {
                         batchIndex,
                         try await submitBatch(
                             batches[batchIndex],
-                            dictionaryVersion: dictionaryVersion
+                            dictionaryVersion: dictionaryVersion,
+                            isPremiumSubscriber: isPremiumSubscriber
                         )
                     )
                 }
@@ -315,7 +343,8 @@ nonisolated struct RemoteHangarItemTranslationClient: Sendable {
                             batchIndex,
                             try await submitBatch(
                                 batches[batchIndex],
-                                dictionaryVersion: dictionaryVersion
+                                dictionaryVersion: dictionaryVersion,
+                                isPremiumSubscriber: isPremiumSubscriber
                             )
                         )
                     }
@@ -328,7 +357,8 @@ nonisolated struct RemoteHangarItemTranslationClient: Sendable {
 
     private func submitBatch(
         _ candidates: [RemoteHangarItemTranslationCandidate],
-        dictionaryVersion: Int?
+        dictionaryVersion: Int?,
+        isPremiumSubscriber: Bool
     ) async throws -> [RemoteHangarItemTranslationResult] {
         guard !candidates.isEmpty else {
             return []
@@ -336,7 +366,8 @@ nonisolated struct RemoteHangarItemTranslationClient: Sendable {
 
         let request = try resolveRequest(
             for: candidates,
-            dictionaryVersion: dictionaryVersion
+            dictionaryVersion: dictionaryVersion,
+            isPremiumSubscriber: isPremiumSubscriber
         )
         let (data, response) = try await urlSession.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -377,7 +408,8 @@ nonisolated struct RemoteHangarItemTranslationClient: Sendable {
 
     func resolveRequest(
         for candidates: [RemoteHangarItemTranslationCandidate],
-        dictionaryVersion: Int?
+        dictionaryVersion: Int?,
+        isPremiumSubscriber: Bool = false
     ) throws -> URLRequest {
         guard let baseURL else {
             throw RemoteHangarItemTranslationClientError.missingConfiguration
@@ -401,6 +433,7 @@ nonisolated struct RemoteHangarItemTranslationClient: Sendable {
                 dictionaryVersion: dictionaryVersion.flatMap {
                     $0 > 0 ? $0 : nil
                 },
+                isPremiumSubscriber: isPremiumSubscriber,
                 items: candidates.map {
                     ResolveRequest.Item(
                         clientID: $0.clientID,
@@ -434,6 +467,7 @@ nonisolated struct RemoteHangarItemTranslationClient: Sendable {
         let sourceLocale: String
         let targetLocale: String
         let dictionaryVersion: Int?
+        let isPremiumSubscriber: Bool
         let items: [Item]
     }
 
@@ -493,6 +527,7 @@ actor RemoteHangarItemTranslationSubmissionStore {
         for snapshot: HangarSnapshot,
         excluding dictionary: HangarItemTranslationDictionary?,
         mode: HangarItemTranslationMissMode,
+        isPremiumSubscriber: Bool = false,
         client: RemoteHangarItemTranslationClient = RemoteHangarItemTranslationClient(),
         now: Date = .now,
         rolloutEnabled: Bool = RemoteHangarItemTranslationRollout.isEnabled,
@@ -521,7 +556,8 @@ actor RemoteHangarItemTranslationSubmissionStore {
             state.shouldSubmit(
                 $0,
                 dictionaryVersion: dictionary.version,
-                now: now
+                now: now,
+                isPremiumSubscriber: isPremiumSubscriber
             )
         }
         guard !pendingCandidates.isEmpty else {
@@ -542,11 +578,13 @@ actor RemoteHangarItemTranslationSubmissionStore {
             let results = try await client.submit(
                 pendingCandidates,
                 dictionaryVersion: dictionary.version,
+                isPremiumSubscriber: isPremiumSubscriber,
                 batchHandler: { [weak self] batchResults, progress in
                     await self?.recordCompletedBatch(
                         batchResults,
                         dictionaryVersion: dictionary.version,
-                        now: now
+                        now: now,
+                        isPremiumSubscriber: isPremiumSubscriber
                     )
                     await progressHandler?(progress)
                 }
@@ -557,7 +595,8 @@ actor RemoteHangarItemTranslationSubmissionStore {
                 state.shouldSubmit(
                     $0,
                     dictionaryVersion: dictionary.version,
-                    now: now
+                    now: now,
+                    isPremiumSubscriber: isPremiumSubscriber
                 )
             }
             for candidate in retryCandidates {
@@ -568,7 +607,8 @@ actor RemoteHangarItemTranslationSubmissionStore {
                         reason: nil
                     ),
                     dictionaryVersion: dictionary.version,
-                    now: now
+                    now: now,
+                    isPremiumSubscriber: isPremiumSubscriber
                 )
             }
             saveState()
@@ -579,13 +619,15 @@ actor RemoteHangarItemTranslationSubmissionStore {
     private func recordCompletedBatch(
         _ results: [RemoteHangarItemTranslationResult],
         dictionaryVersion: Int,
-        now: Date
+        now: Date,
+        isPremiumSubscriber: Bool
     ) {
         for result in results {
             state.record(
                 result,
                 dictionaryVersion: dictionaryVersion,
-                now: now
+                now: now,
+                isPremiumSubscriber: isPremiumSubscriber
             )
         }
         saveState()
@@ -636,6 +678,7 @@ nonisolated struct RemoteHangarItemTranslationSubmissionState: Codable, Equatabl
         var retryCount: Int
         var retryAfter: Date?
         var terminalForVersion: Bool
+        var premiumReported: Bool?
     }
 
     private var records: [String: Record] = [:]
@@ -643,15 +686,19 @@ nonisolated struct RemoteHangarItemTranslationSubmissionState: Codable, Equatabl
     mutating func record(
         _ result: RemoteHangarItemTranslationResult,
         dictionaryVersion: Int,
-        now: Date
+        now: Date,
+        isPremiumSubscriber: Bool = false
     ) {
+        let previousPremiumReported = records[result.candidate.clientID]
+            .flatMap { $0.dictionaryVersion == dictionaryVersion ? $0.premiumReported : nil } == true
         switch result.status {
         case .approved, .pending, .rejected, .ineligible:
             records[result.candidate.clientID] = Record(
                 dictionaryVersion: dictionaryVersion,
                 retryCount: 0,
                 retryAfter: nil,
-                terminalForVersion: true
+                terminalForVersion: true,
+                premiumReported: previousPremiumReported || isPremiumSubscriber
             )
         case .unavailable:
             let previous = records[result.candidate.clientID]
@@ -665,7 +712,8 @@ nonisolated struct RemoteHangarItemTranslationSubmissionState: Codable, Equatabl
                     afterFailure: retryCount,
                     now: now
                 ),
-                terminalForVersion: false
+                terminalForVersion: false,
+                premiumReported: previousPremiumReported
             )
         }
     }
@@ -673,14 +721,15 @@ nonisolated struct RemoteHangarItemTranslationSubmissionState: Codable, Equatabl
     func shouldSubmit(
         _ candidate: RemoteHangarItemTranslationCandidate,
         dictionaryVersion: Int,
-        now: Date
+        now: Date,
+        isPremiumSubscriber: Bool = false
     ) -> Bool {
         guard let record = records[candidate.clientID],
               record.dictionaryVersion == dictionaryVersion else {
             return true
         }
         if record.terminalForVersion {
-            return false
+            return isPremiumSubscriber && record.premiumReported != true
         }
         return record.retryAfter.map { $0 <= now } ?? true
     }

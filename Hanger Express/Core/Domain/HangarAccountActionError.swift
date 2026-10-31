@@ -22,6 +22,8 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
     case upgradeTargetLookupFailed(message: String)
     case upgradeTimedOut(timeoutSeconds: Int)
     case upgradeRejected(message: String)
+    case characterRepairReasonTooLong(maximum: Int)
+    case characterRepairCooldownActive(remainingSeconds: Int)
     case characterRepairTimedOut(timeoutSeconds: Int)
     case characterRepairRejected(message: String)
     case invalidBuybackItem
@@ -32,6 +34,7 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
     case invalidLimitedShip
     case limitedShipCartInsertionTimedOut(timeoutSeconds: Int)
     case limitedShipCartInsertionRejected(message: String)
+    case authorizedDevicesVerificationRequired
     case authorizedDevicesUnavailable(message: String)
     case authorizedDeviceRemovalRejected(message: String)
 
@@ -98,6 +101,14 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
             )
         case let .upgradeRejected(message):
             return AppLocalizer.format("RSI did not accept the upgrade request.\n\n%@", message)
+        case let .characterRepairReasonTooLong(maximum):
+            return AppLocalizer.format("Keep the repair reason under %lld characters.", maximum)
+        case let .characterRepairCooldownActive(remainingSeconds):
+            let remainingMinutes = max(1, Int(ceil(Double(remainingSeconds) / 60)))
+            return AppLocalizer.format(
+                "RSI allows one Character Repair per hour. Try again in about %lld minute(s).",
+                remainingMinutes
+            )
         case let .characterRepairTimedOut(timeoutSeconds):
             return AppLocalizer.format(
                 "RSI did not confirm the character repair request within %lld seconds. Open the RSI character repair page to verify whether it was submitted before trying again.",
@@ -127,6 +138,8 @@ enum HangarAccountActionError: Error, LocalizedError, Sendable, Equatable {
             )
         case let .limitedShipCartInsertionRejected(message):
             return AppLocalizer.format("RSI did not add the selected limited ship to the cart.\n\n%@", message)
+        case .authorizedDevicesVerificationRequired:
+            return AppLocalizer.string("Verify your identity with the six-digit code from RSI before loading logged-in devices.")
         case let .authorizedDevicesUnavailable(message):
             return AppLocalizer.format("Hangar Express could not load authorized RSI devices.\n\n%@", message)
         case let .authorizedDeviceRemovalRejected(message):

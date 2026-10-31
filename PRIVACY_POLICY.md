@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Effective date: April 28, 2026
+Effective date: October 8, 2026
 
 Hangar Express is an unofficial Star Citizen hangar companion app. This policy explains what information the app handles and how it is used.
 
@@ -10,7 +10,7 @@ Hangar Express may handle the following information when you use the app:
 
 - RSI account sign-in information that you enter, such as your email address or login ID and password.
 - RSI session cookies created during sign-in.
-- RSI account information returned by Roberts Space Industries, such as display name, handle, email address, hangar items, fleet data, buy-back data, hangar logs, account metadata, and authorized-device information.
+- RSI account information returned by Roberts Space Industries, such as display name, handle, email address, hangar items, fleet data, buy-back data, hangar logs, game-access entitlements, account metadata, and authorized-device information.
 - App preferences, including language, appearance, refresh settings, cached subscription entitlement state, and saved-account selection.
 - Locally cached images, ship metadata, and app snapshots used to make the app faster and available between refreshes.
 - Purchase entitlement information from Apple StoreKit, such as whether Early Access or Early Access for Life is active.
@@ -35,7 +35,9 @@ The app stores saved RSI credentials and reusable RSI cookies in the iOS Keychai
 
 ## Data Shared With the Developer
 
-Hangar Express does not operate a developer-owned account server for your RSI account data. The developer does not receive your RSI password, RSI cookies, hangar contents, purchase history, or local app snapshots from the app automatically.
+Hangar Express does not operate a developer-owned account server for your RSI account data. The developer does not receive your RSI password, RSI cookies, full hangar contents, purchase history, or local app snapshots from the app automatically.
+
+If you select Cloud item translation, the app sends eligible public-facing catalog terms from your hangar to the developer's translation service for review. It also sends a yes/no indication of whether Pro is active so the developer can prioritize commonly seen terms from Pro users. The service stores appearance counts, not your account identity, purchase receipt, or full hangar snapshot. Local item translation does not send these terms or the Pro indication to the translation service.
 
 If you contact the developer, you may choose to share diagnostics, screenshots, logs, or other information. That information is used only to investigate and respond to your request.
 
