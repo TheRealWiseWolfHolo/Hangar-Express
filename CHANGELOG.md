@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.1.2 (In Progress)
+
+### English
+
+- Check trusted RSI origins and active documents before login autofill or checkout automation. Checkout messages must match the current main frame and checkout session.
+- Enforce cookie domain, host, path and expiry boundaries; keep checkout cookie storage isolated from other accounts.
+- Restrict authenticated redirects to the original HTTPS origin and rebuild scoped authentication headers for each allowed destination.
+- Redact private diagnostic fields and raw responses, bound error/report processing, and make copied diagnostics local-only with a ten-minute expiration.
+
+### 简体中文
+
+- 登录自动填充和结账自动化会先验证 RSI 来源和当前页面；结账消息必须与当前主页面及结账会话一致。
+- 严格检查 Cookie 的域名、主机、路径和有效期，避免结账会话混入其他账户的 Cookie。
+- 已认证请求仅允许重定向至原 HTTPS 来源，并按目标地址重新生成适用的认证请求头。
+- 隐藏诊断中的隐私字段和原始响应，限制错误及报告处理规模；复制的诊断仅保留在本设备剪贴板中，十分钟后过期。
+
 ## v1.1.1 (In Progress)
 
 ### English

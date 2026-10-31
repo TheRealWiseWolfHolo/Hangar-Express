@@ -1074,7 +1074,7 @@ struct Hanger_ExpressTests {
         #expect(presentation.debugDetails?.contains("Can't find variable: arguments") == true)
     }
 
-    @Test func authenticationDebugFormatterShowsRawRSIResponseBodyForUnexpectedResponses() async throws {
+    @Test func authenticationDebugFormatterOmitsRawRSIResponseBodyForUnexpectedResponses() async throws {
         let error = NSError(
             domain: "RSIAuthService",
             code: 200,
@@ -1087,7 +1087,8 @@ struct Hanger_ExpressTests {
         let presentation = AuthenticationDebugFormatter.present(error)
 
         #expect(presentation.message.contains("RSI returned a response the app could not decode yet."))
-        #expect(presentation.message.contains(#""message":"SomethingNew""#))
+        #expect(!presentation.message.contains("SomethingNew"))
+        #expect(presentation.debugDetails?.contains("backend surprise") != true)
     }
 
     @Test func verificationCodesNormalizeToUppercaseAlphanumericCharacters() async throws {

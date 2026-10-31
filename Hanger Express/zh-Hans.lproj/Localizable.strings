@@ -1112,3 +1112,9 @@
 "TBD" = "待定";
 
 "Entries" = "条记录";
+
+"Sign-in and checkout now check trusted RSI pages before using your saved credentials." = "登录和结账现在会先确认页面来自受信任的 RSI 网站，再使用已保存的凭据。";
+
+"Saved account cookies stay isolated when you shop, switch accounts, or finish a browser session." = "购物、切换账户和结束浏览器会话时，已保存账户的 Cookie 会保持隔离。";
+
+"Support logs hide more private details, and copied diagnostics stay on this device with a time limit." = "支持日志会隐藏更多隐私信息，复制的诊断仅在本设备剪贴板中限时保留。";

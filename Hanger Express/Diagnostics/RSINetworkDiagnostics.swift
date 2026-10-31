@@ -4,48 +4,11 @@ import Security
 /// Support diagnostics only. Never retain a request, its headers/body, certificate
 /// contents, remote IP address or the complete NSError.userInfo dictionary.
 nonisolated enum RSINetworkDiagnostics {
-    static func safeURL(_ url: URL?) -> String {
-        guard let url, url.absoluteString.utf8.count <= 2_048,
-              var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              ["https", "http"].contains(parts.scheme?.lowercased() ?? "") else { return "unavailable" }
-        parts.user = nil; parts.password = nil; parts.fragment = nil
-        let allowedPaths: Set<String> = ["", "/", "/en/account/pledges", "/account/pledges",
-            "/en/account/buy-back-pledges", "/account/buy-back-pledges", "/en/account/login", "/en/login", "/login"]
-        if !allowedPaths.contains(parts.path) { parts.path = "/[redacted-path]" }
-        let safeQuery = Array((parts.queryItems ?? []).filter {
-            guard ["page", "pagesize"].contains($0.name.lowercased()), let value = $0.value,
-                  !value.isEmpty, value.count <= 6 else { return false }
-            return value.utf8.allSatisfy { (48...57).contains($0) }
-        }.prefix(2))
-        parts.queryItems = safeQuery.isEmpty ? nil : safeQuery
-        return String((parts.string ?? "unavailable").prefix(600))
-    }
+    static func safeURL(_ url: URL?) -> String { DiagnosticPrivacy.safeURL(url) }
 
     static func text(_ value: String, secrets: [String] = [], limit: Int = 500) -> String {
-        // Omit an oversized message wholesale rather than slicing through a
-        // credential or running regular expressions over an unbounded string.
-        guard value.utf8.count <= 2_048 else { return "[message omitted: exceeds diagnostic length limit]" }
-        var value = value
-        for secret in secrets.filter({ !$0.isEmpty }).sorted(by: { $0.count > $1.count }) {
-            value = value.replacingOccurrences(of: secret, with: "[redacted]")
-        }
-        if let regex = try? NSRegularExpression(pattern: #"https?://[^\s<>\"']+"#, options: .caseInsensitive) {
-            for match in regex.matches(in: value, range: NSRange(value.startIndex..., in: value)).reversed() {
-                guard let range = Range(match.range, in: value) else { continue }
-                value.replaceSubrange(range, with: safeURL(URL(string: String(value[range]))))
-            }
-        }
-        // Header-like lines and labeled credentials can occur inside system error text.
-        value = value.replacingOccurrences(of: #"(?im)\b(?:authorization|cookie|set-cookie|x-rsi-token|x-rsi-device)\s*[:=][^\r\n]*"#,
-            with: "[redacted credential field]", options: .regularExpression)
-        value = value.replacingOccurrences(of: #"(?i)\bBearer\s+[^\s,;]+"#, with: "Bearer [redacted]", options: .regularExpression)
-        value = value.replacingOccurrences(of: #"(?i)\b(?:password|rsi-token|_rsi_device|token|access_token|refresh_token|code)\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"#,
-            with: "[redacted credential field]", options: .regularExpression)
-        if value.contains("@") {
-            value = value.replacingOccurrences(of: #"(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}"#, with: "[redacted email]", options: .regularExpression)
-        }
-        value = value.components(separatedBy: .newlines).joined(separator: " ")
-        return String(value.prefix(limit))
+        let safe = DiagnosticPrivacy.text(value, secrets: secrets, limit: 2_048)
+        return String(safe.components(separatedBy: .newlines).joined(separator: " ").prefix(limit))
     }
 
     static func errorLines(_ error: Error, secrets: [String] = []) -> [String] {
@@ -53,7 +16,7 @@ nonisolated enum RSINetworkDiagnostics {
         var seen: Set<ObjectIdentifier> = []
         var lines: [String] = [], index = 0
         var truncated = false
-        let numericKeys = ["_kCFStreamErrorDomainKey", "_kCFStreamErrorCodeKey",
+        let numericKeys = ["RSIHTTPStatusCode", "RSIResponseBytes", "_kCFStreamErrorDomainKey", "_kCFStreamErrorCodeKey",
             "_kCFNetworkCFStreamSSLErrorOriginalValue", "_kCFStreamPropertySSLClientCertificateState"]
         while !queue.isEmpty, index < 8 {
             let (error, depth) = queue.removeFirst()
@@ -170,8 +133,8 @@ nonisolated struct RSINetworkTransaction: Sendable {
 }
 
 /// One short-lived collector per request, including shipping Release builds.
-/// Authentication challenges and redirects retain Foundation's default handling.
-nonisolated final class RSIRequestMetricsDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+/// Redirects use the shared authenticated origin policy. TLS trust remains system-managed.
+nonisolated final class RSIRequestMetricsDelegate: RSIAuthenticatedRedirectDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var transactions: [RSINetworkTransaction] = []
     private var transactionCount: Int?
@@ -180,7 +143,10 @@ nonisolated final class RSIRequestMetricsDelegate: NSObject, URLSessionTaskDeleg
     private var waitedForConnectivity = false
     private let profilingDelegate: (any URLSessionTaskDelegate)?
 
-    init(profilingDelegate: (any URLSessionTaskDelegate)? = nil) { self.profilingDelegate = profilingDelegate }
+    init(cookies: [SessionCookie] = [], profilingDelegate: (any URLSessionTaskDelegate)? = nil) {
+        self.profilingDelegate = profilingDelegate
+        super.init(cookies: cookies)
+    }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
         let values = metrics.transactionMetrics.suffix(6).map(RSINetworkTransaction.init)

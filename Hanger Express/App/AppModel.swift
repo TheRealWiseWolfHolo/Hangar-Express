@@ -840,6 +840,11 @@ final class AppModel {
     private static let itemTranslationPreloadMaximumLogEntries = 80
     private static let itemTranslationPendingPreloadLanguageDefaultsKey = "hangar.itemTranslation.pendingPreloadLanguage"
     private static let versionUpdateNoteKeysByShortVersion: [String: [String]] = [
+        "1.1.2": [
+            "Sign-in and checkout now check trusted RSI pages before using your saved credentials.",
+            "Saved account cookies stay isolated when you shop, switch accounts, or finish a browser session.",
+            "Support logs hide more private details, and copied diagnostics stay on this device with a time limit."
+        ],
         "1.1.1": [
             "Upgrade target selection and confirmation now have Chinese text and show available Hangar item translations.",
             "Early Access refresh now defaults to five parallel workers; Standard stays at two.",
@@ -4318,6 +4323,9 @@ final class AppModel {
         if previousSessionID != snapshot.activeSession?.id && !accountTransitionInProgress { invalidateAccountWork() }
         session = snapshot.activeSession
         savedSessions = snapshot.savedSessions
+        let secrets = snapshot.savedSessions.flatMap(DiagnosticPrivacy.sensitiveValues)
+        authDiagnostics.protect(values: secrets)
+        refreshDiagnostics.protect(values: secrets)
 
         guard resetContent || previousSessionID != snapshot.activeSession?.id else {
             return
@@ -4341,6 +4349,7 @@ final class AppModel {
         refreshDiagnostics.reset(
             context: context ?? "Starting a \(refreshScopeDisplayName(scope).lowercased()) refresh."
         )
+        refreshDiagnostics.protect(values: DiagnosticPrivacy.sensitiveValues(for: session))
         refreshDiagnostics.record(
             stage: "refresh.context",
             summary: "Prepared the \(refreshScopeDisplayName(scope).lowercased()) refresh pipeline.",
@@ -4359,7 +4368,7 @@ final class AppModel {
         scope: RefreshScope,
         error: Error
     ) {
-        lastRefreshErrorMessage = message
+        lastRefreshErrorMessage = refreshDiagnostics.redacted(message)
         lastRefreshErrorScope = scope
         recordRefreshFailure(message, scope: scope, error: error)
     }

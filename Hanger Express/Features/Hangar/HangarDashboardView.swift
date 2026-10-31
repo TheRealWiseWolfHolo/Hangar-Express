@@ -218,7 +218,7 @@ struct HangarDashboardView: View {
                                 Divider()
 
                                 Button {
-                                    UIPasteboard.general.string = hangarCardDebugExport(for: packageGroup)
+                                    DiagnosticPrivacy.copy(hangarCardDebugExport(for: packageGroup))
                                 } label: {
                                     Label("Copy Raw Card Data", systemImage: "doc.on.doc")
                                 }
@@ -654,7 +654,7 @@ struct HangarDashboardView: View {
         }
 
         if autoCopiesSharePictureDebugLog {
-            UIPasteboard.general.string = hangarCardDebugExport(for: packageGroup)
+            DiagnosticPrivacy.copy(hangarCardDebugExport(for: packageGroup))
         }
 
         do {
@@ -1654,11 +1654,11 @@ struct HangarPackageDetailView: View {
         }
 
         if autoCopiesSharePictureDebugLog {
-            UIPasteboard.general.string = HangarCardDebugExporter.string(
+            DiagnosticPrivacy.copy(HangarCardDebugExporter.string(
                 for: packageGroup,
                 showsUpgradedShipInHangar: appModel.showsUpgradedShipInHangar,
                 compositeUpgradeThumbnailsEnabled: appModel.compositeUpgradeThumbnailsEnabled
-            )
+            ))
         }
 
         do {

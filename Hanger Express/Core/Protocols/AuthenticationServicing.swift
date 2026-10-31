@@ -28,6 +28,19 @@ final class AuthenticationDiagnosticsStore {
         }()
     }
 
+    private var protectedValues: [String] = []
+
+    func protect(values: [String]) {
+        var seen: Set<String> = []
+        protectedValues = (values + protectedValues).filter {
+            !$0.isEmpty && $0.utf8.prefix(16_385).count <= 16_384 && seen.insert($0).inserted
+        }.prefix(512).map { $0 }
+    }
+
+    func redacted(_ value: String) -> String {
+        DiagnosticPrivacy.text(value, secrets: protectedValues)
+    }
+
     private(set) var entries: [Entry] = []
 
     var latestEntries: [Entry] {
@@ -40,6 +53,7 @@ final class AuthenticationDiagnosticsStore {
 
     func reset(context: String? = nil) {
         entries.removeAll()
+        protectedValues.removeAll()
 
         if let context, !context.isEmpty {
             record(stage: "auth.attempt", summary: context)
@@ -52,17 +66,17 @@ final class AuthenticationDiagnosticsStore {
         detail: String? = nil,
         level: Entry.Level = .info
     ) {
-        let trimmedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedSummary = DiagnosticPrivacy.text(summary, secrets: protectedValues, limit: 2_048).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedSummary.isEmpty else {
             return
         }
 
-        let trimmedDetail = detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDetail = detail.map { DiagnosticPrivacy.text($0, secrets: protectedValues) }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         entries.append(
             Entry(
                 timestamp: .now,
                 level: level,
-                stage: stage,
+                stage: DiagnosticPrivacy.text(stage, secrets: protectedValues, limit: 200),
                 summary: trimmedSummary,
                 detail: trimmedDetail?.isEmpty == false ? trimmedDetail : nil
             )
@@ -85,9 +99,18 @@ protocol AuthenticationServicing: Sendable {
     func submitTwoFactor(code: String, deviceName: String, trustDuration: TrustedDeviceDuration) async throws -> UserSession
     func beginReadOnlySignIn() async throws -> SignInOutcome
     func rememberBrowserExportedCookies(_ cookies: [SessionCookie]) async
+    func browserSessionIdentifier() async -> UUID?
+    func rememberBrowserExportedCookies(_ cookies: [SessionCookie], sessionIdentifier: UUID?) async
     func canCompleteBrowserAuthentication(cookies: [SessionCookie]) async -> Bool
     func completeBrowserAuthentication(cookies: [SessionCookie], trustBrowserSession: Bool) async throws -> UserSession
     func cancelPendingAuthentication() async
+}
+
+extension AuthenticationServicing {
+    func browserSessionIdentifier() async -> UUID? { nil }
+    func rememberBrowserExportedCookies(_ cookies: [SessionCookie], sessionIdentifier: UUID?) async {
+        await rememberBrowserExportedCookies(cookies)
+    }
 }
 
 enum SignInOutcome: Sendable {

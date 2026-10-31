@@ -71,6 +71,8 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
         failReadyWaiters(with: AuthenticationError.unavailable("The RSI verification helper was released before it finished loading."))
     }
 
+    func owns(_ webView: WKWebView) -> Bool { self.webView === webView }
+
     func markReady() {
         isReady = true
         isPreparing = false
@@ -140,9 +142,11 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
             summary: "Starting the GraphQL sign-in flow inside the RSI verification helper.",
             detail: "loginIdentifier=\(maskedIdentifier(loginIdentifier)), rememberMe=\(rememberMe)"
         )
+        let generation = preparationGeneration
         try await awaitReady()
+        try Task.checkCancellation()
 
-        guard let webView else {
+        guard generation == preparationGeneration, let webView, RSISecurityPolicy.isTrustedOrigin(webView.url) else {
             diagnostics.record(
                 stage: "recaptcha.graphql-signin",
                 summary: "The RSI verification helper web view was unavailable during GraphQL sign-in.",
@@ -153,6 +157,7 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
 
         do {
             let script = """
+            \(RSISecurityPolicy.javaScriptOriginGuard)
             const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
             if (!csrfToken) {
               throw new Error("The RSI page did not expose a CSRF token.");
@@ -239,9 +244,11 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
             summary: "Submitting the RSI verification code inside the verification helper.",
             detail: "deviceName=\(deviceName), trustDuration=\(trustDuration.rawValue)"
         )
+        let generation = preparationGeneration
         try await awaitReady()
+        try Task.checkCancellation()
 
-        guard let webView else {
+        guard generation == preparationGeneration, let webView, RSISecurityPolicy.isTrustedOrigin(webView.url) else {
             diagnostics.record(
                 stage: "recaptcha.graphql-two-factor",
                 summary: "The RSI verification helper web view was unavailable during verification-code submission.",
@@ -252,6 +259,7 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
 
         do {
             let script = """
+            \(RSISecurityPolicy.javaScriptOriginGuard)
             const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
             if (!csrfToken) {
               throw new Error("The RSI page did not expose a CSRF token.");
@@ -475,7 +483,7 @@ final class RecaptchaBroker: NSObject, @unchecked Sendable, AuthenticationWebSes
 
 private extension HTTPCookie {
     var isRSICookie: Bool {
-        domain.contains("robertsspaceindustries.com")
+        RSISecurityPolicy.accepts(SessionCookie(self))
     }
 }
 
@@ -488,7 +496,7 @@ struct RecaptchaBridgeView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
+        configuration.websiteDataStore = .nonPersistent()
         configuration.mediaTypesRequiringUserActionForPlayback = .all
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
@@ -521,18 +529,29 @@ struct RecaptchaBridgeView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            Task { @MainActor in
-                broker.markReady()
-            }
+            guard broker.owns(webView), RSISecurityPolicy.isTrustedOrigin(webView.url) else { return }
+            broker.markReady()
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            decisionHandler(action.targetFrame?.isMainFrame == false || RSISecurityPolicy.isTrustedOrigin(action.request.url) ? .allow : .cancel)
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
+                     decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+            decisionHandler(!response.isForMainFrame || RSISecurityPolicy.isTrustedOrigin(response.response.url) ? .allow : .cancel)
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            guard broker.owns(webView) else { return }
             Task { @MainActor in
                 broker.markFailed(error)
             }
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            guard broker.owns(webView) else { return }
             Task { @MainActor in
                 broker.markFailed(error)
             }

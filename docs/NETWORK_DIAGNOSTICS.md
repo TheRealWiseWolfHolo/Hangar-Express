@@ -2,8 +2,9 @@
 
 The existing Copy Logs / Refresh Debug Report includes request diagnostics in
 normal Release builds. No profiling launch flag or developer mode is required.
-This adds observations; request URLs, timeouts, retries and system certificate
-validation keep their existing behavior.
+Version 1.1.2 also applies the shared authenticated redirect policy described in
+[App security](SECURITY.md). Timeouts, retries and system certificate validation
+retain their existing behavior.
 
 The report header identifies format 2 and records UTC generation time and the
 device time-zone offset. Every direct inventory request gets its own request ID.
@@ -39,8 +40,10 @@ certificates, raw account HTML or connection IP addresses. Only numeric `page` a
 `pagesize` URL parameters survive; URL credentials, fragments, other parameters and
 unrecognized paths are removed. Known authentication values, credential-like fields
 and email addresses in error descriptions are redacted. The existing report still
-contains existing account-context fields such as the account handle; this is not a
-claim that the entire legacy support report is anonymous.
+uses the shared redaction policy for account-context fields and exported errors.
+Reports are bounded to 64 KiB; copied diagnostics are local-only and expire after
+ten minutes. They still contain support metadata such as timestamps, request IDs
+and version/device information, so this is not a claim of complete anonymity.
 
 A proxy flag only reflects what Foundation reported; it cannot reliably identify
 all VPNs or explain a specific TLS failure. Missing metrics are not proof of a

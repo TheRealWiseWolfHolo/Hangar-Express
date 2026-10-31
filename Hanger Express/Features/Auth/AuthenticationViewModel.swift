@@ -13,6 +13,7 @@ final class AuthenticationViewModel {
 
     struct BrowserChallenge: Identifiable, Hashable {
         let id = UUID()
+        let flowID: UUID
         let message: String
         let loginIdentifier: String
         let password: String
@@ -80,6 +81,7 @@ final class AuthenticationViewModel {
             guard isCurrentRequest(id, flowID: flowID) else { return }
             if case let AuthenticationError.requiresBrowserChallenge(message) = error {
                 browserChallenge = BrowserChallenge(
+                    flowID: flowID,
                     message: message,
                     loginIdentifier: loginIdentifier,
                     password: password
@@ -157,6 +159,7 @@ final class AuthenticationViewModel {
             guard isCurrentRequest(id, flowID: flowID) else { return }
             if case let AuthenticationError.requiresBrowserChallenge(message) = error {
                 browserChallenge = BrowserChallenge(
+                    flowID: flowID,
                     message: message,
                     loginIdentifier: loginIdentifier,
                     password: password
@@ -199,20 +202,17 @@ final class AuthenticationViewModel {
         } catch {
             guard isCurrentRequest(id, flowID: flowID) else { return AppLocalizer.string("Sign-in was cancelled.") }
             let presentation = AuthenticationDebugFormatter.present(error)
-            errorMessage = presentation.message
-            errorDebugDetails = presentation.debugDetails
+            errorMessage = appModel.authDiagnostics.redacted(presentation.message)
+            errorDebugDetails = presentation.debugDetails.map(appModel.authDiagnostics.redacted)
             if let debugDetails = presentation.debugDetails {
-                return """
-                \(presentation.message)
-
-                \(debugDetails)
-                """
+                return appModel.authDiagnostics.redacted(presentation.message + "\n\n" + debugDetails)
             }
-            return presentation.message
+            return appModel.authDiagnostics.redacted(presentation.message)
         }
     }
 
     func cancelBrowserChallenge() {
+        password = ""
         requestID = UUID()
         browserChallenge = nil
         verificationCode = ""
@@ -229,6 +229,7 @@ final class AuthenticationViewModel {
     }
 
     func returnToSignIn() {
+        password = ""
         requestID = UUID()
         clearMessages()
         verificationCode = ""
@@ -266,6 +267,7 @@ final class AuthenticationViewModel {
             verificationCode = ""
         case let .requiresBrowserChallenge(message):
             browserChallenge = BrowserChallenge(
+                flowID: flowID,
                 message: message,
                 loginIdentifier: browserLoginIdentifier,
                 password: browserPassword
@@ -279,8 +281,8 @@ final class AuthenticationViewModel {
 
     private func showError(_ error: Error) {
         let presentation = AuthenticationDebugFormatter.present(error)
-        errorMessage = presentation.message
-        errorDebugDetails = presentation.debugDetails
+        errorMessage = appModel.authDiagnostics.redacted(presentation.message)
+        errorDebugDetails = presentation.debugDetails.map(appModel.authDiagnostics.redacted)
     }
 
     private func clearMessages() {
@@ -304,20 +306,13 @@ struct AuthenticationErrorPresentation: Sendable {
 }
 
 enum AuthenticationDebugFormatter {
-    nonisolated private static let javaScriptExceptionKeys = [
-        "WKJavaScriptExceptionMessage",
-        "WKJavaScriptExceptionLineNumber",
-        "WKJavaScriptExceptionColumnNumber",
-        "WKJavaScriptExceptionSourceURL"
-    ]
-
     nonisolated static func present(_ error: Error) -> AuthenticationErrorPresentation {
         let debugDetails = debugDescription(for: error)
         let message = preferredMessage(for: error, debugDetails: debugDetails)
 
         return AuthenticationErrorPresentation(
-            message: message,
-            debugDetails: debugDetails == message ? nil : debugDetails
+            message: DiagnosticPrivacy.text(message),
+            debugDetails: debugDetails == message ? nil : DiagnosticPrivacy.text(debugDetails)
         )
     }
 
@@ -332,11 +327,6 @@ enum AuthenticationDebugFormatter {
             return javaScriptMessage
         }
 
-        if let responseBody = rsiResponseBody(from: nsError) {
-            let localizedDescription = nsError.localizedDescription.trimmedNonEmpty ?? "RSI returned an unexpected response."
-            return "\(localizedDescription)\n\n\(responseBody)"
-        }
-
         if let localizedDescription = nsError.localizedDescription.trimmedNonEmpty,
            !isGenericMessage(localizedDescription) {
             return localizedDescription
@@ -346,87 +336,21 @@ enum AuthenticationDebugFormatter {
     }
 
     nonisolated static func debugDescription(for error: Error) -> String {
-        var lines: [String] = []
-        append(error, title: "Error", into: &lines, indent: "")
-        return lines.joined(separator: "\n")
-    }
-
-    nonisolated private static func append(_ error: Error, title: String, into lines: inout [String], indent: String) {
         let nsError = error as NSError
-
-        lines.append("\(indent)\(title)")
-        lines.append("\(indent)type: \(String(reflecting: type(of: error)))")
-        lines.append("\(indent)localizedDescription: \(nsError.localizedDescription)")
-        lines.append("\(indent)domain: \(nsError.domain)")
-
-        if let codeName = webKitCodeName(for: nsError) {
-            lines.append("\(indent)code: \(nsError.code) (\(codeName))")
-        } else {
-            lines.append("\(indent)code: \(nsError.code)")
+        var lines = ["Error", "type: \(String(reflecting: type(of: error)))"]
+        if let name = webKitCodeName(for: nsError) { lines.append("webKitCode=\(name)") }
+        lines += RSINetworkDiagnostics.errorLines(error)
+        if let message = nsError.userInfo["WKJavaScriptExceptionMessage"] as? String {
+            lines.append("javascriptMessage: \(DiagnosticPrivacy.text(message, limit: 2_048))")
         }
-
-        let javaScriptDetails = javaScriptDetails(from: nsError)
-        if !javaScriptDetails.isEmpty {
-            lines.append("\(indent)javascriptDetails:")
-            javaScriptDetails.forEach { lines.append("\(indent)- \($0)") }
+        for key in ["WKJavaScriptExceptionLineNumber", "WKJavaScriptExceptionColumnNumber"] {
+            if let value = nsError.userInfo[key] as? NSNumber { lines.append("\(key): \(value)") }
         }
-
-        let renderedUserInfo = renderUserInfo(nsError.userInfo)
-        if !renderedUserInfo.isEmpty {
-            lines.append("\(indent)userInfo:")
-            renderedUserInfo.forEach { lines.append("\(indent)- \($0)") }
-        }
-
-        if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
-            append(underlyingError, title: "Underlying Error", into: &lines, indent: indent + "  ")
-        }
-    }
-
-    nonisolated private static func javaScriptDetails(from error: NSError) -> [String] {
-        javaScriptExceptionKeys.compactMap { key in
-            guard let value = error.userInfo[key] else {
-                return nil
-            }
-
-            return "\(key): \(render(value))"
-        }
-    }
-
-    nonisolated private static func renderUserInfo(_ userInfo: [String: Any]) -> [String] {
-        userInfo.keys.sorted().compactMap { key in
-            guard key != NSUnderlyingErrorKey else {
-                return nil
-            }
-
-            guard let value = userInfo[key] else {
-                return nil
-            }
-
-            return "\(key): \(render(value))"
-        }
+        return DiagnosticPrivacy.report(lines)
     }
 
     nonisolated private static func render(_ value: Any) -> String {
-        if let error = value as? NSError {
-            return "\(error.domain) (\(error.code)): \(error.localizedDescription)"
-        }
-
-        if let url = value as? URL {
-            return url.absoluteString
-        }
-
-        if let array = value as? [Any] {
-            return "[" + array.map(render).joined(separator: ", ") + "]"
-        }
-
-        if let dictionary = value as? [String: Any] {
-            return "{" + dictionary.keys.sorted().map { key in
-                let renderedValue = dictionary[key].map(render) ?? "nil"
-                return "\(key): \(renderedValue)"
-            }.joined(separator: ", ") + "}"
-        }
-
-        return String(describing: value)
+        (value as? NSNumber)?.stringValue ?? "unavailable"
     }
 
     nonisolated private static func webKitCodeName(for error: NSError) -> String? {
@@ -498,20 +422,6 @@ enum AuthenticationDebugFormatter {
         }
 
         return summary
-    }
-
-    nonisolated private static func rsiResponseBody(from error: NSError) -> String? {
-        guard error.domain == "RSIAuthService",
-              let rawBody = error.userInfo["RSIResponseBody"] as? String else {
-            return nil
-        }
-
-        let trimmedBody = rawBody.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedBody.isEmpty else {
-            return nil
-        }
-
-        return trimmedBody
     }
 
     nonisolated private static func isGenericMessage(_ message: String) -> Bool {

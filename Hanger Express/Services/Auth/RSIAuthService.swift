@@ -66,6 +66,7 @@ actor RSIAuthService: AuthenticationServicing {
     private var pendingBrowserCredentials: AccountCredentials?
     private var pendingBrowserIsReadOnly = false
     private var pendingBrowserExportedCookies: [SessionCookie] = []
+    private var browserSessionGeneration = UUID()
 
     init(
         recaptchaBroker: any AuthenticationWebSessionProviding,
@@ -99,14 +100,20 @@ actor RSIAuthService: AuthenticationServicing {
         }
 
         let credentials = AccountCredentials(loginIdentifier: trimmedLoginIdentifier, password: password)
+        browserSessionGeneration = UUID()
+        let generation = browserSessionGeneration
         await resetDiagnostics(
             context: "Starting sign-in for \(maskedIdentifier(trimmedLoginIdentifier))."
         )
+        guard generation == browserSessionGeneration else { throw CancellationError() }
+        await MainActor.run { diagnostics.protect(values: [trimmedLoginIdentifier, password]) }
+        guard generation == browserSessionGeneration else { throw CancellationError() }
         await log(
             stage: "auth.sign-in",
             summary: "Starting the RSI sign-in pipeline.",
             detail: "loginIdentifier=\(maskedIdentifier(trimmedLoginIdentifier)), rememberMe=\(rememberMe), forceBrowserLogin=\(forceBrowserLogin)"
         )
+        try requireBrowserSession(generation)
         pendingCredentials = nil
         pendingRememberMe = rememberMe
         pendingBrowserCredentials = nil
@@ -136,12 +143,14 @@ actor RSIAuthService: AuthenticationServicing {
                 stage: "auth.launcher-sign-in",
                 summary: "Submitting credentials through RSI's native launcher sign-in API."
             )
+            try requireBrowserSession(generation)
             let response = try await launcherClient.signIn(
                 loginIdentifier: trimmedLoginIdentifier,
                 password: password,
                 rememberMe: rememberMe
             )
 
+            try requireBrowserSession(generation)
             if response.code == "ErrCaptchaRequiredLauncher" {
                 pendingCredentials = credentials
                 let image = try await launcherClient.captchaImage()
@@ -167,6 +176,7 @@ actor RSIAuthService: AuthenticationServicing {
 
             let cookies = await launcherClient.currentCookies()
             let session = try await completeAuthentication(credentials: credentials, cookies: cookies)
+            try requireBrowserSession(generation)
             pendingCredentials = nil
             await log(
                 stage: "auth.launcher-sign-in",
@@ -185,6 +195,7 @@ actor RSIAuthService: AuthenticationServicing {
     }
 
     func submitCaptcha(_ code: String) async throws -> SignInOutcome {
+        let generation = browserSessionGeneration
         let trimmedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedCode.isEmpty else {
             throw AuthenticationError.invalidInput("Enter the characters shown in the RSI CAPTCHA image.")
@@ -200,24 +211,30 @@ actor RSIAuthService: AuthenticationServicing {
             captcha: trimmedCode
         )
 
+        try requireBrowserSession(generation)
         if response.code == "ErrCaptchaRequiredLauncher" {
             return .requiresCaptcha(try await launcherClient.captchaImage())
         }
         if response.code == "ErrMultiStepRequired" {
             return .requiresTwoFactor
         }
+        try requireBrowserSession(generation)
         guard response.succeeded else {
             throw AuthenticationError.signInFailed(friendlyLauncherMessage(response))
         }
 
         let cookies = await launcherClient.currentCookies()
         let session = try await completeAuthentication(credentials: pendingCredentials, cookies: cookies)
+        try requireBrowserSession(generation)
         self.pendingCredentials = nil
         return .authenticated(session)
     }
 
     func beginReadOnlySignIn() async throws -> SignInOutcome {
+        browserSessionGeneration = UUID()
+        let generation = browserSessionGeneration
         await resetDiagnostics(context: "Starting read-only browser sign-in.")
+        guard generation == browserSessionGeneration else { throw CancellationError() }
         pendingCredentials = nil
         pendingBrowserCredentials = nil
         pendingBrowserIsReadOnly = true
@@ -231,14 +248,17 @@ actor RSIAuthService: AuthenticationServicing {
         credentials: AccountCredentials,
         rememberMe: Bool
     ) async throws -> SignInOutcome {
+        let generation = browserSessionGeneration
         do {
             try await webSession.resetAuthenticationSession()
+            try requireBrowserSession(generation)
             let signInResponse = try await webSession.signIn(
                 loginIdentifier: credentials.loginIdentifier,
                 password: credentials.password,
                 rememberMe: rememberMe,
                 query: Self.signInMutation
             )
+            try requireBrowserSession(generation)
             let response = try decodeGraphQL(signInResponse, context: "signin")
             let errors = response.errors ?? []
 
@@ -253,6 +273,7 @@ actor RSIAuthService: AuthenticationServicing {
                     credentials: credentials,
                     cookies: try await webSession.currentRSICookies()
                 )
+                try requireBrowserSession(generation)
                 pendingCredentials = nil
                 return .authenticated(session)
             }
@@ -270,6 +291,7 @@ actor RSIAuthService: AuthenticationServicing {
                         credentials: credentials,
                         cookies: cookies
                     )
+                    try requireBrowserSession(generation)
                     pendingCredentials = nil
                     await log(
                         stage: "auth.graphql-sign-in",
@@ -300,7 +322,9 @@ actor RSIAuthService: AuthenticationServicing {
             )
             throw AuthenticationError.signInFailed(message)
         } catch {
+            try requireBrowserSession(generation)
             if shouldSuggestBrowserLogin(for: error) {
+                try requireBrowserSession(generation)
                 pendingCredentials = nil
                 pendingBrowserCredentials = credentials
                 await log(
@@ -323,6 +347,7 @@ actor RSIAuthService: AuthenticationServicing {
     }
 
     func submitTwoFactor(code: String, deviceName: String, trustDuration: TrustedDeviceDuration) async throws -> UserSession {
+        let generation = browserSessionGeneration
         let trimmedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedDeviceName = deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -358,17 +383,20 @@ actor RSIAuthService: AuthenticationServicing {
             detail: "deviceName=\(trimmedDeviceName), trustDuration=\(trustDuration.rawValue)"
         )
 
+        try requireBrowserSession(generation)
         let response = try await launcherClient.submitTwoFactor(
             code: trimmedCode,
             deviceName: trimmedDeviceName,
             trustDuration: trustDuration
         )
+        try requireBrowserSession(generation)
         guard response.succeeded else {
             throw AuthenticationError.signInFailed(friendlyLauncherMessage(response))
         }
 
         let cookies = await launcherClient.currentCookies()
         let session = try await completeAuthentication(credentials: pendingCredentials, cookies: cookies)
+        try requireBrowserSession(generation)
         self.pendingCredentials = nil
         return session
     }
@@ -379,12 +407,14 @@ actor RSIAuthService: AuthenticationServicing {
         trustDuration: TrustedDeviceDuration,
         credentials: AccountCredentials
     ) async throws -> UserSession {
+        let generation = browserSessionGeneration
         let rawResponse = try await webSession.submitTwoFactor(
             code: code,
             deviceName: deviceName,
             trustDuration: trustDuration,
             query: Self.twoFactorMutation
         )
+        try requireBrowserSession(generation)
         let response = try decodeGraphQL(rawResponse, context: "multistep")
         if let account = response.authenticatedAccount(for: "account_multistep") {
             let session = makeSession(
@@ -392,12 +422,14 @@ actor RSIAuthService: AuthenticationServicing {
                 credentials: credentials,
                 cookies: try await webSession.currentRSICookies()
             )
+            try requireBrowserSession(generation)
             pendingCredentials = nil
             return session
         }
 
         let errors = response.errors ?? []
         if errors.contains(where: \.hasExpiredCSRFContext) {
+            try requireBrowserSession(generation)
             pendingCredentials = nil
             throw AuthenticationError.pendingVerificationExpired
         }
@@ -418,6 +450,9 @@ actor RSIAuthService: AuthenticationServicing {
     }
 
     func completeBrowserAuthentication(cookies: [SessionCookie], trustBrowserSession: Bool) async throws -> UserSession {
+        let generation = browserSessionGeneration
+        let credentials = pendingBrowserCredentials
+        let isReadOnly = pendingBrowserIsReadOnly
         guard pendingBrowserCredentials != nil || pendingBrowserIsReadOnly else {
             await log(
                 stage: "auth.browser-complete",
@@ -445,11 +480,13 @@ actor RSIAuthService: AuthenticationServicing {
         )
 
         do {
+            guard generation == browserSessionGeneration else { throw CancellationError() }
             let session = try await completeAuthentication(
-                credentials: pendingBrowserCredentials,
+                credentials: credentials,
                 cookies: exportedCookies,
-                accessLevel: pendingBrowserIsReadOnly ? .readOnly : .full
+                accessLevel: isReadOnly ? .readOnly : .full
             )
+            guard generation == browserSessionGeneration else { throw CancellationError() }
             self.pendingBrowserCredentials = nil
             self.pendingBrowserIsReadOnly = false
             self.pendingBrowserExportedCookies = []
@@ -459,6 +496,7 @@ actor RSIAuthService: AuthenticationServicing {
             )
             return session
         } catch let authError as AuthenticationError {
+            guard generation == browserSessionGeneration else { throw CancellationError() }
             if trustBrowserSession {
                 await log(
                     stage: "auth.browser-complete",
@@ -470,6 +508,7 @@ actor RSIAuthService: AuthenticationServicing {
             }
             throw authError
         } catch {
+            guard generation == browserSessionGeneration, !(error is CancellationError) else { throw CancellationError() }
             let wrappedError = AuthenticationError.unavailable(
                 "Hangar Express could not confirm the exported RSI browser session. \(error.localizedDescription)"
             )
@@ -486,7 +525,18 @@ actor RSIAuthService: AuthenticationServicing {
         }
     }
 
+    func browserSessionIdentifier() async -> UUID? {
+        pendingBrowserCredentials != nil || pendingBrowserIsReadOnly ? browserSessionGeneration : nil
+    }
+
     func rememberBrowserExportedCookies(_ cookies: [SessionCookie]) async {
+        await rememberBrowserExportedCookies(cookies, sessionIdentifier: browserSessionGeneration)
+    }
+
+    func rememberBrowserExportedCookies(_ cookies: [SessionCookie], sessionIdentifier: UUID?) async {
+        guard sessionIdentifier == browserSessionGeneration,
+              pendingBrowserCredentials != nil || pendingBrowserIsReadOnly else { return }
+        let generation = browserSessionGeneration
         guard !cookies.isEmpty else {
             await log(
                 stage: "auth.browser-cache",
@@ -497,6 +547,8 @@ actor RSIAuthService: AuthenticationServicing {
             return
         }
 
+        await MainActor.run { diagnostics.protect(values: cookies.map(\.value)) }
+        guard generation == browserSessionGeneration else { return }
         pendingBrowserExportedCookies = cloneCookies(cookies)
         await log(
             stage: "auth.browser-cache",
@@ -519,6 +571,8 @@ actor RSIAuthService: AuthenticationServicing {
     }
 
     func cancelPendingAuthentication() async {
+        browserSessionGeneration = UUID()
+        let generation = browserSessionGeneration
         pendingCredentials = nil
         pendingBrowserCredentials = nil
         pendingBrowserIsReadOnly = false
@@ -527,7 +581,12 @@ actor RSIAuthService: AuthenticationServicing {
             stage: "auth.cancel",
             summary: "Cancelled the pending RSI authentication flow."
         )
+        guard generation == browserSessionGeneration else { return }
         try? await webSession.resetAuthenticationSession()
+    }
+
+    private func requireBrowserSession(_ generation: UUID) throws {
+        guard generation == browserSessionGeneration, !Task.isCancelled else { throw CancellationError() }
     }
 
     private func remapBrowserImportFailure(_ error: AuthenticationError, cookies: [SessionCookie]) -> AuthenticationError {
@@ -592,18 +651,7 @@ actor RSIAuthService: AuthenticationServicing {
     }
 
     private func cloneCookies(_ cookies: [SessionCookie]) -> [SessionCookie] {
-        cookies.map { cookie in
-            SessionCookie(
-                name: cookie.name,
-                value: cookie.value,
-                domain: cookie.domain,
-                path: cookie.path,
-                expiresAt: cookie.expiresAt,
-                isSecure: cookie.isSecure,
-                isHTTPOnly: cookie.isHTTPOnly,
-                version: cookie.version
-            )
-        }
+        RSISessionCookieSet.merging(savedCookies: cookies, refreshedCookies: [])
     }
 
     private func completeAuthentication(
@@ -611,12 +659,15 @@ actor RSIAuthService: AuthenticationServicing {
         cookies: [SessionCookie],
         accessLevel: UserSession.AccessLevel = .full
     ) async throws -> UserSession {
+        let generation = browserSessionGeneration
         await log(
             stage: "auth.account-lookup",
             summary: "Validating the RSI session by loading the authenticated account profile.",
             detail: browserCookieDebugSummary(for: cookies)
         )
+        try requireBrowserSession(generation)
         let account = try await accountFetcher(cookies)
+        try requireBrowserSession(generation)
         await log(
             stage: "auth.account-lookup",
             summary: "RSI account validation succeeded.",
@@ -690,7 +741,7 @@ actor RSIAuthService: AuthenticationServicing {
         let searchSpace = [
             nsError.localizedDescription,
             nsError.userInfo["WKJavaScriptExceptionMessage"] as? String,
-            nsError.userInfo["RSIResponseBody"] as? String
+            nsError.userInfo["RSIVerificationHint"] as? String
         ]
             .compactMap { $0?.lowercased() }
             .joined(separator: " ")
@@ -827,7 +878,8 @@ actor RSIAuthService: AuthenticationServicing {
             NSLocalizedDescriptionKey: reason,
             "RSIAuthContext": context,
             "RSIHTTPStatusCode": response.statusCode,
-            "RSIResponseBody": response.body
+            "RSIResponseBytes": response.body.utf8.count,
+            "RSIVerificationHint": RSISecurityPolicy.verificationHint(in: response.body)
         ]
 
         if let underlyingError {
@@ -897,7 +949,7 @@ private enum AccountSessionClient {
         }
 
         let storage = HTTPCookieStorage()
-        cookies.compactMap(\.httpCookie).forEach(storage.setCookie)
+        RSISessionCookieSet.merging(savedCookies: cookies, refreshedCookies: []).compactMap(\.httpCookie).forEach(storage.setCookie)
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieStorage = storage
@@ -929,8 +981,8 @@ private enum AccountSessionClient {
             ]
         )
 
-        let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
+        let (data, response) = try await session.data(for: request, delegate: RSIAuthenticatedRedirectDelegate(cookies: cookies))
+        guard let httpResponse = response as? HTTPURLResponse, RSISecurityPolicy.sameOrigin(request.url, httpResponse.url) else {
             throw AuthenticationError.unavailable(
                 """
                 Stage: reusable-account-check
@@ -976,28 +1028,21 @@ private enum AccountSessionClient {
             )
         }
 
-        let responseBody = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .prefix(400) ?? ""
-
         throw AuthenticationError.unavailable(
             """
             Stage: reusable-account-check
             Result: RSI accepted the account lookup request, but Hangar Express still could not read an authenticated account profile from the exported browser session.
-            Details: \(debugSummary), responsePreview=\(responseBody.isEmpty ? "n/a" : String(responseBody))
+            Details: \(debugSummary), responseBytes=\(data.count), responseBody=omitted
             """
         )
     }
 
     private static func cookieValue(in cookies: [SessionCookie], names: [String]) -> String? {
-        let lowercaseNames = Set(names.map { $0.lowercased() })
-        return cookies.first { cookie in
-            lowercaseNames.contains(cookie.name.lowercased())
-        }?.value
+        RSISecurityPolicy.cookieValue(names: names, in: cookies)
     }
 
     private static func missingCriticalCookiesMessage(for cookies: [SessionCookie]) -> String? {
-        let lowercasedNames = Set(cookies.map { $0.name.lowercased() })
+        let lowercasedNames = Set(RSISecurityPolicy.applicableCookies(cookies, to: RSISecurityPolicy.graphQLURL).map { $0.name.lowercased() })
         let requiredNames = ["rsi-token", "_rsi_device"]
         let missingNames = requiredNames.filter { !lowercasedNames.contains($0) }
 

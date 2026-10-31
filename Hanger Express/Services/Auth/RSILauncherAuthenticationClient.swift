@@ -89,7 +89,7 @@ actor RSILauncherAuthenticationClient {
     func captchaImage() async throws -> Data {
         var request = try makeRequest(path: "api/launcher/v3/signin/captcha")
         request.httpBody = Data("{}".utf8)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.data(for: request, delegate: RSIAuthenticatedRedirectDelegate(cookies: currentCookies()))
         try validate(response: response, data: data)
         guard !data.isEmpty else {
             throw AuthenticationError.unavailable("RSI returned an empty CAPTCHA image. Try again.")
@@ -99,7 +99,7 @@ actor RSILauncherAuthenticationClient {
 
     func currentCookies() -> [SessionCookie] {
         var cookiesByName: [String: SessionCookie] = [:]
-        for cookie in cookieStorage.cookies ?? [] where cookie.domain.localizedCaseInsensitiveContains("robertsspaceindustries.com") {
+        for cookie in cookieStorage.cookies ?? [] where RSISecurityPolicy.accepts(SessionCookie(cookie)) {
             cookiesByName[cookie.name.lowercased()] = SessionCookie(cookie)
         }
 
@@ -116,7 +116,7 @@ actor RSILauncherAuthenticationClient {
     private func postJSON(path: String, body: [String: Any]) async throws -> RSILauncherSignInResponse {
         var request = try makeRequest(path: path)
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.data(for: request, delegate: RSIAuthenticatedRedirectDelegate(cookies: currentCookies()))
         try validate(response: response, data: data)
 
         do {
@@ -136,7 +136,8 @@ actor RSILauncherAuthenticationClient {
                 code: 1,
                 userInfo: [
                     NSLocalizedDescriptionKey: "RSI returned a launcher sign-in response Hangar Express could not decode.",
-                    "RSIResponseBody": String(data: data, encoding: .utf8) ?? "",
+                    "RSIVerificationHint": RSISecurityPolicy.verificationHint(in: String(decoding: data.prefix(8_192), as: UTF8.self)),
+                    "RSIResponseBytes": data.count,
                     NSUnderlyingErrorKey: error
                 ]
             )
@@ -165,7 +166,7 @@ actor RSILauncherAuthenticationClient {
     }
 
     private func validate(response: URLResponse, data: Data) throws {
-        guard let httpResponse = response as? HTTPURLResponse else {
+        guard let httpResponse = response as? HTTPURLResponse, RSISecurityPolicy.sameOrigin(httpResponse.url, Self.baseURL) else {
             throw AuthenticationError.unavailable("RSI launcher sign-in did not return a valid network response.")
         }
         guard (200 ..< 300).contains(httpResponse.statusCode) else {
@@ -174,7 +175,8 @@ actor RSILauncherAuthenticationClient {
                 code: httpResponse.statusCode,
                 userInfo: [
                     NSLocalizedDescriptionKey: "RSI launcher sign-in returned HTTP \(httpResponse.statusCode).",
-                    "RSIResponseBody": String(data: data, encoding: .utf8) ?? ""
+                    "RSIVerificationHint": RSISecurityPolicy.verificationHint(in: String(decoding: data.prefix(8_192), as: UTF8.self)),
+                    "RSIResponseBytes": data.count
                 ]
             )
         }
