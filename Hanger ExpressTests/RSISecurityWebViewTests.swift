@@ -25,9 +25,11 @@ struct RSISecurityWebViewTests {
         #expect(values?["framePassword"] == "")
     }
 
-    @Test func foreignDocumentReceivesNoAutofillAndRejectsTheInDocumentRaceGuard() async throws {
+    @Test(arguments: ["https://robertsspaceindustries.com.attacker.invalid/",
+                      "https://www.alipay.com/checkout", "https://wx.tenpay.com/checkout"])
+    func foreignDocumentReceivesNoAutofillAndRejectsTheInDocumentRaceGuard(_ rawURL: String) async throws {
         let fixture = SecurityWebViewFixture()
-        try await fixture.load(html: Self.loginHTML, baseURL: URL(string: "https://robertsspaceindustries.com.attacker.invalid/")!)
+        try await fixture.load(html: Self.loginHTML, baseURL: URL(string: rawURL)!)
         #expect(try await RSILoginAutofill.fill(in: fixture.webView, loginIdentifier: "fixture", password: "never-inject") == nil)
         do {
             _ = try await fixture.webView.callAsyncJavaScript(RSILoginAutofill.script,

@@ -401,7 +401,8 @@ struct RSICheckoutWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
                      decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-            decisionHandler(!response.isForMainFrame || RSISecurityPolicy.isTrustedOrigin(response.response.url) ? .allow : .cancel)
+            decisionHandler(RSICheckoutNavigationPolicy.allowsResponse(for: response.response.url,
+                isMainFrame: response.isForMainFrame) ? .allow : .cancel)
         }
 
         private func allCookies(from store: WKHTTPCookieStore) async -> [HTTPCookie] {

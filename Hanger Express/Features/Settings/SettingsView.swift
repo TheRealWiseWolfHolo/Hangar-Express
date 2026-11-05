@@ -63,6 +63,7 @@ struct SettingsView: View {
     @State private var isShowingClearCacheAlert = false
     @State private var isShowingClearTranslationCacheAlert = false
     @State private var isShowingProPlans = false
+    @State private var isShowingFeedback = false
     @State private var itemTranslationState = HangarItemTranslationViewState()
     @State private var cloudDictionaryRefreshState = CloudTranslationDictionaryRefreshState.idle
     @State private var itemTranslationMethodPrompt: AppModel.ItemTranslationMethodPrompt?
@@ -315,6 +316,14 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Button { isShowingFeedback = true } label: {
+                        Label("Feedback", systemImage: "envelope")
+                    }
+                } header: {
+                    Text("Help & Feedback")
+                }
+
+                Section {
                     ForEach(SponsorDirectory.displayedSponsors) { sponsor in
                         HStack(spacing: 10) {
                             Image(systemName: "heart.fill")
@@ -397,6 +406,9 @@ struct SettingsView: View {
                 }
             } message: {
                 Text("Clearing translation cache removes the hosted item translation dictionary and saved on-device translations. Your hangar snapshots, images, accounts, cookies, and credentials are not affected.")
+            }
+            .sheet(isPresented: $isShowingFeedback) {
+                FeedbackView(appModel: appModel)
             }
             .sheet(isPresented: $isShowingProPlans) {
                 ProPlansSheet(

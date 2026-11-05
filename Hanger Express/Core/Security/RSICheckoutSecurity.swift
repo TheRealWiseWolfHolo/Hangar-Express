@@ -9,14 +9,22 @@ nonisolated enum RSICheckoutNavigationPolicy {
             return scheme == "https" || url.absoluteString == "about:blank" ? .inApp : .cancel
         }
         if RSISecurityPolicy.isTrustedOrigin(url) { return .inApp }
-        if scheme == "https", let host = url.host?.lowercased(), url.port == nil || url.port == 443,
-           isUserLink || paymentDomains.contains(where: { host == $0 || host.hasSuffix("." + $0) }) { return .external }
+        if scheme == "https", let host = url.host?.lowercased(), url.port == nil || url.port == 443 {
+            if embeddedPaymentDomains.contains(where: { host == $0 || host.hasSuffix("." + $0) }) { return .inApp }
+            if isUserLink || externalPaymentDomains.contains(where: { host == $0 || host.hasSuffix("." + $0) }) { return .external }
+        }
         if ["alipays", "alipay", "weixin", "wechat", "paypal"].contains(scheme) { return .external }
         return .cancel
     }
 
-    private static let paymentDomains: Set<String> = ["alipay.com", "alipay.hk", "alipayobjects.com", "tenpay.com",
-        "wechatpay.com", "paypal.com", "paypalobjects.com", "unionpay.com", "95516.com"]
+    static func allowsResponse(for url: URL?, isMainFrame: Bool) -> Bool {
+        !isMainFrame || decision(for: url, isMainFrame: true) == .inApp
+    }
+
+    // Browsing permission does not grant native RSI credentials or automation.
+    private static let embeddedPaymentDomains: Set<String> = ["alipay.com", "alipay.hk", "alipayobjects.com",
+        "tenpay.com", "wechatpay.com", "wechatpay.cn", "wechatpay.com.cn", "pay.weixin.qq.com"]
+    private static let externalPaymentDomains: Set<String> = ["paypal.com", "paypalobjects.com", "unionpay.com", "95516.com"]
 }
 
 nonisolated enum RSICheckoutBridgePolicy {

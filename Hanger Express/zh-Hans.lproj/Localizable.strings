@@ -1118,3 +1118,43 @@
 "Saved account cookies stay isolated when you shop, switch accounts, or finish a browser session." = "购物、切换账户和结束浏览器会话时，已保存账户的 Cookie 会保持隔离。";
 
 "Support logs hide more private details, and copied diagnostics stay on this device with a time limit." = "支持日志会隐藏更多隐私信息，复制的诊断仅在本设备剪贴板中限时保留。";
+
+/* Email feedback */
+"Feedback" = "反馈";
+"Email feedback" = "邮件反馈";
+"Copy email address" = "复制邮箱地址";
+"Replies will go to the email address you send from. Your email provider also shares your sender address and display name." = "回复将发送至您的发件邮箱。您的邮件服务商还会提供发件地址和显示名称。";
+"Subject" = "主题";
+"Your message" = "您的留言";
+"Include app and device details" = "附上应用和设备信息";
+"Include diagnostic log" = "附上诊断日志";
+"Diagnostic log" = "诊断日志";
+"Preview diagnostic log" = "预览诊断日志";
+"Optional details" = "可选信息";
+"Logs are off by default. They contain sanitized sign-in and refresh events, timestamps, errors and network details, and may still include activity or inventory details. Review the full log before sharing. No additional account request is made." = "日志默认不附上。日志包含已过滤的登录和刷新事件、时间、错误及网络信息，但仍可能包含操作或库存信息。分享前请预览完整日志。此操作不会额外请求账户数据。";
+"Choose screenshots" = "选择截图";
+"Preparing screenshots…" = "正在处理截图…";
+"A selected picture could not be prepared. Choose up to 3 images under 20 MB each, or remove the selection." = "无法处理所选图片。请选择最多 3 张图片，每张小于 20 MB，或移除所选图片。";
+"Remove %@" = "移除 %@";
+"Remove all screenshots" = "移除全部截图";
+"Screenshots — optional" = "截图（可选）";
+"Only pictures you select are included. Images are resized and saved without original filenames or location metadata. Check the preview for personal information visible in the picture." = "只会附上您选择的图片。图片会缩小并重新保存，不保留原文件名或位置信息。请在预览中检查图片上可见的个人信息。";
+"App and device details" = "应用和设备信息";
+"Not included" = "不附上";
+"Screenshots" = "截图";
+"Email content" = "邮件内容";
+"Preview email content" = "预览邮件内容";
+"Continue to Mail" = "继续前往邮件";
+"Share email draft" = "分享邮件草稿";
+"Review before sending" = "发送前确认";
+"Nothing is sent until you send in your email app. Only your message, the details enabled above, and the listed attachments are prepared. Hangar Express does not upload this draft to a feedback server." = "只有在邮件应用中发送后，内容才会发出。此处仅准备您的留言、上方启用的信息和列出的附件。Hangar Express 不会将此草稿上传至反馈服务器。";
+"Use another email app" = "使用其他邮件应用";
+"Apple Mail is not configured. Choose an email app from the share sheet, then use the recipient shown on the Feedback form. Your message is also included as feedback-message.txt, alongside every selected attachment. Check the recipient, message and attachments in your email app before sending." = "尚未配置 Apple 邮件。请从分享菜单选择邮件应用，并使用反馈页面上显示的收件人。您的留言还会保存为 feedback-message.txt，与所选附件一同提供。发送前请在邮件应用中确认收件人、正文和附件。";
+"Email draft unavailable" = "无法准备邮件草稿";
+"Your feedback has not been sent. Please try again. Your message and selections are still here." = "您的反馈尚未发送，请重试。您的留言和所选内容仍保留在此处。";
+"Help & Feedback" = "帮助与反馈";
+"Email feedback to the developer, with optional diagnostic logs and screenshots you can review before sending." = "可通过邮件向开发者反馈，并在发送前预览可选的诊断日志和截图。";
+
+"Not configured" = "未配置";
+
+"Feedback email is not configured in this build." = "此版本尚未配置反馈邮箱。";

@@ -240,6 +240,103 @@ final class PerformanceUITests: XCTestCase {
     }
 
     @MainActor
+    func testEmailFeedbackPrivacyAndPreview() throws {
+        let app = application()
+        app.launch()
+        assertOfflineFixture(app)
+        app.buttons["Account"].firstMatch.tap()
+        let feedback = app.buttons["Feedback"].firstMatch
+        for _ in 0..<6 where !feedback.isHittable { app.swipeUp() }
+        XCTAssertTrue(feedback.waitForExistence(timeout: 10))
+        feedback.tap()
+        XCTAssertTrue(app.staticTexts["feedback.recipient"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["feedback.recipient"].label.contains("support@example.invalid"))
+        let logs = app.descendants(matching: .any)["feedback.includeLogs"].firstMatch
+        let details = app.descendants(matching: .any)["feedback.includeDetails"].firstMatch
+        for _ in 0..<4 where !logs.exists { app.swipeUp() }
+        XCTAssertEqual(logs.value as? String, "Not included")
+        XCTAssertEqual(details.value as? String, "Not included")
+        let subject = app.textFields["feedback.subject"]
+        for _ in 0..<4 where !subject.isHittable { app.swipeDown() }
+        subject.tap()
+        subject.typeText("Feedback UI fixture")
+        XCTAssertTrue(app.buttons["Hide Keyboard"].waitForExistence(timeout: 5))
+        app.buttons["Hide Keyboard"].tap()
+        let message = app.textViews["feedback.message"]
+        message.tap()
+        message.typeText("A private feedback message for preview only.")
+        if app.buttons["Hide Keyboard"].exists { app.buttons["Hide Keyboard"].tap() }
+        let preview = app.buttons["feedback.previewEmail"]
+        for _ in 0..<6 where !preview.isHittable { app.swipeUp() }
+        preview.tap()
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Diagnostic log: Not included")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Screenshots: 0")).firstMatch.exists)
+        app.navigationBars.buttons.firstMatch.tap()
+        for _ in 0..<6 where !logs.isHittable { app.swipeDown() }
+        logs.tap()
+        let toggled = XCTAttachment(screenshot: app.screenshot())
+        toggled.name = "Feedback after diagnostic opt-in"
+        toggled.lifetime = .keepAlways
+        add(toggled)
+        XCTAssertEqual(logs.value as? String, "Included")
+        app.buttons["feedback.previewLogs"].tap()
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Hangar Express diagnostic log")).firstMatch.waitForExistence(timeout: 5))
+        let logPreview = XCTAttachment(screenshot: app.screenshot())
+        logPreview.name = "Feedback diagnostic log preview"
+        logPreview.lifetime = .keepAlways
+        add(logPreview)
+        app.navigationBars.buttons.firstMatch.tap()
+        logs.tap()
+        XCTAssertEqual(logs.value as? String, "Not included")
+        XCTAssertFalse(app.buttons["feedback.previewLogs"].exists)
+        for _ in 0..<6 {
+            if details.isHittable && details.frame.minY >= app.navigationBars["Feedback"].frame.maxY { break }
+            app.swipeDown()
+        }
+        details.tap()
+        XCTAssertEqual(details.value as? String, "Included")
+        let form = XCTAttachment(screenshot: app.screenshot())
+        form.name = "Feedback message and optional details"
+        form.lifetime = .keepAlways
+        add(form)
+        for _ in 0..<6 where !preview.isHittable { app.swipeUp() }
+        preview.tap()
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Diagnostic log: Not included")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "App: Hangar Express")).firstMatch.exists)
+        app.navigationBars.buttons.firstMatch.tap()
+        let review = XCTAttachment(screenshot: app.screenshot())
+        review.name = "Feedback attachment review"
+        review.lifetime = .keepAlways
+        add(review)
+        // Inspect the simulator's no-Mail fallback only; never send an email.
+        let continueButton = app.buttons["feedback.continue"]
+        for _ in 0..<6 where !continueButton.isHittable { app.swipeUp() }
+        if continueButton.label == "Share email draft" {
+            continueButton.tap()
+            XCTAssertTrue(app.alerts["Use another email app"].waitForExistence(timeout: 5))
+            app.alerts.buttons["Cancel"].tap()
+        }
+        app.navigationBars.buttons["Cancel"].tap()
+        for _ in 0..<6 where !feedback.isHittable { app.swipeUp() }
+        feedback.tap()
+        XCTAssertTrue(logs.waitForExistence(timeout: 5))
+        XCTAssertEqual(logs.value as? String, "Not included")
+        XCTAssertEqual(details.value as? String, "Not included")
+        XCTAssertEqual(app.textViews["feedback.message"].value as? String, "")
+        app.navigationBars.buttons["Cancel"].tap()
+        app.buttons["Open Settings"].tap()
+        var settingsFeedback: XCUIElement?
+        for _ in 0..<12 {
+            settingsFeedback = app.buttons.matching(identifier: "Feedback").allElementsBoundByIndex.first { $0.isHittable }
+            if settingsFeedback != nil { break }
+            app.swipeUp()
+        }
+        try XCTUnwrap(settingsFeedback).tap()
+        XCTAssertTrue(app.staticTexts["feedback.recipient"].waitForExistence(timeout: 5))
+        app.terminate()
+    }
+
+    @MainActor
     func testReferralRewardsLaddersAndLegacyViewOnly() throws {
         try verifyReferralRewards(lightMode: false)
     }

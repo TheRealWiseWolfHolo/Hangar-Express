@@ -4,6 +4,7 @@
 
 ### English
 
+- Add email feedback in Account Tools and Settings, with optional app/device details, previewable diagnostic logs and selected screenshots. Nothing is sent until the user sends through their email app.
 - Check trusted RSI origins and active documents before login autofill or checkout automation. Checkout messages must match the current main frame and checkout session.
 - Enforce cookie domain, host, path and expiry boundaries; keep checkout cookie storage isolated from other accounts.
 - Restrict authenticated redirects to the original HTTPS origin and rebuild scoped authentication headers for each allowed destination.
@@ -11,6 +12,7 @@
 
 ### 简体中文
 
+- 在账户工具和设置中新增邮件反馈，可自行选择是否附上应用及设备信息、可预览的诊断日志和截图。仅在用户通过邮件应用发送后才会发出。
 - 登录自动填充和结账自动化会先验证 RSI 来源和当前页面；结账消息必须与当前主页面及结账会话一致。
 - 严格检查 Cookie 的域名、主机、路径和有效期，避免结账会话混入其他账户的 Cookie。
 - 已认证请求仅允许重定向至原 HTTPS 来源，并按目标地址重新生成适用的认证请求头。

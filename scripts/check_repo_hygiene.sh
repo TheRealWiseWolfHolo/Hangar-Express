@@ -31,7 +31,14 @@ is_exempt_content_path() {
   [ "${1:-}" = "scripts/check_repo_hygiene.sh" ]
 }
 
+validate_public_support_configuration() {
+  if grep -Eq '^SUPPORT_EMAIL_ADDRESS[[:space:]]*=[[:space:]]*[^[:space:]]' "$1"; then
+    fail 'Public app configuration must leave SUPPORT_EMAIL_ADDRESS blank.'
+  fi
+}
+
 scan_repo() {
+  validate_public_support_configuration Config/AppConfiguration.xcconfig
   tracked_list="$tmpdir/tracked.txt"
   git ls-files | grep_excluding_hygiene_script > "$tracked_list"
 
@@ -69,6 +76,9 @@ scan_staged() {
     fi
     staged_copy="$tmpdir/staged-file"
     git show ":$path" > "$staged_copy" 2>/dev/null || continue
+    if [ "$path" = "Config/AppConfiguration.xcconfig" ]; then
+      validate_public_support_configuration "$staged_copy"
+    fi
     if find_forbidden_content_in_file "$staged_copy" > "$tmpdir/staged-hit.txt"; then
       printf '%s\n' "Sensitive content markers detected in staged file: $path" >&2
       cat "$tmpdir/staged-hit.txt" >&2

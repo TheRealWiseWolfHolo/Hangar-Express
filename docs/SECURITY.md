@@ -32,8 +32,12 @@ text cannot trigger success. Completion is reported once. Existing account and
 generation checks continue to protect persistence and subsequent refreshes;
 navigation signals do not create synthetic purchases or ownership.
 
-Known payment sites and payment app schemes open externally. Other HTTPS links
-may open externally when the user follows a link. Unexpected redirects, HTTP,
+Alipay and WeChat Pay HTTPS pages may open inside checkout, including recognized
+payment subdomains. Navigation actions, popups and main-frame responses use the
+same browsing policy. These pages receive no native RSI credential privileges,
+checkout automation or accepted checkout bridge messages. Other known payment
+sites and payment app schemes open externally. Other HTTPS links may open
+externally when the user follows a link. Unexpected redirects, HTTP,
 file, data and JavaScript main-frame destinations are rejected. Subframe access
 does not authorize automation or bridge messages.
 

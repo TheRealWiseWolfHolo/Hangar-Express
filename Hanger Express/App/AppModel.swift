@@ -843,7 +843,8 @@ final class AppModel {
         "1.1.2": [
             "Sign-in and checkout now check trusted RSI pages before using your saved credentials.",
             "Saved account cookies stay isolated when you shop, switch accounts, or finish a browser session.",
-            "Support logs hide more private details, and copied diagnostics stay on this device with a time limit."
+            "Support logs hide more private details, and copied diagnostics stay on this device with a time limit.",
+            "Email feedback to the developer, with optional diagnostic logs and screenshots you can review before sending."
         ],
         "1.1.1": [
             "Upgrade target selection and confirmation now have Chinese text and show available Hangar item translations.",

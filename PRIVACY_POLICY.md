@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Effective date: October 8, 2026
+Effective date: November 5, 2026
 
 Hangar Express is an unofficial Star Citizen hangar companion app. This policy explains what information the app handles and how it is used.
 
@@ -40,6 +40,10 @@ Hangar Express does not operate a developer-owned account server for your RSI ac
 If you select Cloud item translation, the app sends eligible public-facing catalog terms from your hangar to the developer's translation service for review. It also sends a yes/no indication of whether Pro is active so the developer can prioritize commonly seen terms from Pro users. The service stores appearance counts, not your account identity, purchase receipt, or full hangar snapshot. Local item translation does not send these terms or the Pro indication to the translation service.
 
 If you contact the developer, you may choose to share diagnostics, screenshots, logs, or other information. That information is used only to investigate and respond to your request.
+
+The Feedback screen prepares an email to the support address displayed in the app. App/device details and diagnostic logs are off by default; screenshots are included only if you select them. You can preview the message, log and processed screenshots before opening your email app. Logs are sanitized but may still contain activity or inventory details. Selected images are resized and re-encoded without their original filenames or location metadata; personal information visible in an image remains visible. The app does not automatically attach your RSI credentials or a full account snapshot.
+
+Feedback is sent through the email app/provider you choose, which shares your sending email address, display name and the message/attachments you send. Replies are delivered to that email address. Hangar Express does not upload feedback to a separate feedback server. If Apple Mail is unavailable, the system share sheet offers the prepared message and selected attachments for you to send through another email app; you must enter the recipient and verify that app's final message. Temporary share files are protected on-device and removed when the share sheet closes. A copy you save or send through another app is controlled by that app/provider.
 
 ## Third-Party Services
 
@@ -82,7 +86,7 @@ This policy may be updated when Hangar Express changes its features, data handli
 
 ## Contact
 
-For app or privacy questions, use the Hangar Express issue tracker:
+For app or privacy questions, use the Feedback screen in the app, or use the Hangar Express issue tracker:
 
 https://github.com/TheRealWiseWolfHolo/Hangar-Express/issues
 

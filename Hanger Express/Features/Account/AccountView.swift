@@ -258,6 +258,8 @@ struct AccountView: View {
                     EventCalendarView()
                 case .referrals:
                     ReferralRewardsView(appModel: appModel)
+                case .feedback:
+                    FeedbackView(appModel: appModel)
                 }
             }
             .alert("Account Total Value", isPresented: $isShowingAccountTotalValueExplanation) {

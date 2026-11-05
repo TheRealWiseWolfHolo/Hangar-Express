@@ -67,7 +67,7 @@ struct RSISecurityPolicyTests {
         catch { #expect(error.localizedDescription.contains("503")) }
     }
 
-    @Test func checkoutNavigationKeepsPaymentSupportOutsideThePrivilegedBrowser() {
+    @Test func checkoutNavigationKeepsExternalPaymentAndUnknownRedirectRules() {
         #expect(RSICheckoutNavigationPolicy.decision(for: url("/en/store/pledge/cart"), isMainFrame: true) == .inApp)
         #expect(RSICheckoutNavigationPolicy.decision(for: URL(string: "https://www.paypal.com/checkout"), isMainFrame: true) == .external)
         #expect(RSICheckoutNavigationPolicy.decision(for: URL(string: "alipays://pay"), isMainFrame: true) == .external)
@@ -80,6 +80,32 @@ struct RSISecurityPolicyTests {
         #expect(RSISecurityPolicy.isCheckoutURL(url("/en/store/pledge/cart")))
         #expect(!RSISecurityPolicy.isCheckoutURL(url("/en/store/pledge/cartoon")))
         #expect(!RSISecurityPolicy.isCheckoutURL(url("/en/account/pledges")))
+    }
+
+    @Test func checkoutAllowsAlipayAndWeChatPagesWithoutRSICredentialPrivileges() {
+        for host in ["alipay.com", "www.alipay.com", "mapi.alipay.com", "alipay.hk", "alipayobjects.com",
+                     "tenpay.com", "wx.tenpay.com", "wechatpay.com", "pay.wechatpay.cn", "wechatpay.com.cn", "pay.weixin.qq.com"] {
+            let paymentURL = URL(string: "https://\(host)/checkout")!
+            #expect(RSICheckoutNavigationPolicy.decision(for: paymentURL, isMainFrame: true) == .inApp)
+            #expect(RSICheckoutNavigationPolicy.decision(for: paymentURL, isMainFrame: true, isUserLink: true) == .inApp)
+            #expect(RSICheckoutNavigationPolicy.allowsResponse(for: paymentURL, isMainFrame: true))
+            #expect(!RSISecurityPolicy.isTrustedOrigin(paymentURL))
+            #expect(!RSISecurityPolicy.isCheckoutURL(paymentURL))
+            #expect(!RSISecurityPolicy.cookie(cookie(), appliesTo: paymentURL))
+            #expect(RSICheckoutBridgePolicy.event(body: ["kind": "log", "message": "payment-page",
+                "checkoutID": "checkout", "documentID": "document"], isMainFrame: true,
+                senderOrigin: paymentURL, frameURL: paymentURL, currentURL: paymentURL,
+                checkoutID: "checkout", documentID: "document") == nil)
+        }
+        #expect(RSICheckoutNavigationPolicy.allowsResponse(for: URL(string: "https://WX.TENPAY.COM:443/checkout"), isMainFrame: true))
+        for raw in ["https://alipay.com.attacker.invalid/", "https://notalipay.com/", "https://wx.tenpay.com.attacker.invalid/",
+                    "https://nottenpay.com/", "https://pay.weixin.qq.com.attacker.invalid/", "https://unrelated.qq.com/",
+                    "http://alipay.com/", "https://alipay.com:444/", "https://user:secret@wx.tenpay.com/",
+                    "https://alipay.com./", "alipays://pay", "weixin://pay", "https://www.paypal.com/checkout"] {
+            #expect(!RSICheckoutNavigationPolicy.allowsResponse(for: URL(string: raw), isMainFrame: true))
+        }
+        #expect(!RSICheckoutNavigationPolicy.allowsResponse(for: nil, isMainFrame: true))
+        #expect(RSICheckoutNavigationPolicy.decision(for: URL(string: "weixin://pay"), isMainFrame: true) == .external)
     }
 
     @Test func checkoutBridgeRejectsSpoofedStaleAndOversizedMessages() {
