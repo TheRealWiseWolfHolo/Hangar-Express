@@ -34,11 +34,15 @@ struct RSISecurityWebViewTests {
         defer { fixture.close() }
         try await fixture.load(html: Self.loginHTML, baseURL: URL(string: rawURL)!)
         #expect(try await RSILoginAutofill.fill(in: fixture.webView, loginIdentifier: "fixture", password: "never-inject") == nil)
-        do {
-            _ = try await fixture.webView.callAsyncJavaScript(RSILoginAutofill.script,
-                arguments: ["loginIdentifier": "fixture", "password": "never-inject"], in: nil, contentWorld: .defaultClient)
-            Issue.record("The document-side guard must reject a navigation race")
-        } catch { #expect((error as NSError).domain == WKErrorDomain) }
+        // Observe the security decision in the document instead of depending
+        // on WebKit's marshalling of an expected JavaScript exception.
+        let rejected = try await fixture.webView.callAsyncJavaScript("""
+        const attemptFill = () => { \(RSILoginAutofill.script) };
+        try { attemptFill(); return false; }
+        catch (error) { return error.message === 'Untrusted RSI document'; }
+        """, arguments: ["loginIdentifier": "fixture", "password": "never-inject",
+                          "expectedDocumentURL": rawURL], in: nil, contentWorld: .defaultClient) as? Bool
+        #expect(rejected == true, "The document-side guard must reject a navigation race")
         let value = try await fixture.webView.evaluateJavaScript("document.querySelector('[type=password]').value") as? String
         #expect(value == "")
     }

@@ -103,9 +103,9 @@ behavior on a signed physical device. Live RSI sign-in and payments are not fixt
 
 GitHub Actions runs the unit scheme and repository hygiene checks on pushes and
 pull requests. The iOS job uses the `xcode-27` runner and iOS 27.0, with two workers.
-It runs the offline WebKit suite in a separate phase after the other unit tests,
-so busy main-actor fixtures cannot starve browser navigation callbacks. Both
-phases are required and retain their test time limits. WebKit cases run serially
+It runs the offline WebKit suite in a separate job on a fresh runner, avoiding
+simulator reuse and contention with other main-actor fixtures. Both jobs retain
+their test time limits and run the full set of cases. WebKit cases run serially
 because they share the test host's visible view hierarchy. Cooldown tests compare
 stored deadlines with captured dates instead of assuming a fast runner.
 Logs and result bundles are retained for 14 days, including failed runs. Debug CI
