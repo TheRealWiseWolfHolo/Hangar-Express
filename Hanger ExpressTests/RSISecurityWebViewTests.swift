@@ -1,13 +1,15 @@
 import Foundation
 import Testing
+import UIKit
 import WebKit
 @testable import Hanger_Express
 
 @MainActor
-@Suite(.timeLimit(.minutes(1)))
+@Suite(.serialized, .timeLimit(.minutes(1)))
 struct RSISecurityWebViewTests {
     @Test func trustedLoginFillsOnlyTheMainDocumentWithoutCredentialGlobals() async throws {
         let fixture = SecurityWebViewFixture()
+        defer { fixture.close() }
         try await fixture.load(html: Self.loginHTML, baseURL: URL(string: "https://robertsspaceindustries.com/en/")!)
         let result = try await RSILoginAutofill.fill(in: fixture.webView, loginIdentifier: "fixture@example.invalid", password: "fixture-password")
         #expect(result?["filled"] as? Bool == true)
@@ -29,6 +31,7 @@ struct RSISecurityWebViewTests {
                       "https://www.alipay.com/checkout", "https://wx.tenpay.com/checkout"])
     func foreignDocumentReceivesNoAutofillAndRejectsTheInDocumentRaceGuard(_ rawURL: String) async throws {
         let fixture = SecurityWebViewFixture()
+        defer { fixture.close() }
         try await fixture.load(html: Self.loginHTML, baseURL: URL(string: rawURL)!)
         #expect(try await RSILoginAutofill.fill(in: fixture.webView, loginIdentifier: "fixture", password: "never-inject") == nil)
         do {
@@ -42,6 +45,7 @@ struct RSISecurityWebViewTests {
 
     @Test func isolatedCheckoutNeverImportsSharedCookiesAndStopsExportingAfterDetach() async throws {
         let fixture = SecurityWebViewFixture()
+        defer { fixture.close() }
         let url = URL(string: "https://robertsspaceindustries.com/en/store/pledge/cart")!
         try await fixture.load(html: "<p>Offline checkout fixture</p>", baseURL: url)
         let cookieFixture = SharedCookieSecurityFixture()
@@ -63,6 +67,7 @@ struct RSISecurityWebViewTests {
 
     @Test func realCheckoutBridgeRejectsSubframesAndAcceptsOneCurrentConfirmation() async throws {
         let fixture = SecurityWebViewFixture()
+        defer { fixture.close() }
         let url = URL(string: "https://robertsspaceindustries.com/en/store/pledge/cart/confirm/offline-order/hangar")!
         try await fixture.load(html: Self.loginHTML, baseURL: url)
         let checkoutID = UUID(), logReceived = TestGate(), completed = TestGate()
@@ -115,6 +120,7 @@ private final class SecurityWebViewFixture: NSObject, WKNavigationDelegate {
     let webView: WKWebView
     private var pending: CheckedContinuation<Void, Error>?
     private var timeout: Task<Void, Never>?
+    private var hostWindow: UIWindow?
 
     override init() {
         let config = WKWebViewConfiguration()
@@ -125,6 +131,16 @@ private final class SecurityWebViewFixture: NSObject, WKNavigationDelegate {
     }
 
     func load(html: String, baseURL: URL) async throws {
+        // A real view hierarchy gives WebKit normal visibility/lifecycle on cold
+        // hosted simulators. The serialized suite owns and removes this subview.
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = try #require(scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first)
+        // Add above the SwiftUI host as a sibling, never inside its managed view.
+        let host = window
+        hostWindow = window
+        webView.frame = host.bounds
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        host.addSubview(webView)
         try await withCheckedThrowingContinuation { continuation in
             pending = continuation
             timeout = Task { [weak self] in
@@ -133,6 +149,14 @@ private final class SecurityWebViewFixture: NSObject, WKNavigationDelegate {
             }
             webView.loadHTMLString(html, baseURL: baseURL)
         }
+    }
+
+    func close() {
+        webView.stopLoading()
+        webView.navigationDelegate = nil
+        webView.removeFromSuperview()
+        hostWindow = nil
+        finish(CancellationError())
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finish(nil) }
