@@ -1,136 +1,72 @@
 # Changelog
 
-## v1.1.2 (In Progress)
+## v1.1.2 — In development
 
 ### English
 
-- Add email feedback in Account Tools and Settings, with optional app/device details, previewable diagnostic logs and selected screenshots. Nothing is sent until the user sends through their email app.
-- Check trusted RSI origins and active documents before login autofill or checkout automation. Checkout messages must match the current main frame and checkout session.
-- Enforce cookie domain, host, path and expiry boundaries; keep checkout cookie storage isolated from other accounts.
-- Restrict authenticated redirects to the original HTTPS origin and rebuild scoped authentication headers for each allowed destination.
-- Redact private diagnostic fields and raw responses, bound error/report processing, and make copied diagnostics local-only with a ten-minute expiration.
+- Send email feedback from Account Tools or Settings. Logs and device details start off; selected screenshots and logs can be previewed before sending.
+- Keep the support address in private build configuration. Public source and tests contain no real support address.
+- Open supported Alipay and WeChat Pay HTTPS pages inside checkout. Payment-app links still open the installed app.
+- Check the trusted RSI page, current document, and checkout session before using native credentials or accepting checkout messages.
+- Isolate browser cookies and keep authenticated redirects on the original trusted HTTPS origin.
+- Redact and limit support reports. Copied diagnostics are local-only and expire after ten minutes.
 
 ### 简体中文
 
-- 在账户工具和设置中新增邮件反馈，可自行选择是否附上应用及设备信息、可预览的诊断日志和截图。仅在用户通过邮件应用发送后才会发出。
-- 登录自动填充和结账自动化会先验证 RSI 来源和当前页面；结账消息必须与当前主页面及结账会话一致。
-- 严格检查 Cookie 的域名、主机、路径和有效期，避免结账会话混入其他账户的 Cookie。
-- 已认证请求仅允许重定向至原 HTTPS 来源，并按目标地址重新生成适用的认证请求头。
-- 隐藏诊断中的隐私字段和原始响应，限制错误及报告处理规模；复制的诊断仅保留在本设备剪贴板中，十分钟后过期。
+- 在账户工具或设置中发送邮件反馈。日志和设备信息默认不附上；发送前可预览所选截图及日志。
+- 通过私有构建配置设置支持邮箱；公开源码和测试不包含真实邮箱地址。
+- 在应用内结账时打开受支持的支付宝和微信支付 HTTPS 页面；支付应用链接仍会打开对应应用。
+- 使用本机保存的凭据或接受结账消息前，检查 RSI 来源、当前页面及结账会话。
+- 隔离浏览器 Cookie；已认证请求仅允许重定向至原受信任 HTTPS 来源。
+- 过滤并限制支持报告的内容。复制的诊断仅保留在本机剪贴板，十分钟后过期。
 
-## v1.1.1 (In Progress)
+## v1.1.1
 
 ### English
 
-- Upgrade target selection and confirmation now have Chinese text and show available Hangar item translations.
-
-- Early Access now defaults to five parallel refresh workers; Standard remains at two, and custom worker choices remain available.
-
-- Restored Gift and Apply Upgrade actions for eligible Hangar pledges after RSI changed its gift controls and gifting API.
-
-- Simplified the CCU calculator with clearer ship choices, a compact savings summary, expandable cost and step details, and a visible way to exclude a CCU.
-
-- Removed Idris-M from the CCU calculator's ship choices because it cannot be upgraded.
-
-- Referrals is now marked as an Early Access tool and listed on the Early Access page, using the same member access rules as WBCCU Deals.
-
-- Tap reached referral rewards to open the matching saved Hangar item using the same detail page as Hangar. If several entries match, choose one; missing rewards show a refresh message.
-
-- Browse referral rewards with pictures in Account → Tools. Switch between the new and legacy ladders and see saved referral progress; accounts without the legacy ladder can still browse its rewards.
-
-- Tap either game-access indicator on your profile to see the saved Hangar packages that include that game, with pledge numbers and matching contents.
+- Add Chinese text and available item translations to upgrade selection and confirmation.
+- Default Early Access refresh to five workers; Standard stays at two. Custom choices are preserved.
+- Restore Gift and Apply Upgrade for eligible pledges after RSI changed its pages and API.
+- Simplify the CCU calculator with clearer ship choices, savings, expandable details, and exclusions. Remove Idris-M because it cannot be upgraded.
+- Add Early Access referral rewards with current/legacy ladders, pictures, and saved progress. Reached rewards open matching Hangar items; multiple matches get a chooser.
+- Show matching saved packages when either profile game-access indicator is tapped.
 
 ### 简体中文
 
-- 升级目标选择和确认页面现已补齐中文界面文字，并在有译名时显示机库物品的中文名称。
+- 升级选择和确认页补齐中文文字，并显示已有的物品译名。
+- 抢先体验默认使用 5 个刷新任务，标准版仍为 2 个；保留自定义设置。
+- 适配 RSI 页面和接口变化，恢复符合条件的物品的赠送及应用升级操作。
+- 简化 CCU 计算器，清晰显示舰船选项、节省金额、可展开详情和排除操作；移除无法升级的 Idris-M。
+- 新增抢先体验推荐奖励工具，支持新旧阶梯、图片及已保存进度。已达到的奖励可打开匹配的机库物品；多个匹配项可供选择。
+- 轻点个人资料中的游戏权限标识，查看匹配的已保存组合包。
 
-- 抢先体验现在默认使用 5 个并行刷新任务；标准版仍为 2 个，且仍可自行调整并发数。
-
-- 适配 RSI 更新后的赠送按钮及接口，恢复符合条件的机库物品的“赠送”和“应用升级”操作。
-
-- CCU 计算器现采用更清晰的舰船选项和简洁的节省金额摘要，费用与步骤详情可按需展开，并可直接排除 CCU。
-
-- Idris-M 无法升级，现已从 CCU 计算器的舰船选项中移除。
-
-- 推荐工具现已标注为抢先体验功能，并加入抢先体验页面，与 WBCCU 优惠使用相同的会员访问规则。
-
-- 轻点已达到的推荐奖励，打开机库中对应物品的详情页。多个匹配条目可供选择；未找到对应奖励时会提示刷新机库。
-
-- 在账户工具中浏览推荐奖励图片、切换新旧阶梯，并查看已保存的推荐进度。无法参与旧阶梯的账户仍可浏览其奖励。
-
-- 轻点个人资料中的游戏权限标识，即可查看包含对应游戏的机库组合包、商品编号和匹配的内容。
-
-## v1.1.0 (Released)
+## v1.1.0 — Released
 
 ### English
 
-- Connection problems are easier to investigate with more detailed support logs. Sensitive login details are filtered out.
-- Buy Back quantity badges stay aligned when translated names wrap onto multiple lines.
-
-- Hangar Log updates now follow content changes instead of polling, including edits that retain their IDs. Updates stay buffered while scrolling or editing search, and account switches clear previous rows immediately.
-
-- Hangar share pictures now use the selected item translation mode and the same displayed pledge title as the Hangar list. In Cloud mode, new names remain in English until their translations are reviewed and published.
-- Cloud translation submissions now provide a premium appearance count in the private review database, helping prioritize terms seen by Pro subscribers.
-- Chinese catalog translations now consistently use straight single quotation marks, including reviewed entries and new machine suggestions.
-- Hangar search now keeps its filters and results visible when the keyboard is dismissed. An X in the search field closes and clears the search.
-- Debounced search updates no longer replace newer keyboard input, and authentication transitions respect an in-progress account switch.
-- The email verification-code field now has a native Paste button, making copied RSI codes quicker to enter.
-- The RSI CAPTCHA image stays visible above its code field while the keyboard is open, and the authentication screen can scroll on smaller displays.
-- Removed the redundant text-format icon from the CAPTCHA code field.
-- Item translation reveals now animate row height when English and Chinese names use different numbers of lines, and clear the color effect when a row leaves the screen.
-- Account now shows Star Citizen and Squadron 42 game access in blue and green glass indicators, using RSI's signed-in Games Library entitlements.
-- Fixed game access checks that could remain unavailable by matching the Games Library's authenticated GET request and retrying through the app's RSI browser session when a direct request is rejected. Corrected a crash in that fallback when its response was plain text.
-- Integrated the Star Citizen and Squadron 42 access indicators into the profile card as a compact glass footer with a center divider and restrained blue and green accents.
-- The game-access footer now uses each game's logo and shows access through brightness alone. Entitlements refresh with Account and Full Refresh, then stay in the locally saved account snapshot instead of being requested when the Account tab opens.
-- The profile card's game-access footer now uses native Liquid Glass with vivid blue and green halves, a clean center split, and a shorter height. Its tint adapts to dark and light mode over a pure black or white base; the profile artwork stops above it.
-- The game-access footer now labels Star Citizen and Squadron 42 in Chinese when the app language is Chinese, with each logo and label centered in its half of the bar. The labels update immediately when the app language changes.
-- Fleet ship matching now recognizes both legacy Constellation names and CIG's Mk IV names. The hosted catalog restores the separate Phoenix Emerald entry with its last published MSRP, image, and role.
-- Unit tests now use isolated HTTP fixtures, preferences, caches, and temporary storage, with a shared simulator test scheme and automated build and test checks.
-- Added opt-in offline performance workloads and pipeline tracing to measure large inventories before optimization.
-- Saved accounts now update in Keychain without deleting the previous entry first. Storage failures are shown explicitly and preserve the current account and cached content.
-- Refreshes and account actions now reject late results after an account change. Conflicting actions are serialized through authorization and reconciliation, and uncertain submitted actions require review before retrying.
-
-- Snapshot caches now serialize and coalesce writes, preserve recoverable damaged data, migrate legacy files, and report storage failures.
-- Refresh dates and content revisions are tracked per section. Full Refresh retains useful cached sections when another section fails.
-- Hosted ship feeds now share requests, revalidate with HTTP validators, and retain validated offline fallback data.
-- Inventory refresh preserves unchanged images and invalidates only affected source-dependent variants; same-URL changes can revalidate without clearing every image.
-- Inventory normalization, direct HTML parsing, and translation-cache loading now execute away from the UI actor.
-- Hangar, Fleet, and Buy Back reuse revision-owned groups, lookups, filter flags, and bounded background search indexes.
+- Add more detailed network support logs with sensitive sign-in values filtered out.
+- Keep Buy Back quantity badges aligned when names wrap.
+- Update Hangar Log from content events instead of polling. Buffer updates during scrolling/search and clear old rows on account changes.
+- Use the selected item language in Hangar share pictures. Cloud mode keeps new names in English until reviewed translations are available.
+- Improve search, Chinese input, keyboard dismissal, CAPTCHA visibility, and verification-code pasting.
+- Show saved Star Citizen and Squadron 42 access on the profile, refreshed through Account or Full Refresh.
+- Improve ship matching, including legacy and updated names and the separate Phoenix Emerald entry.
+- Preserve saved accounts and cached data when Keychain or snapshot storage fails. Serialize writes and protect against stale account results and uncertain actions.
+- Track freshness by section, share validated hosted feeds, preserve unchanged images, and move inventory/search work away from the UI actor.
+- Add isolated tests, hosted checks, and opt-in offline performance workloads.
 
 ### 简体中文
 
-- 连接出现问题时，诊断日志会提供更多信息，方便排查原因，并过滤敏感登录信息。
-- 翻译后的名称换行时，回购数量标记仍会保持对齐。
-
-- 机库日志改为按内容变化更新，支持同一编号下的内容修改；滚动或编辑搜索时暂存更新，切换账户时立即清除旧账户条目。
-
-- 机库分享图片现在会遵循所选物品翻译方式，并使用与机库列表相同的商品名称。在云端模式下，新名称会保持英文，直到译文审核并发布。
-- 云端翻译提交现在会在私有审核数据库中记录 Pro 用户的条目出现次数，帮助确定译文审核优先顺序。
-- 中文物品译名统一使用半角单引号，包括已审核条目和新生成的机器译文。
-- 收起键盘后，机库搜索筛选和结果会继续显示；搜索框右侧的 X 可关闭并清除搜索。
-- 修复延迟搜索更新覆盖新输入文字，以及重新登录流程绕过账户切换保护的问题。
-- 邮件验证码输入框新增系统“粘贴”按钮，方便快速输入已复制的 RSI 验证码。
-- 输入 RSI 图形验证码时，即使键盘弹出，验证码图片仍会显示在输入框上方；在较小屏幕上也可滚动登录页面。
-- 移除了图形验证码输入框左侧多余的文字格式图标。
-- 英文与中文物品名称行数不同时，翻译动画现在会平滑调整条目高度；条目离开屏幕时也会清除残留的彩色效果。
-- 账户页新增蓝色的 Star Citizen 和绿色的 Squadron 42 玻璃质感权限标识，依据 RSI 登录后的游戏库权益显示状态。
-- 修复游戏权限一直显示“暂时无法检查权限”的问题：使用与 RSI 游戏库一致的登录请求，并在直接请求失败时通过应用内的 RSI 浏览器会话重试；同时修复处理该浏览器返回文本时导致的闪退。
-- Star Citizen 与 Squadron 42 权限标识现已融入个人资料卡片，成为带中间分隔线、淡雅蓝绿配色的紧凑玻璃质感底栏。
-- 游戏权限底栏改用两款游戏的标志，并仅通过亮度显示权限状态；权限数据随“刷新账户”和“全部刷新”更新，保存在本机账户快照中，不再于打开账户页时单独请求。
-- 个人资料卡片的游戏权限底栏改用原生液态玻璃效果，蓝绿两半在中间清晰分界，整体高度也更紧凑。色调分别适配深色与浅色模式，底色为纯黑或纯白，背景图止于底栏上方。
-- 应用语言为中文时，游戏权限底栏显示“星际公民”和“42中队”；每组图标与文字在各自半栏中居中显示。切换应用语言后，文字会立即更新。
-- 舰队资料现可同时匹配旧版星座系列名称和 CIG 新增的 Mk IV 名称；线上舰船目录也恢复了独立的凤凰翡翠版条目及其上次发布的建议售价、图片和定位。
-- 单元测试改用独立的网络模拟、偏好设置、缓存与临时存储，并新增共享模拟器测试方案和自动构建测试检查。
-- 新增可选的离线性能测试数据和处理阶段追踪，用于在优化前测量大型机库的性能。
-- 更新已保存账户时不再先删除原有钥匙串条目；安全存储失败时会明确提示，并保留当前账户与缓存内容。
-- 切换账户后会忽略刷新和账户操作的过期结果；有冲突的操作会从身份验证到结果核对全程互斥，已提交但结果不确定的操作须先检查确认，才能重试。
-
-- 快照缓存按顺序合并写入，保留可恢复的损坏数据，兼容旧格式，并明确提示存储失败。
-- 各数据区独立记录刷新时间和内容版本；全部刷新时，部分失败不会丢弃其他区域成功更新的数据。
-- 舰船云端目录共享并发请求，支持条件验证，并保留已验证的离线备用数据。
-- 刷新保留未变化的图片，仅使受影响的来源及其衍生图片失效；同一链接的图片变化也可重新验证，无需清空全部图片。
-- 物品标准化、直接 HTTP 页面的解析和翻译缓存读取移至 UI 执行器之外。
-- 机库、舰队与回购共享按内容版本管理的分组、查找表、筛选标记及有界的后台搜索索引。
+- 新增更详细的网络支持日志，并过滤敏感登录信息。
+- 名称换行时，回购数量标记仍保持对齐。
+- 机库日志改为按内容事件更新；滚动或搜索时暂存更新，切换账户时清除旧条目。
+- 机库分享图片遵循所选物品语言；云端模式下，新名称保持英文，直到审核后的译文可用。
+- 改进搜索、中文输入、收起键盘、验证码图片显示及验证码粘贴。
+- 个人资料显示已保存的星际公民和 42 中队权限，通过刷新账户或全部刷新更新。
+- 改进新旧舰船名称匹配，并保留独立的凤凰翡翠版条目。
+- 钥匙串或快照存储失败时保留账户及缓存；按顺序写入，拒绝旧账户结果，并保护结果不确定的操作。
+- 各数据区独立记录刷新时间；共享已验证的数据源，保留未变化图片，并将物品及搜索处理移出 UI 执行器。
+- 新增独立测试、自动检查及可选的离线性能测试数据。
 
 ## v1.0.10 (Release Candidate)
 
@@ -176,7 +112,7 @@
 - Reworded Manage Plans headings, restore controls, guidance, and StoreKit status messages to avoid purchase terminology.
 - Clarified that Early Access support funds Hangar Express only, does not buy anything from CIG or RSI, and does not guarantee specific or continued app features.
 - Reframed the Early Access status message around Hangar Express being free and supporter contributions being optional.
-- Identified Hangar Express as open-source software in its legal disclaimer and removed the Official RSI Website link.
+- Updated the in-app legal wording and removed the Official RSI Website link. Usage rights are defined in [PERMISSIONS.md](PERMISSIONS.md).
 - Replaced the broken WBCCU store link with an in-app cart that clears the RSI cart through its authenticated cart mutation, verifies it is empty, prepares only the selected source-to-Warbond upgrades, and opens checkout inside Hangar Express.
 - Simplified WBCCU deal cards by removing redundant availability and new-money labels and shortening the cart status text.
 - Simplified the WBCCU footer to show only the feed's last-updated time above the cart controls.

@@ -1,57 +1,40 @@
 # Support
 
-Hangar Express support is provided through the GitHub repository:
+## Send private feedback
 
-https://github.com/TheRealWiseWolfHolo/Hanger-Express/issues
+Open **Account → Tools → Feedback** or **Settings → Help & Feedback**. The app
+shows the support address and prepares an email. Replies go to the address you
+send from; conversations continue in your email app.
 
-Use this support page for app issues, general feedback, and feature requests.
+Explain what happened, what you expected, and how to reproduce the issue.
+You can choose to include:
 
-## Before Opening a Support Request
+- App version, build, device model, and iOS version.
+- A diagnostic log, with a full preview before sharing.
+- Up to three selected screenshots, with previews and removal controls.
 
-Please include:
+Logs and app/device details start off. Screenshots are never captured or attached
+automatically. Image location metadata is removed, but anything visible in the
+picture remains visible. Logs may still contain activity or inventory details.
 
-- your app version;
-- your iOS version and device model;
-- a short description of what you expected to happen;
-- a short description of what actually happened;
-- screenshots if they help explain the issue; and
-- relevant error messages, with private information removed.
+Review the recipient, message, and attachments in your email app before sending.
+If Apple Mail is unavailable, follow the share-sheet instructions and enter the
+recipient shown in the app. See [email feedback](docs/FEEDBACK.md).
 
-Do not include:
+## Public issues
 
-- RSI passwords;
-- Apple Account passwords;
-- session cookies;
-- payment information;
-- two-factor authentication codes;
-- private account recovery information; or
-- full unredacted logs that contain sensitive data.
+You can also use the [GitHub issue tracker](https://github.com/TheRealWiseWolfHolo/Hangar-Express/issues).
+GitHub issues are public. Do not post passwords, session cookies, payment details,
+verification codes, recovery information, or unreviewed logs and screenshots.
 
-## Subscription Support
+## Early Access and billing
 
-Hangar Express Pro purchases are handled by Apple through the App Store.
+Apple handles Early Access purchases, subscriptions, cancellations, and refunds.
+Manage subscriptions in **iOS Settings → Apple Account → Subscriptions**, or use
+[Apple's refund page](https://reportaproblem.apple.com/). Deleting the app does not
+cancel a subscription.
 
-You can manage or cancel the subscription from your Apple Account settings:
+## More information
 
-1. Open Settings on your device.
-2. Tap your Apple Account name.
-3. Tap Subscriptions.
-4. Select Hangar Express Pro.
-
-For refund requests, use Apple's refund process:
-
-https://reportaproblem.apple.com/
-
-## Privacy
-
-Privacy Policy:
-
-[Privacy Policy](PRIVACY_POLICY.md)
-
-Terms of Use:
-
-[Terms of Use](TERMS_OF_USE.md)
-
-## Unofficial Fan Project
-
-Hangar Express is an unofficial Star Citizen fan project and is not affiliated with, endorsed by, sponsored by, or licensed by Roberts Space Industries, Cloud Imperium Games, or the Cloud Imperium group of companies.
+See the [privacy policy](PRIVACY_POLICY.md), [terms of use](TERMS_OF_USE.md), and
+[unofficial fan-project notice](DISCLAIMER.md).

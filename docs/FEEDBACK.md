@@ -1,48 +1,52 @@
 # Email feedback
 
-Feedback is available to Standard and Early Access users in Account → Tools and
-Settings → Help & Feedback. It prepares email to
-the privately configured support address shown in the app. Replies arrive in the user's sending mailbox;
-there is no in-app support account, conversation service, or automatic upload.
+Open **Account → Tools → Feedback** or **Settings → Help & Feedback**. Feedback is
+available to Standard and Early Access users. The recipient appears in the form;
+replies go to the user's sending mailbox.
 
-The form identifies the recipient and explains that email shares the sender's
-address/display name through their chosen email provider. A message is required;
-subject is optional. Users can preview the prepared body before continuing.
+## What is included
 
-Both optional inclusion controls start off every time the form opens:
+A message is required. The subject is optional. Both optional detail controls
+start off each time a new form opens.
 
-- App/device details: the displayed app version/build, generic device model and
-  iOS version. No device name, advertising identifier or account snapshot.
-- Diagnostic log: a snapshot of the existing in-memory authentication/refresh
-  events, sanitized and capped using `DiagnosticPrivacy`. Taking the snapshot
-  makes no account/network request. It can still contain activity/inventory
-  details, so the complete text is previewable. Disabling the switch removes it.
+| Content | Default | User control |
+| --- | --- | --- |
+| Message and subject | User enters them | Edit and preview |
+| App version/build, generic device model, iOS version | Not included | Include or remove |
+| Sanitized sign-in and refresh log | Not included | Include, preview, or remove |
+| Screenshots | None | Select, preview, or remove up to three |
+| Sender address and display name | Supplied by the email provider | Review in the mail app |
 
-Users can select up to three images through the system photo picker. Only those
-images are loaded; no broad library permission is requested. Inputs are limited
-to 20 MiB each, downsampled to a 2048-pixel longest edge and re-encoded as JPEG
-under 3 MiB each. Original filenames, location and other original image metadata
-are not copied. Pixel content remains visible: users must check the preview and
-remove any image they do not want to share. No screenshot is captured automatically.
+Logs are captured only after opting in, make no extra account request, and use
+`DiagnosticPrivacy` redaction and size limits. They may still contain activity or
+inventory details. They are not a claim of anonymity.
 
-Configured Apple Mail opens a system composer with the recipient, subject, body
-and selected attachments prefilled. The user can review/edit/cancel/send or save
-a draft using Mail. The app does not claim successful delivery.
+The system photo picker provides only selected images. Each input is limited to
+20 MiB, resized to a 2048-pixel longest edge, and re-encoded as JPEG under 3 MiB.
+Original filenames and location metadata are not copied. Visible personal
+information remains in the picture. Failed or pending image preparation blocks
+continuation rather than silently dropping attachments.
 
-If Apple Mail is unavailable, an explanatory prompt precedes the system share
-sheet. It offers the message as text and `feedback-message.txt`, plus all selected
-attachments. The user must choose an email app, enter the displayed recipient,
-and verify the final message/attachments. Other apps decide what they accept.
-Share files use a temporary protected, backup-excluded directory and are removed
-on dismissal. User-saved copies and sent mail follow the chosen app/provider's
-storage policies. Cancelling returns to the form; closing it discards its local
-in-memory contents. Account/authentication changes dismiss it.
+## Sending and replies
 
-Validation covers optional-data exclusion, attachment/preview equality, log
-redaction and bounds, image metadata removal/downsampling, invalid image rejection,
-fallback file contents and the offline form/preview flow. Tests never send email.
+Configured Apple Mail opens a composer with the recipient, subject, message, and
+selected attachments. The user can edit, cancel, save, or send it. The app does not
+claim successful delivery.
 
-The public source leaves `SUPPORT_EMAIL_ADDRESS` blank. Supply it through ignored
-`Config/Local.xcconfig` or private build configuration; Release builds require it.
-Public benchmark/UI checks use `support@example.invalid`. Builds without a valid
-recipient show an unavailable notice and disable email continuation.
+Without Apple Mail, an explanation opens before the system share sheet. It offers
+message text, `feedback-message.txt`, and all selected attachments. Users must
+choose a mail app, enter the displayed recipient, and check the final message.
+Other apps decide which shared items they accept.
+
+Share files use a protected, backup-excluded temporary directory and are cleaned
+up on dismissal. Saved copies and sent mail follow the chosen provider's policies.
+Closing the form discards its in-memory draft. Account or authentication changes
+dismiss it. There is no automatic upload or in-app conversation history.
+
+## Build configuration
+
+Supply `SUPPORT_EMAIL_ADDRESS` privately. The public setting stays blank. Release
+builds require a valid address; unconfigured Debug builds show a notice and disable
+continuation. Public tests use `support@example.invalid`.
+
+See [testing](TESTING.md) for attachment, privacy, and offline UI coverage.

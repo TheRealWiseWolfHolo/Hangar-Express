@@ -1,42 +1,52 @@
 # Referral rewards
 
-Account → Tools → Referrals is an Early Access tool, labeled with the existing badge and member entry check (the same policy as WBCCU Deals). The Early Access page shows check/cross availability symbols and an expected release of 1.2.0 for Referrals (the other four Labs features remain TBD). Existing Account snapshot referral counts remain available independently of the tool.
+Open **Account → Tools → Referrals**. The tool requires Early Access; saved referral
+counts on Account remain available separately. The comparison page lists 1.2.0 as
+the expected public release, not a guaranteed release date.
 
-The tool shows the current or legacy reward ladder, with pictures and the referral counts saved by Account/Full Refresh. Opening the tool does not sign in to RSI or refresh the account. It cannot claim rewards or submit referrals.
+## Browsing and progress
 
-The two counts are independent. Missing counts are never shown as zero. If the saved account has no legacy ladder, the legacy catalog is view-only, without a personal milestone status or progress bar. Switching accounts or authentication contexts dismisses the tool.
+- Browse current and legacy reward ladders with pictures.
+- Use the independent counts saved by Account/Full Refresh.
+- Show missing counts as unknown, never zero.
+- Browse the legacy catalog without personal progress when no legacy ladder is available.
+- Highlight only the text footer of reached rewards; preserve original picture colors.
 
-## Shared catalog
+Opening the tool does not sign in to RSI, refresh counts, submit referrals, or
+claim rewards. Account/authentication changes dismiss it. Legacy pictures use
+loaded image dimensions when catalog sizing is missing or wrong.
 
-`HostedReferralRewardsClient` uses `ValidatedHostedFeedStore` for shared requests, conditional validation, atomic disk caching and offline fallback. The static catalog has a one-day in-memory freshness ceiling and a one-year maximum offline fallback, subject to the server's cache directives. Failed or malformed responses cannot replace a validated catalog. Reward pictures use the existing processed image cache.
+## Open a saved reward
 
-Schema 1 contains `reviewedAt` plus `current` and `legacy` arrays. Each reward has a positive unique `threshold` (ascending), a `title`, an HTTPS `imageURL`, and optional validated `imageAspectRatio` metadata to preserve the complete picture. Both ladders must be nonempty. The decoder rejects unsupported versions, oversized documents, duplicate/unsorted milestones, and credential-bearing image URLs. Personal counts, invite codes, account IDs and cookies are never part of this feed.
+Tap a reached reward to find a real matching saved Hangar package. Multiple matches
+show a pledge chooser; no match shows a refresh/preparation message. Unknown and
+unreached rewards stay noninteractive. The tool never invents ownership.
 
-The catalog contains public reward descriptions and artwork. Catalog updates do not require an RSI account session.
+Matching runs on an actor only on tap. It handles known referral names and wrappers,
+requires referral provenance for short aliases, and excludes removed/gifted items.
+Account, inventory, and ladder changes cancel stale work. The destination is the
+normal Hangar detail view, with its existing action and authentication checks.
 
-## Private release configuration
+## Public catalog and private configuration
 
-Supply `REMOTE_REFERRAL_REWARDS_BASE_URL` in the private build configuration. It maps to the `RemoteReferralRewardsBaseURL` Info.plist key; the client appends `referral-rewards.json`. No production host, cloud resource ID or cloud credential belongs in tracked files. A Debug checkout without this setting shows the normal retry/unavailable screen. Release builds require the setting through the existing private-configuration validation gate; offline Release benchmarks supply a placeholder endpoint.
+The catalog contains public reward descriptions and artwork, not personal counts,
+invite codes, account IDs, or cookies. `HostedReferralRewardsClient` uses shared
+requests, conditional validation, atomic caching, and validated offline fallback.
+Freshness is capped at one day; offline fallback is capped at one year, subject
+to cache directives.
+
+Schema 1 has `reviewedAt`, nonempty `current`/`legacy` arrays, and unique ascending
+positive thresholds. Rewards include a title, HTTPS image URL, and optional image
+aspect ratio. Invalid versions, sizes, URLs, or milestones cannot replace valid data.
+
+Supply `REMOTE_REFERRAL_REWARDS_BASE_URL` privately. The client appends
+`referral-rewards.json`; no real host or cloud credential belongs in tracked files.
+Unconfigured Debug builds show an unavailable/retry state. Release builds require
+the setting. See the [README](../README.md) for all private build settings.
 
 ## Checks
 
-`ReferralRewardsTests` covers separate counts, zero versus missing counts, unavailable legacy progress, catalog validation, unauthenticated requests and offline restoration. The opt-in UI fixture covers New/Legacy switching and view-only behavior in dark and light appearances without a live RSI account. Small public reward pictures are bundled only in the test runner and injected into the explicit test fixture for realistic screenshot checks. Reached cards use green only in the title/count/status footer. Photos keep their original colors and the outer border stays neutral. Missing counts and unavailable legacy progress retain neutral cards. Each ladder button includes its padding in a rectangular hit area; UI checks tap blank areas near the left/right and top/bottom edges. Public cloud assets are validated separately by the private publishing checks.
-
-
-Legacy artwork measures the loaded UIImage through the cached image view's
-optional size callback. That measured ratio takes precedence over catalog metadata,
-so older offline catalogs without dimensions (or outdated dimensions) cannot add
-letterbox gutters. The New ladder retains its existing sizing path. UI regression
-checks include wide, standard and taller legacy pictures with missing/wrong metadata.
-
-
-Reached reward cards open the existing HangarPackageDetailView for matching saved
-pledges. Matching runs on a dedicated actor using the existing inventory groups;
-it never creates synthetic ownership, downloads account data, or scans inventory
-on every render. Known referral wrappers, quote/ampersand formatting, and legacy
-numeric reward titles are supported. Short aliases require referral provenance;
-exact named referral pledges take priority over incidental bundle contents. Multiple
-matching groups get a picker, missing matches get an honest refresh message, and
-unknown/unreached milestones remain noninteractive. Inventory/account/ladder changes
-cancel pending matching; inventory changes also clear the navigation destination.
-Existing Hangar detail actions retain their normal authentication safeguards.
+Tests cover counts, catalog validation, unauthenticated catalog requests, offline
+restore, reached-item matching, and dark/light layouts. Reward pictures used by
+explicit UI fixtures are test-runner assets only. See [asset sources](../ASSET_SOURCES.md)
+and [testing](TESTING.md).

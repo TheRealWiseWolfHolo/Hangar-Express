@@ -7,6 +7,7 @@ The Account game-access footer uses these RSI logo assets (retrieved October 23,
 
 Both are used on RSI's Games Library page. RSI also [makes game logos available for community projects](https://robertsspaceindustries.com/en/comm-link/transmission/12736-Game-Logos). These marks remain the property of their respective owners; Hangar Express is an unofficial fan app.
 
+## Referral test pictures
 
 Referral UI test fixtures use small copies of these public RSI reward pictures
 (retrieved October 28, 2026). They are bundled only in the UI test runner and
@@ -21,3 +22,9 @@ passed to the explicit offline test fixture; they are not app shipping assets:
 - `referral-legacy-200.jpg`: [Ready For Battle](https://robertsspaceindustries.com/media/bm1v5dbsssd03r/source/Vanduul_glaive_viz3.jpg)
 
 All game artwork remains the property of Cloud Imperium Games and its respective owners.
+
+## Feedback screenshots
+
+Feedback uses pictures selected by the user. They are not bundled app or repository
+assets. Original filenames and location metadata are removed before sharing;
+visible picture content remains.

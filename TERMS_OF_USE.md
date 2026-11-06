@@ -1,6 +1,6 @@
 # Terms of Use
 
-Effective date: April 28, 2026
+Effective date: November 5, 2026
 
 These Terms of Use apply to Hangar Express, an unofficial Star Citizen hangar companion app.
 
@@ -22,7 +22,9 @@ You are responsible for:
 
 ## App Functionality
 
-Hangar Express helps you sign in to RSI, view hangar and fleet data, view buy-back and log information, and perform available account actions that you request. Some RSI actions may require local device-owner authentication and current RSI password confirmation before the app sends the request.
+Hangar Express helps you sign in to RSI, browse saved account data, plan upgrades, and perform supported account actions. Some actions require local device authentication and the current RSI password. Password-confirmed actions are unavailable in read-only sessions.
+
+Supported Alipay and WeChat Pay pages may open inside checkout. Payment-app links may open another app. Review the provider, amount, and confirmation before paying. Feedback uses your chosen email app, with optional logs and screenshots you can preview before sending. Replies go to your sending email address.
 
 Hangar Express depends on RSI web services and third-party hosted metadata. Features may stop working, change, or become temporarily unavailable if those services change, block access, are unavailable, or return unexpected data.
 
@@ -34,9 +36,11 @@ When Early Access is active, Hangar Express may enable experimental Lab Features
 
 Early Access Lab Features may include:
 
-- experimental faster refresh workers, up to 10 pages in parallel;
-- Extended Hangar Log beta access, up to 500 log entries; and
-- multiple account switching beta access, up to 10 saved accounts.
+- faster refresh, with five workers by default and up to ten;
+- Hangar Log history, up to 500 entries;
+- account switching, up to ten saved accounts;
+- WBCCU Deals; and
+- referral reward browsing and matching saved Hangar items.
 
 The standard version is limited to:
 
@@ -84,8 +88,8 @@ These terms may be updated when Hangar Express changes its features, subscriptio
 
 ## Contact
 
-For app questions, use:
-
-https://github.com/TheRealWiseWolfHolo/Hangar-Express/issues
+For private app questions, use **Account → Tools → Feedback** or
+**Settings → Help & Feedback**. For public issues, use the
+[GitHub issue tracker](https://github.com/TheRealWiseWolfHolo/Hangar-Express/issues).
 
 Do not post passwords, cookies, payment information, or other sensitive personal information in public GitHub issues.

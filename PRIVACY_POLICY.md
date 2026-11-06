@@ -2,92 +2,97 @@
 
 Effective date: November 5, 2026
 
-Hangar Express is an unofficial Star Citizen hangar companion app. This policy explains what information the app handles and how it is used.
+Hangar Express is an unofficial Star Citizen companion. This policy explains what
+the app handles, where data goes, and what you can choose to share.
 
-## Information the App Handles
+## Data on your device
 
-Hangar Express may handle the following information when you use the app:
+The app handles RSI sign-in details, session cookies, account/profile information,
+hangar and fleet items, buy-back entries, logs, game access, and account metadata.
+It also stores app preferences, cached pictures/catalogs, account snapshots, and
+Apple StoreKit entitlement state.
 
-- RSI account sign-in information that you enter, such as your email address or login ID and password.
-- RSI session cookies created during sign-in.
-- RSI account information returned by Roberts Space Industries, such as display name, handle, email address, hangar items, fleet data, buy-back data, hangar logs, game-access entitlements, account metadata, and authorized-device information.
-- App preferences, including language, appearance, refresh settings, cached subscription entitlement state, and saved-account selection.
-- Locally cached images, ship metadata, and app snapshots used to make the app faster and available between refreshes.
-- Purchase entitlement information from Apple StoreKit, such as whether Early Access or Early Access for Life is active.
+Saved RSI credentials and reusable cookies use the iOS Keychain. Read-only sign-in
+uses the RSI browser without saving a native password. Snapshots, preferences, and
+caches stay in the app container. These support sign-in, offline browsing, refresh,
+and account actions you request.
 
-## How Information Is Used
+The app does not automatically send your RSI password, cookies, full hangar,
+purchase history, or saved account snapshot to the developer.
 
-The app uses this information to:
+## Network services
 
-- sign in to your RSI account at your request;
-- refresh and display your hangar, fleet, buy-back entries, hangar logs, and account information;
-- perform RSI account actions you request, such as pledge actions that require confirmation;
-- save sessions so you can reopen the app without signing in every time;
-- cache images and ship metadata for performance;
-- enable or disable Early Access Lab Features after an App Store purchase; and
-- respond to messages you voluntarily send to the developer.
+- **RSI and Cloud Imperium:** sign-in, account data, and actions you request.
+- **Hosted feeds and image hosts:** public ship information, reward catalogs,
+  approved translations, events, and artwork. Referral progress stays in your saved
+  account data; the reward catalog does not receive your counts or invite code.
+- **Region check:** sign-in may request a country/region for the connection. Like
+  other internet services, that service can see the request's connection IP address.
+- **Cloud item translation:** uploads eligible catalog terms and an app-reported
+  yes/no Early Access indication. It does not upload RSI credentials, purchase
+  receipts, account identity, or a full inventory. The service stores term appearance
+  counts. Local mode does not submit missing terms or that indication; both modes
+  may download the approved dictionary.
 
-## Local Storage
+These services process requests under their own policies. The app's browser,
+cookie, and redirect checks are described in [App security](docs/SECURITY.md).
 
-Hangar Express is designed to keep your RSI account data on your device.
+## Optional email feedback
 
-The app stores saved RSI credentials and reusable RSI cookies in the iOS Keychain. App snapshots, preferences, cached images, and cached ship metadata are stored in the app container on your device. You can remove saved RSI accounts, cookies, credentials, snapshots, and cached images from inside the app where those controls are available, or by deleting the app from your device.
+Feedback is available in **Account → Tools** and **Settings → Help & Feedback**.
+The form shows the recipient. Your message and subject are user-entered. App/device
+details and diagnostic logs start off; screenshots are included only if selected.
+You can preview the body, full log, and processed pictures before continuing.
 
-## Data Shared With the Developer
+Logs are sanitized but may still contain timestamps, network, activity, or inventory
+details. Reports are not anonymous. Images are resized and re-encoded without
+original filenames or location metadata; personal information visible in the
+picture remains visible. RSI credentials and a full snapshot are not automatically
+attached.
 
-Hangar Express does not operate a developer-owned account server for your RSI account data. The developer does not receive your RSI password, RSI cookies, full hangar contents, purchase history, or local app snapshots from the app automatically.
+Your chosen mail app/provider shares your sending address, display name, message,
+and attachments. Replies go to that sending address. Feedback is used to investigate
+and respond to your request. There is no separate feedback upload service or
+in-app support inbox.
 
-If you select Cloud item translation, the app sends eligible public-facing catalog terms from your hangar to the developer's translation service for review. It also sends a yes/no indication of whether Pro is active so the developer can prioritize commonly seen terms from Pro users. The service stores appearance counts, not your account identity, purchase receipt, or full hangar snapshot. Local item translation does not send these terms or the Pro indication to the translation service.
+If Apple Mail is unavailable, the share sheet offers the message and selected
+attachments. Enter the recipient shown in the app and check the final email.
+Temporary share files are protected, excluded from backup, and cleaned up on
+dismissal. Copies you save or send through another app follow that app/provider's
+storage policies. Closing the feedback form discards its in-memory draft.
 
-If you contact the developer, you may choose to share diagnostics, screenshots, logs, or other information. That information is used only to investigate and respond to your request.
+Copied diagnostic reports use a local-only clipboard entry that expires after ten
+minutes. This cannot retract copies already saved or shared elsewhere.
 
-The Feedback screen prepares an email to the support address displayed in the app. App/device details and diagnostic logs are off by default; screenshots are included only if you select them. You can preview the message, log and processed screenshots before opening your email app. Logs are sanitized but may still contain activity or inventory details. Selected images are resized and re-encoded without their original filenames or location metadata; personal information visible in an image remains visible. The app does not automatically attach your RSI credentials or a full account snapshot.
+## Payments
 
-Feedback is sent through the email app/provider you choose, which shares your sending email address, display name and the message/attachments you send. Replies are delivered to that email address. Hangar Express does not upload feedback to a separate feedback server. If Apple Mail is unavailable, the system share sheet offers the prepared message and selected attachments for you to send through another email app; you must enter the recipient and verify that app's final message. Temporary share files are protected on-device and removed when the share sheet closes. A copy you save or send through another app is controlled by that app/provider.
+Apple handles Hangar Express Early Access purchases and subscriptions. StoreKit
+checks access; the app does not receive your App Store payment card number.
 
-## Third-Party Services
+RSI store purchases are separate. Checkout may show supported payment-provider
+pages, including Alipay and WeChat Pay, or open a payment app. Information you enter
+there is handled by RSI and the chosen payment provider under their terms.
 
-Hangar Express communicates with third-party services as needed for app functionality:
+## Retention and your choices
 
-- Roberts Space Industries and Cloud Imperium services are used for RSI sign-in, hangar data, account data, pledge actions, cookies, and related web content.
-- Apple services are used for App Store purchases, subscription management, payment processing, and purchase entitlement verification.
-- Hosted Star Citizen ship metadata may be loaded from remote services configured by the developer.
-- Remote image hosts may be contacted when the app loads ship artwork or other referenced images.
+Local data stays until removed through app controls or app deletion. You can remove
+saved accounts, clear caches, choose Local or Cloud translation, and send feedback
+without logs, device details, or pictures. Optional calendar/image exports happen
+when you choose those actions.
 
-These third-party services may process information according to their own privacy policies and terms. Hangar Express does not control their data practices.
+Deleting local data does not delete copies already sent to a mail provider or the
+developer. Contact the developer through Feedback about information you submitted.
+Other services retain data under their own policies. Manage or cancel App Store
+subscriptions through your Apple Account; deleting the app does not cancel them.
 
-## Payments and Subscriptions
+## Children, changes, and contact
 
-Purchases and subscriptions are processed by Apple through the App Store. Hangar Express does not receive or store your payment card number or other App Store payment credentials. Purchase and subscription entitlement status is checked with StoreKit so the app can enable Early Access Lab Features for active entitlements.
+The app is intended for people old enough to manage an RSI account and make
+purchases under Apple, RSI, and local requirements; it is not directed to children.
+This policy may change with app features or data handling. The effective date above
+will be updated when it changes.
 
-## Children's Privacy
-
-Hangar Express is not directed to children. The app is intended for users who are old enough to manage an RSI account and make App Store purchases in accordance with Apple, RSI, and local requirements.
-
-## Data Retention
-
-Information stored locally remains on your device until you remove it using app controls, sign out or clear saved data where available, or delete the app. Information handled by Apple, RSI, Cloud Imperium, GitHub, or other remote services is retained according to those services' policies.
-
-## Your Choices
-
-You can:
-
-- choose whether to save RSI account sessions;
-- clear local cache from Settings;
-- remove saved account data where available in the app;
-- manage or cancel App Store subscriptions from your Apple Account settings; and
-- delete the app to remove app-container data from the device.
-
-For information stored by RSI, Cloud Imperium, Apple, GitHub, or other third-party services, use the privacy controls provided by those services.
-
-## Changes to This Policy
-
-This policy may be updated when Hangar Express changes its features, data handling, or third-party services. The effective date above will be updated when changes are made.
-
-## Contact
-
-For app or privacy questions, use the Feedback screen in the app, or use the Hangar Express issue tracker:
-
-https://github.com/TheRealWiseWolfHolo/Hangar-Express/issues
-
-Do not post passwords, cookies, payment information, or other sensitive personal information in public GitHub issues.
+Use **Feedback** in the app for private contact, or the
+[GitHub issue tracker](https://github.com/TheRealWiseWolfHolo/Hangar-Express/issues)
+for public issues. Do not post passwords, cookies, payment details, verification
+codes, or other private information publicly.

@@ -1,66 +1,64 @@
 # Hangar Express
 
-SwiftUI iOS app for retrieving, organizing, and acting on a Star Citizen hangar.
+A SwiftUI iOS companion for your Star Citizen hangar. Browse saved items, plan
+upgrades, and manage supported RSI account actions.
 
-## Current Capabilities
+## Features
 
-- Browser-backed RSI sign-in with saved sessions, local snapshot restore, and developer preview support for Xcode previews.
-- Live sync for hangar pledges, fleet ships, buy-back entries, hangar logs, and account details into app-owned models.
-- Hosted ship catalog and ship-detail enrichment from locally configured remote sources.
-- Fleet detail screens enriched with hosted ship specs such as crew, size, components, weapons, and utility entries.
-- Fleet card long-press to jump from a ship to the pledges that contain it, reusing the hangar pledge detail flow.
-- Melt, gift, and apply-upgrade flows, protected by local device-owner authentication before the RSI action is sent.
-- Persistent local image caching for remote ship art and generated upgrade composite thumbnails, with Settings cache clear support.
+- RSI sign-in, saved accounts, and cached data for offline browsing.
+- Hangar, Fleet, Buy Back, Account, and Hangar Log views with search and filters.
+- Ship details, prices, insurance, package contents, and English/Chinese item names.
+- CCU planning, share pictures, trusted-device management, and Character Repair.
+- Gift, melt, apply-upgrade, and checkout flows with account and authentication checks.
+- Profile game-access indicators that show the matching saved packages when tapped.
+- Event Calendar, plus WBCCU Deals and referral rewards for Early Access users.
+- Email feedback with optional logs, device details, and selected screenshots.
 
-## Repo Shape
+## Recent updates
 
-```text
-Hangar Express/
-  App/
-  Core/
-    Domain/
-    Protocols/
-    Security/
-  Features/
-    Account/
-    Buyback/
-    Fleet/
-    Hangar/
-    Onboarding/
-    Shell/
-    Settings/
-  Services/
-    Auth/
-    Live/
-    Persistence/
-    Preview/
-  Shared/
-docs/
-  ARCHITECTURE.md
-```
+Version 1.1.2 checks trusted pages before using RSI credentials, isolates browser
+cookies, validates checkout messages, and redacts support diagnostics. Supported
+Alipay and WeChat Pay HTTPS pages can stay inside checkout; payment-app links open
+the installed app. Feedback attachments are optional and can be reviewed before
+sending. See the [changelog](CHANGELOG.md).
 
-## Runtime Notes
+## Build and configuration
 
-The shipped app boots with `AppEnvironment.live`. The preview environment still exists for Xcode previews and demo flows, but the main runtime path is live:
+Open `Hanger Express.xcodeproj` in Xcode. The shared `Hanger Express` scheme runs
+the app. Tests use Xcode 27.0 and an iOS 27.0 simulator; see [testing](docs/TESTING.md).
 
-1. Sign in through a browser-backed session flow.
-2. Capture and reuse authenticated RSI cookies for refreshes and other read operations.
-3. Sync hangar pages, fleet projections, buy-back pages, logs, account metadata, and hosted ship detail data into normalized local models.
-4. Use locally configured hosted feeds to enrich fleet and ship-detail UI. The provider-neutral response format is documented in [REMOTE_SERVER_CONTRACT.md](REMOTE_SERVER_CONTRACT.md).
-5. For sensitive pledge actions like melt, gift, and apply upgrade, require both local device-owner authentication and the current RSI password because RSI still gates those actions with password-confirmed requests.
+Public configuration values are blank. Supply these settings through ignored
+`Config/Local.xcconfig` or a private build configuration:
 
-More detail is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+| Setting | Purpose |
+| --- | --- |
+| `REMOTE_PRIMARY_BASE_URL` | Primary hosted data feeds |
+| `REMOTE_FALLBACK_BASE_URL` | Backup hosted data feeds |
+| `REMOTE_TRANSLATION_BASE_URL` | Item dictionary and translation review |
+| `REMOTE_IP_REGION_URL` | Sign-in region check |
+| `REMOTE_REFERRAL_REWARDS_BASE_URL` | Public referral reward catalog |
+| `SUPPORT_EMAIL_ADDRESS` | Feedback recipient shown in the app |
 
-## Legal
+Release builds require all six settings. The five remote settings must use HTTPS.
+A Debug build without a support address disables feedback sending. Keep real
+addresses, endpoints, credentials, build logs, and private notes out of GitHub.
 
-Hangar Express is an unofficial Star Citizen fan project and is not affiliated with the Cloud Imperium group of companies.
+## Documentation
 
-This repository is intentionally published without an open-source license. All rights are reserved except for the limited personal, non-commercial permission described in [PERMISSIONS.md](PERMISSIONS.md).
+- [Support](SUPPORT.md) and [email feedback](docs/FEEDBACK.md)
+- [Architecture](docs/ARCHITECTURE.md) and [account operations](docs/ACCOUNT_OPERATIONS.md)
+- [Security](docs/SECURITY.md) and [network diagnostics](docs/NETWORK_DIAGNOSTICS.md)
+- [Inventory presentation](docs/INVENTORY_PRESENTATION.md) and [referrals](docs/REFERRALS.md)
+- [Tests](docs/TESTING.md) and [performance measurements](docs/PERFORMANCE.md)
 
-Star Citizen, Squadron 42, Roberts Space Industries, and related names, ships, artwork, and other game content shown or referenced by this app or repository belong to the Cloud Imperium group of companies and their respective owners.
+## Project and legal notices
 
-- Fan-project notice and attribution guidance: [DISCLAIMER.md](DISCLAIMER.md)
-- Limited personal-use permission notice: [PERMISSIONS.md](PERMISSIONS.md)
-- Privacy policy for App Store submission: [PRIVACY_POLICY.md](PRIVACY_POLICY.md)
-- Terms of use and subscription terms: [TERMS_OF_USE.md](TERMS_OF_USE.md)
-- User support page: [SUPPORT.md](SUPPORT.md)
+Hangar Express is an unofficial fan app, unaffiliated with the Cloud Imperium group
+of companies. Star Citizen, Squadron 42, RSI names, artwork, and related game
+content belong to their respective owners.
+
+The source is visible, but it has no open-source license. Personal, non-commercial
+use is limited to the permission in [PERMISSIONS.md](PERMISSIONS.md).
+
+See the [disclaimer](DISCLAIMER.md), [asset sources](ASSET_SOURCES.md),
+[privacy policy](PRIVACY_POLICY.md), and [terms of use](TERMS_OF_USE.md).

@@ -1,102 +1,79 @@
-# App security boundaries
+# App security
 
-Version 1.1.2 hardens the client boundaries around authentication, checkout,
-cookies, redirects and support diagnostics. This is an implementation description,
-not a claim that the app or the services it accesses are free of vulnerabilities.
+Version 1.1.2 adds checks around sign-in, checkout, cookies, redirects, and support
+logs. These are client protections, not a guarantee that every connected service
+is secure.
 
-## Browser credentials and checkout
+## Credentials and browser pages
 
-`RSISecurityPolicy` allows native credentials only on HTTPS
-`robertsspaceindustries.com` and `www.robertsspaceindustries.com`, using the default
-HTTPS port and no URL user information. Cookie-domain membership does not grant
-a page credential privileges. Main-frame navigation, popups and responses enforce
-the origin rule; third-party verification frames never receive native credentials.
+`RSISecurityPolicy` permits native credentials only on HTTPS
+`robertsspaceindustries.com` and `www.robertsspaceindustries.com`, with the default
+HTTPS port and no username or password in the URL. Cookie-domain membership alone
+does not grant credential privileges.
 
-Login autofill runs in `WKContentWorld.defaultClient`, with no credential globals
-or persistent page timers. The native retry task stops on navigation, completion
-or dismissal. Each call checks both the native URL and the actual document URL.
-Isolated JavaScript variables do not hide values deliberately entered into the
-trusted page's DOM from that page's own scripts.
+Login autofill checks both the WebView URL and the actual document. It runs in
+`WKContentWorld.defaultClient`, without credential globals or persistent page
+timers. Its retry task stops on navigation, completion, or dismissal. Values
+entered into the trusted page's form remain visible to that page's own scripts.
 
-Checkout automation runs only on the recognized cart routes. It retains the page
-world because RSI's reCAPTCHA APIs live there, and checks the document before
-injection and authenticated requests. Only the token/device fallbacks needed by
-the existing checkout helper enter its arguments; the native account-auth cookie
-is not injected. System cookie handling supplies HTTP-only cookies to requests.
-The allowlist does not protect against a compromised trusted RSI origin.
+Checkout automation runs only on recognized RSI cart routes. It checks the current
+document before injection and authenticated requests. Its page-world script uses
+only the token/device fallbacks needed by the helper; it does not inject the native
+account-auth cookie. System cookie handling supplies HTTP-only cookies.
 
-Checkout messages use bounded typed bodies, a checkout ID and a document ID.
-Native handling verifies the sender WebView, main frame, security origin and
-document URL. A confirmation must match the current confirmation document; log
-text cannot trigger success. Completion is reported once. Existing account and
-generation checks continue to protect persistence and subsequent refreshes;
-navigation signals do not create synthetic purchases or ownership.
+Checkout messages must match the WebView, main frame, origin, document, checkout
+ID, and document ID. Messages and fields have size limits. Log text cannot report
+a successful purchase, and completion is accepted only once.
 
-Alipay and WeChat Pay HTTPS pages may open inside checkout, including recognized
-payment subdomains. Navigation actions, popups and main-frame responses use the
-same browsing policy. These pages receive no native RSI credential privileges,
-checkout automation or accepted checkout bridge messages. Other known payment
-sites and payment app schemes open externally. Other HTTPS links may open
-externally when the user follows a link. Unexpected redirects, HTTP,
-file, data and JavaScript main-frame destinations are rejected. Subframe access
-does not authorize automation or bridge messages.
+## Payment navigation
 
-## Cookie isolation
+Supported Alipay and WeChat Pay HTTPS domains and subdomains may stay inside
+checkout. Navigation, popups, and main-frame responses use the same policy. These
+pages receive no native RSI credential privileges, checkout automation, or accepted
+checkout bridge messages. Payment-app schemes open externally.
 
-`RSISessionCookieSet` and `RSISecurityPolicy` validate trusted domain boundaries,
-cookie names/values, expiry and path applicability. Cookie paths follow the slash
-boundary rule, so `/account` does not match `/accounting`. A persisted cookie
-without a leading domain dot is conservatively treated as host-only. Existing
-saved-session encoding is unchanged. Valid refreshed deletion/expiry cookies
-remove older values with the same storage key.
+Other supported payment providers open externally. User-followed HTTPS links may
+also open externally; unexpected redirects and unsafe main-frame schemes are
+blocked. A compromised trusted RSI page remains outside the protection offered
+by an origin allowlist.
 
-Cookie installation uses each browser's own nonpersistent store. Checkout never
-imports `HTTPCookieStorage.shared`. Detach cancels pending setup/automation/export
-tasks and clears native credentials; callbacks are tied to the attached browser
-and current document. Native request headers and authentication values use only
-cookies applicable to their destination.
+## Cookies and redirects
 
-## Authenticated redirects
+Cookie checks cover domain, host-only status, path, expiry, names, and values.
+Refreshed deletion cookies remove matching saved cookies. Browser stores are
+nonpersistent and separate; checkout never imports the shared system cookie jar.
+Detach cancels browser tasks, clears native credentials, and rejects stale callbacks.
 
-The launcher, account lookup and direct inventory requests use a per-request
-`RSIAuthenticatedRedirectDelegate`, also inherited by the metrics collector.
-Allowed 301/302/303/307/308 redirects must retain the original trusted HTTPS
-origin. There is a ten-hop limit. Cookie and RSI authentication headers are
-rebuilt for each destination, including valid cookie rotation from the response;
-inherited authorization headers are removed. A redirected GET/HEAD does not replay
-the original request body. System certificate validation is preserved.
+`RSIAuthenticatedRedirectDelegate` permits at most ten redirects and keeps the
+original trusted HTTPS origin. It rebuilds scoped cookie/RSI headers and removes
+inherited authorization headers. Redirected GET/HEAD requests do not replay a
+request body. System certificate validation remains enabled.
 
-## Support diagnostics
+## Diagnostics and feedback
 
-`DiagnosticPrivacy` is shared by auth/refresh collection, error previews, report
-builders and diagnostic clipboard exports. It strips credential fields, known
-active-session values, account identifiers, private endpoints and unsafe URL
-components. Unknown error dictionaries, raw authentication responses and account
-HTML previews are omitted. Authentication fallback uses fixed verification hints
-instead of retaining raw response bodies.
+`DiagnosticPrivacy` filters known credentials, account fields, private endpoints,
+unsafe URL parts, and email addresses. Raw account HTML, arbitrary error
+dictionaries, and raw authentication responses are omitted. Error chains and
+fields are bounded; exported reports are capped at 64 KiB.
 
-Fields have byte limits; error chains have depth/node and cycle limits; exported
-reports have a 64 KiB limit. The in-memory redaction context retains a bounded set
-of known values and resets with its diagnostic session. Copied diagnostics use
-the local-only clipboard option and a ten-minute expiration. Previously copied
-reports cannot be retroactively redacted. Deliberately requested card/history
-diagnostics can still contain inventory identifiers and other support metadata;
-users should review their contents before sharing them.
+Copied diagnostics use the local-only clipboard option and expire after ten
+minutes. This cannot retract copies already saved elsewhere. Activity, inventory
+identifiers, timestamps, and other support details may remain: review before sharing.
 
-## Validation
+Feedback logs and app/device details start off. Users select screenshots, preview
+attachments, and send through their mail app. Images are re-encoded without
+original filenames or location metadata. Pixels are not automatically redacted.
+Temporary share files are protected and excluded from backup.
 
-Security tests cover adversarial origins, ports, cookie domains/paths/expiry,
-foreign/stale/oversized bridge messages, shared-cookie contamination, callback
-lifetime, redaction, Unicode bounds and cyclic errors. Offline WebKit tests check
-actual document execution, credential-global absence and frame behavior.
+The support address is read from private build configuration. Public settings are
+blank; tests use a synthetic address. See [feedback](FEEDBACK.md) and
+[network diagnostics](NETWORK_DIAGNOSTICS.md).
 
-Redirect tests exercise the production delegate with real unresumed URLSession
-tasks and controlled redirect responses, including all five supported statuses,
-cookie rotation, body handling and hop limits. They send no DNS/network traffic
-and do not substitute a permissive TLS trust handler. Existing account-operation
-and authentication regressions remain part of the ordinary parallel unit suite.
-Live RSI sign-in, payment and destructive account operations are not test fixtures.
+## Validation limits
 
-Reference APIs: [WKContentWorld](https://developer.apple.com/documentation/webkit/wkcontentworld),
-[WKScriptMessage.frameInfo](https://developer.apple.com/documentation/webkit/wkscriptmessage/frameinfo)
-and [URLSessionTaskDelegate](https://developer.apple.com/documentation/foundation/urlsessiontaskdelegate).
+Tests cover hostile origins, cookies, redirects, stale messages, cancellation,
+redaction, size limits, and feedback attachments. Offline WebKit tests verify
+credential and frame boundaries without weakening TLS checks.
+
+These checks do not exercise live sign-in, payments, destructive RSI actions,
+native mail delivery, or signed-device behavior. See [testing](TESTING.md).

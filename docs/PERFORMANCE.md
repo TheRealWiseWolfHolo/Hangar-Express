@@ -1,281 +1,143 @@
-# Reproducible performance measurements
+# Performance measurements
 
-Use these tools before changing algorithms or cache behavior. Run one benchmark
-at a time on an otherwise idle machine/device. Simulator timings compare
-algorithms; physical device timings determine responsiveness. Record OS,
-Xcode/build, device, power mode, thermal state, dataset, and cache policy with
-each result. Keep the raw samples and result bundle.
+Measure before changing algorithms or caches. Run one workload at a time on an
+idle machine. Use simulator results to compare algorithms and physical devices
+to judge responsiveness. Record toolchain, OS, device, power/thermal state,
+dataset, cache policy, and source hashes. Keep traces and raw results private.
 
-## Workloads and build
+## Offline runner
 
-`BenchmarkInventory` v1 creates 100, 1,000, or 10,000 pledges. Each inventory mixes
-ships, multi-ship packages/game access, upgrades, repeated templates, and unique
-rows. Buyback contains one quarter as many pledges. There are 64 synthetic catalog
-ships and two distinct account identities. Dates, IDs, names, prices, and aliases
-are deterministic. Correctness tests check reproducibility, account separation,
-and representative content.
+`BenchmarkInventory` v1 creates deterministic inventories of 100, 1,000, or 10,000
+pledges, with packages, upgrades, fleet data, and two synthetic accounts. There is
+no real account data or live RSI session. Baseline UI uses image placeholders;
+specific referral UI checks may opt into public test artwork.
 
-The fixtures have no credentials, cookies, real account data, or remote images.
-The UI uses image placeholders. These measurements therefore do not establish
-live RSI latency, real image-cache behavior, or production network traffic.
-
-The benchmark schemes use Release optimization with testability enabled and the
-explicit `HANGAR_BENCHMARKS` compilation flag. Ordinary Release builds omit the
-fixture generator and offline UI entry point. The four remote URLs supplied by
-the script are nonresolving `.invalid` placeholders required by Release config
-validation. No production service is used. Performance tests are excluded from
-the normal unit-test scheme and require an explicit opt-in environment.
-
-## Stage measurements
-
-From the repository root, run with Xcode 27.0 selected and choose a new output
-folder for each run:
+Benchmark schemes use Release optimization, testability, and `HANGAR_BENCHMARKS`.
+The runner supplies five `.invalid` service URLs and a synthetic support address.
+Ordinary Release builds omit the offline entry point. These workloads do not
+measure live RSI latency or production image traffic.
 
 ```sh
 ./scripts/run_performance_baseline.sh \
   'platform=iOS Simulator,name=iPhone 17,OS=27.0' \
-  /tmp/hangar-baseline-simulator
-
-./scripts/run_performance_baseline.sh \
-  'platform=iOS,id=YOUR_DEVICE_UDID' \
-  /tmp/hangar-baseline-iphone
+  /tmp/hangar-baseline
 ```
 
-Physical devices must be paired, trusted for development, and unlocked. Device
-builds use the project's existing development signing team. If the UI test runner
-does not yet have a development profile, explicitly set
-`HANGAR_ALLOW_PROVISIONING_UPDATES=1` to let Xcode provision that runner and register
-the selected development device using the configured account. The script does
-not change the signing account.
+Choose a fresh output folder. Set `HANGAR_PERFORMANCE_DERIVED` to reuse another
+derived-data folder. Select a mode as the final argument:
 
-The harness runs one warmup and five timed samples per size/stage, consuming all
-results in a checksum. It measures existing JSON coding, name normalization,
-fleet projection, grouping, computed group IDs, EN/CN Buyback search pipelines,
-a prebuilt Fleet text-scan kernel, CCU route calculation, full/partial fixture
-refresh orchestration, account switching/grouping, and snapshot save/load.
+| Mode | Measures |
+| --- | --- |
+| `stages` (default) | Coding, normalization, projection, grouping, search, CCU routes, refresh, storage |
+| `supplement` | 2,000 unique buybacks and actual image-cache paths with stubbed traffic |
+| `supplement-profile` | Allocation diagnostic with a 15-second attach delay |
+| `memory` | Process high-water memory counters across large synthetic workloads |
+| `ui` | Real views with offline fixtures: launch, resume, search, and scrolling |
 
-Refresh orchestration uses fake repository results and fake persistence; network
-and disk are measured separately. The fixture's developer-preview session also
-bypasses the authenticated full-refresh concurrency branch. It is not an end-to-end live refresh. Snapshot
-loads use warm OS caches. The two synthetic inventories remain resident at each
-size, and footprint readings are sampled process physical footprint, not peak
-allocations. Fixtures and translations are prepared outside stage timings.
+Stage samples use one warmup and five measured runs. Fixtures are prepared outside
+timed sections. Checksums and result assertions must pass. Snapshot reads use warm
+OS caches. Fake refresh orchestration does not establish live request counts or
+full-refresh concurrency behavior.
 
-Outputs include the build/test log, toolchain version, `.xcresult`, raw attached
-JSON samples, a hash manifest of the measured source tree, and a Markdown table with median, spread, variation, disk bytes,
-and process footprint. A skipped or missing measurement attachment is an error
-in report generation. `HANGAR_PERFORMANCE_DERIVED` optionally changes the derived
-data path for reuse across runs.
+Outputs include logs, `.xcresult`, raw samples, source hashes, a private source
+archive, and summaries where supported. Missing or skipped measurement attachments
+invalidate a result. Do not treat a later source archive as an exact earlier build.
 
-New runs also save `source.tar.gz`, containing the nonignored source under a
-`source/` prefix and its manifest. Local configuration, local notes and symlinks
-are excluded. Keep the archive private with the results. Older runs have hash
-manifests only; a later checkpoint archive must not be represented as the exact
-source for an earlier run if its file hashes differ.
+## Devices and UI
 
-## Supplemental buyback and image-cache measurements
-
-Use the same runner with the `supplement` mode:
+For a physical device, replace the destination with
+`platform=iOS,id=YOUR_DEVICE_UDID`. It must be paired, trusted, unlocked, and signed
+with the project's development team. Only set `HANGAR_ALLOW_PROVISIONING_UPDATES=1`
+when explicitly allowing Xcode to provision/register that test device.
 
 ```sh
-./scripts/run_performance_baseline.sh \
+HANGAR_BENCHMARK_UI_SIZE=1000 \
+  ./scripts/run_performance_baseline.sh \
   'platform=iOS Simulator,name=iPhone 17,OS=27.0' \
-  /tmp/hangar-performance-supplement supplement
+  /tmp/hangar-ui ui
 ```
 
-This is a separate versioned workload; standard fixture-v1 results remain
-unchanged. It has 1,000 pledges and 2,000 uniquely grouped buybacks, measuring
-grouping and EN/CN search including grouping. It also exercises the actual
-`URLCachedImageStore` with a generated 2,048×1,024 JPEG at 84 pt / scale 3.
-The report records compressed bytes and SHA256 so the payload can be compared.
+Repeat sizes 100, 1,000, and 10,000 on representative iPhone/iPad hardware.
+`HANGAR_BENCHMARK_UI_TEST` selects one method. The runner bounds UI tests to
+120–180 seconds. Fixtures use isolated preferences and skip live account startup.
 
-Image cases cover a stubbed miss with decode/persistence/first draw, memory hit
-with first draw, persisted restore with first draw and a failing offline session,
-composite miss/memory hit, and 16 concurrent identical image calls. The last case
-measures the image API without drawing. All stores, handlers, and directories
-are isolated. Clearing caches, replacing store instances and generating the JPEG
-happen outside sample timing; there is one warmup and five measured samples.
-Stub call assertions distinguish misses from hits and verify coalescing; counts
-include warmup and do not describe physical network traffic. Persisted reads use
-warm OS caches. Sampled process footprint is not peak allocations. Generated
-images do not establish production-asset or scrolling performance.
+Search automation enters and checks each character with an ASCII keyboard. Its
+clock includes automation overhead and does not cover Chinese marked text. Launch
+uses a new process with warm OS caches, not a cold device or empty filesystem.
+Use `testLaunchToReady` when native launch metrics omit a companion measurement.
 
-For a separate allocation diagnostic, use `supplement-profile`. It waits 15
-seconds before fixture construction so Instruments can attach to the test host.
-Add Allocations plus `os_signpost`; image stage names identify each measured
-operation. The attached report is marked instrumented and its durations are
-excluded from latency baselines. Preserve freed allocation events when deriving
-peak live bytes, and distinguish recorded heap/VM bytes from physical footprint.
-Export the complete recording-options schema with `xctrace record --template
-Allocations --instrument os_signpost --show-recording-options` before changing
-options; a partial JSON object is rejected by Instruments 27. Verify the trace
-contains the expected stage markers before attributing allocations to an image
-operation. A successful recorder exit alone does not establish that coverage.
-Native Allocations statistics may require opening the saved trace in Instruments;
-the XML table of contents does not necessarily expose allocation events. Its
-"Total Bytes" column is cumulative allocation churn, not peak live memory.
+Read exported sample counts and runtime warnings. Missing launch events or zero
+Frame Count with nonzero duration do not prove that nothing rendered. `Memory
+Physical` is an interval change and may be negative; it is not an absolute peak.
+Do not compare different harness versions as if they were the same measurement.
 
-For a numeric process high-water diagnostic without allocation recording, run:
+## Image and memory diagnostics
 
-```sh
-./scripts/run_performance_baseline.sh 'platform=iOS,id=DEVICE_ID' \
-  /tmp/hangar-memory memory
-```
+Supplemental image tests use a generated 2048×1024 JPEG, isolated stores, and
+stubbed sessions. Cases cover miss/decode/draw, memory hit, disk restore, composite
+images, and 16 identical concurrent requests. Stub counts distinguish coalescing
+and cache hits; they are not real network traffic. Disk reads use warm OS caches.
 
-This selects only `testMemoryHighWater`, uses synthetic accounts and stubbed
-images, and writes `memory.json` / `memory.md`. It reads the kernel's
-`TASK_VM_INFO.ledger_phys_footprint_peak` and `resident_size_peak`, validating
-the returned structure length and rejecting missing counters. The workload
-retains two 10,000-pledge accounts with projection, JSON and snapshot restoration,
-then a 1,000-pledge/2,000-unique-buyback inventory and 16 decoded/drawn image keys.
-The counters include host/framework allocations since process startup and cannot
-be reset between stages. They provide a process high-water mark, not a per-stage
-peak, allocated-byte total, leak diagnosis, or production memory ceiling. Repeat
-in a fresh process on matched hardware before comparing a later change. Keep
-this diagnostic separate from low-overhead latency baselines.
+`supplement-profile` results are instrumented diagnostics, not latency baselines.
+When using Allocations, preserve freed events and inspect recording options before
+changing them. Cumulative allocated bytes, peak live bytes, physical footprint,
+and leaks are different measurements.
 
-## UI measurements
+`memory` uses validated kernel process high-water counters. They include framework
+and host allocations since launch and cannot be reset per stage. Repeat in a fresh
+process on matched hardware; do not treat the result as a production memory ceiling.
+
+## Instruments and signposts
+
+Use Time Profiler with explicit `os_signpost` capture for CPU work. Use SwiftUI /
+Animation Hitches for UI work and a separate Allocations recording for retention.
+Confirm that expected stage markers exist in the saved trace; recorder success
+alone does not prove coverage.
+
+Static stages cover refresh, HTML fetch/parse, normalization, fleet projection,
+grouping, search, CCU routing, and snapshot load/save. Markers contain no account
+identifiers or request contents. Nested intervals overlap and must not be summed
+as total wall time. A FetchHTML marker is not proof of a network request.
 
 ```sh
-HANGAR_BENCHMARK_UI_SIZE=1000 ./scripts/run_performance_baseline.sh \
-  'platform=iOS Simulator,name=iPhone 17,OS=27.0' \
-  /tmp/hangar-baseline-ui ui
-```
-
-Repeat for sizes 100, 1,000, and 10,000 on representative iPhone and iPad hardware.
-Search submits and validates individual character prefixes because a bulk iPad
-`typeText` run produced an incorrect query. Its clock includes those automation
-round trips and must not be compared to the earlier bulk-input harness. Failed
-query/clear assertions invalidate a performance run even if metric samples exist.
-The explicit UI launch environment opens the real Hangar/Fleet/Buyback views with
-an offline synthetic snapshot, isolated display preferences, and no login or
-StoreKit startup. Existing saved accounts are not bootstrapped. Do not use this
-screen's refresh or purchase controls as a live-service benchmark.
-
-UI tests record five samples of process launch, resume, search typing/clearing,
-and scrolling when Xcode supplies each metric. Exported sample counts and runtime
-warnings must be checked: a missing native launch event is incomplete evidence.
-Set `HANGAR_BENCHMARK_UI_TEST=testProcessLaunch` (or another method name) to repeat
-one UI measurement independently. Launch is a new process with warm OS caches, not a cold device boot
-or a cleared filesystem cache. Launch includes deterministic fixture construction.
-The native launch metric waits for responsiveness. A separate `testLaunchToReady`
-clock measures the automated launch-to-ready sequence, because Xcode discards
-companion metrics in an iteration with a missing native launch event. Launch,
-resume and search clocks include UI automation/wait overhead; use stage signposts
-and Instruments to distinguish application work from that overhead. Scrolling
-uses XCTest's scrolling/deceleration metric. The `.xcresult` contains the native
-launch, clock, memory, and scrolling measurements.
-
-The current English UI harness requests an ASCII-capable keyboard only for the
-explicit fixture screen, verifies the typed/cleared values, and bounds each UI
-test to 120–180 seconds. This changed after an iPad/Pinyin automation-service
-failure. Compare only matching harness versions; these measurements do not cover
-Chinese marked-text composition. The normal app's keyboard traits are unchanged.
-
-`Memory Physical` is a change over the measured interval and may be negative;
-absolute and peak physical memory are separate metrics. Variation percentages
-around a near-zero delta or hitch count are not useful regression thresholds.
-Preserve missing-event warnings and actual sample counts. If Xcode reports zero
-Frame Count alongside a nonzero frame rate/duration, treat Frame Count as
-unavailable rather than evidence that nothing rendered.
-
-## Instruments procedure
-
-See Apple's [Recording Performance Data](https://developer.apple.com/documentation/os/recording-performance-data)
-for viewing custom signposts with the `os_signpost` instrument. Check that custom
-stage events exist in the saved trace before treating an interval table as data.
-
-Static Points of Interest intervals mark `Refresh`, `FetchHTML`,
-`ParsePledgeHTML`, `ParseBuybackHTML`, `NormalizeHangar`, `NormalizeBuyback`,
-`FleetProjection`, `GroupHangar`, `GroupFleet`, `GroupBuyback`, `HangarSearch`,
-`FleetSearch`, `BuybackSearch`, `CCURoute`, `SnapshotLoad`, and `SnapshotSave`.
-Intervals contain no account identifiers or request contents.
-
-1. Select the physical device in Instruments and record Time Profiler and SwiftUI
-   / Animation Hitches for launch, scrolling, and repeated search. Record
-   Allocations separately when diagnosing allocation/retention costs; do not
-   combine heavily instrumented timings with the low-overhead baseline.
-2. For CPU stages, attach Time Profiler to `Hangar Express` while the benchmark
-   test runs. Preserve the `.trace` and filter samples by that process and the
-   stage intervals. The default Time Profiler template did not capture the app's
-   custom events in validation; add the explicit signpost instrument. A CLI
-   recording can use `xcrun xctrace record --template
-   'Time Profiler' --instrument os_signpost --device DEVICE --attach 'Hangar Express' --time-limit 30s
-   --output /tmp/hangar-cpu.trace`.
-3. To measure real authenticated full and partial refresh, use the normal app and
-   a separately recorded inventory size. Record Network/File Activity alongside
-   stage intervals, counting requests/bytes and cache hits. Fixture timings and
-   the fixture's zero request count cannot substitute for this run. Do not export
-   response bodies or authentication data into benchmark artifacts.
-4. Check thermal state/power settings and repeat outliers after cooling/settling.
-   Use the same device and build for comparisons. Validate iPhone and iPad
-   separately, including orientation and display mode.
-
-Export raw events with `xcrun xctrace export --input recording.trace --xpath
-'/trace-toc/run[@number="1"]/data/table[@schema="os-signpost"]' > events.xml`,
-then run `python3 scripts/summarize_signpost_trace.py events.xml /tmp/stage-report`.
-The summarizer keeps only the app's static stage names, resolves XML references,
-deduplicates events repeated across instrument tables, and reports incomplete
-intervals. Nested/parallel durations overlap; their sums are not total refresh
-wall time. A `FetchHTML` call is not proof of a network request or cache miss.
-
-For CPU analysis inside a completed refresh, export the `time-profile` table
-using the same XPath pattern, then run:
-
-```sh
+xcrun xctrace export --input recording.trace \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="os-signpost"]' \
+  > events.xml
+xcrun xctrace export --input recording.trace \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]' \
+  > cpu.xml
+python3 scripts/summarize_signpost_trace.py events.xml /tmp/hangar-stages
 python3 scripts/summarize_cpu_trace.py cpu.xml \
-  /tmp/stage-report/signpost-summary.json /tmp/cpu-report
+  /tmp/hangar-stages/signpost-summary.json /tmp/hangar-cpu
 ```
 
-An optional fourth argument selects the zero-based Refresh index. The tool
-excludes startup/user waiting, reports main/worker sampled CPU separately, and
-keeps inclusive app frames and leaf frames separate. CPU seconds may exceed
-wall seconds under concurrency; inclusive frames overlap. Unknown/deduplicated
-symbols cannot identify a particular source function.
+The trace must contain both signposts and a `time-profile` table. The CPU summarizer accepts
+an optional zero-based Refresh index, separates main/worker samples, and keeps
+inclusive/leaf frames separate. CPU seconds may exceed wall time; inclusive frames
+overlap. Unknown symbols cannot identify a specific source function.
 
-## Opt-in live partial-refresh diagnostics
+## Opt-in live read diagnostics
 
-Build the regular app scheme in Release with
-`SWIFT_ACTIVE_COMPILATION_CONDITIONS=HANGAR_BENCHMARKS`, using the real local
-endpoint/signing configuration. Launch that diagnostic build with:
+A diagnostic build can enable `HANGAR_BENCHMARKS` and use private service/signing
+configuration. With an existing account, enable `HANGAR_NETWORK_PROFILE=1` and
+`HANGAR_LIVE_PROFILE_SCOPES=account,hangar,buyback`. Use `0`, not an empty value,
+for `HANGAR_BENCHMARK_UI_SIZE` and `HANGAR_UNIT_TEST_HOST` when launching via xctrace.
 
-```sh
-xcrun xctrace record --template 'Time Profiler' --instrument os_signpost \
-  --device DEVICE --time-limit 180s --output /tmp/partial-refresh.trace \
-  --env HANGAR_NETWORK_PROFILE=1 \
-  --env HANGAR_LIVE_PROFILE_SCOPES=account,hangar,buyback \
-  --env HANGAR_BENCHMARK_UI_SIZE=0 --env HANGAR_UNIT_TEST_HOST=0 \
-  --launch -- com.wisewolfholo.Hanger-Express
-```
+The runner waits for current refresh work, runs only requested read scopes, stops
+on a visible error, and restores the idle-timer setting. Normal bootstrap may run
+first. Validate completed scope intervals, callbacks, and `runnerState=complete`
+in the private `PerformanceProfile/refresh-metrics.json` cache output.
 
-Use `0`, not an empty `--env` value: xctrace rejects empty values. The loaded
-account is required. The runner waits for an existing refresh, runs only the
-explicit allowed read-only scopes, stops on a visible error, and restores its
-previous idle-timer setting. Normal bootstrap work can precede the batch.
+Coverage is limited to `RSIAccountHTTPPageClient` URLSession tasks. Browser, GraphQL,
+feed, and image traffic is not counted. HTTP bytes are not TLS/packet totals.
+No request contents, credentials, URLs, remote addresses, or account identities
+are retained by this aggregate profiler. Ordinary Release excludes these hooks;
+its [support diagnostics](NETWORK_DIAGNOSTICS.md) remain a separate feature.
+Restore an ordinary Release build after profiling.
 
-Scalar metrics are saved at
-`Library/Caches/HangerExpress/PerformanceProfile/refresh-metrics.json` in the app
-data container. Request delegates capture immutable run IDs; the serial writer
-keeps late callbacks attached to the correct saved run. Validate callback counts,
-nonoverlapping scope intervals and `runnerState=complete`. This diagnostic
-mechanism does not implement roadmap ownership or snapshot-write ordering.
+## Comparisons
 
-Coverage is **RSIAccountHTTPPageClient URLSession tasks only**. Browser/GraphQL,
-hosted-feed and image traffic is unobserved. Foundation supplies transaction,
-cache type, protocol, redirect and HTTP byte counts; these are not TLS/packet
-totals. Account can have zero HTML counters while performing other network work.
-No URLs, cookie/header contents, response bodies, remote addresses or account
-identities are retained. Ordinary Release excludes these hooks entirely. Restore
-an ordinary signed Release after profiling and retain its saved data.
-
-## Comparing changes
-
-The largest observed sample establishes an empirical comparison envelope for the
-same setup, not a production latency requirement. Treat a later median outside
-that envelope as a reason to repeat and profile. High variation, different
-hardware, a new fixture version, or a changed cache policy requires a new
-baseline. Set release budgets only after representative physical UI recordings
-and repeated stable samples establish user-visible costs.
-
-The private optimization roadmap records progress, local artifact paths, measured
-findings, proposed budgets, and any device/live-service profiling still pending.
+Compare matched hardware, toolchain, fixture version, and cache policy. Investigate
+outliers after cooling the device. A slower median or wider spread is a reason to
+repeat and profile, not an automatic user-facing performance claim. Set release
+budgets only from repeated physical-device evidence. See [testing](TESTING.md).
