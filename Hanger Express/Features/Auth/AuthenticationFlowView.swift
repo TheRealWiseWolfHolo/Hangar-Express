@@ -88,11 +88,15 @@ struct AuthenticationFlowView: View {
                 diagnostics: appModel.authDiagnostics,
                 authService: appModel.authService,
                 isFinishingAuthentication: viewModel.isSubmitting,
+                isCurrentFlow: { challenge.flowID == appModel.authenticationFlowID && viewModel.browserChallenge?.id == challenge.id },
                 onCancel: {
+                    guard viewModel.browserChallenge?.id == challenge.id else { return }
                     viewModel.cancelBrowserChallenge()
                 },
                 onAuthenticationAttempt: { trustBrowserSession in
-                    await viewModel.finishBrowserChallengeUsingCachedCookies(
+                    guard challenge.flowID == appModel.authenticationFlowID,
+                          viewModel.browserChallenge?.id == challenge.id else { return AppLocalizer.string("Sign-in was cancelled.") }
+                    return await viewModel.finishBrowserChallengeUsingCachedCookies(
                         trustBrowserSession: trustBrowserSession
                     )
                 }
@@ -680,7 +684,7 @@ struct AuthenticationFlowView: View {
     }
 
     private func copyAuthDebugReport() {
-        UIPasteboard.general.string = authDebugReport
+        DiagnosticPrivacy.copy(authDebugReport)
         didCopyAuthDebugReport = true
     }
 }
@@ -1011,7 +1015,7 @@ private enum AuthenticationDebugReportBuilder {
             }
         }
 
-        return lines.joined(separator: "\n")
+        return DiagnosticPrivacy.report(lines)
     }
 
     private static var timestampFormatter: DateFormatter = {

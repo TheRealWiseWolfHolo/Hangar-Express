@@ -864,7 +864,7 @@ private struct HangarLogDiagnosticsView: View {
 
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Copy") {
-                        UIPasteboard.general.string = reportText
+                        DiagnosticPrivacy.copy(reportText)
                     }
                     .disabled(reportText.isEmpty)
                 }

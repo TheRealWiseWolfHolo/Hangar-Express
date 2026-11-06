@@ -251,7 +251,7 @@ struct DashboardTabView: View {
             return
         }
 
-        UIPasteboard.general.string = refreshDebugReport
+        DiagnosticPrivacy.copy(refreshDebugReport)
         didCopyRefreshDebugReport = true
     }
 }
@@ -858,7 +858,7 @@ enum RefreshDebugReportBuilder {
         if !entries.isEmpty {
             sections.append("")
             sections.append("Diagnostics")
-            sections.append(
+            sections.append(contentsOf:
                 entries.map { entry in
                     let baseLine = "[\(entry.timestampLabel)] \(entry.level.rawValue) \(entry.stage)\n\(entry.summary)"
                     guard let detail = entry.detail, !detail.isEmpty else {
@@ -867,11 +867,10 @@ enum RefreshDebugReportBuilder {
 
                     return "\(baseLine)\n\(detail)"
                 }
-                .joined(separator: "\n\n")
             )
         }
 
-        return sections.joined(separator: "\n")
+        return DiagnosticPrivacy.report(sections)
     }
 
     private static func appVersionIdentifier() -> String {

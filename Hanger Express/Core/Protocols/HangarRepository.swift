@@ -162,12 +162,26 @@ final class RefreshDiagnosticsStore {
         }()
     }
 
+    private var protectedValues: [String] = []
+
+    func protect(values: [String]) {
+        var seen: Set<String> = []
+        protectedValues = (values + protectedValues).filter {
+            !$0.isEmpty && $0.utf8.prefix(16_385).count <= 16_384 && seen.insert($0).inserted
+        }.prefix(512).map { $0 }
+    }
+
+    func redacted(_ value: String) -> String {
+        DiagnosticPrivacy.text(value, secrets: protectedValues)
+    }
+
     private(set) var entries: [Entry] = []
     private(set) var generation = UUID()
 
     func reset(context: String? = nil) {
         generation = UUID()
         entries.removeAll()
+        protectedValues.removeAll()
 
         if let context, !context.isEmpty {
             record(stage: "refresh.attempt", summary: context)
@@ -180,17 +194,17 @@ final class RefreshDiagnosticsStore {
         detail: String? = nil,
         level: Entry.Level = .info
     ) {
-        let trimmedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedSummary = DiagnosticPrivacy.text(summary, secrets: protectedValues, limit: 2_048).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedSummary.isEmpty else {
             return
         }
 
-        let trimmedDetail = detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDetail = detail.map { DiagnosticPrivacy.text($0, secrets: protectedValues) }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         entries.append(
             Entry(
                 timestamp: .now,
                 level: level,
-                stage: stage,
+                stage: DiagnosticPrivacy.text(stage, secrets: protectedValues, limit: 200),
                 summary: trimmedSummary,
                 detail: trimmedDetail?.isEmpty == false ? trimmedDetail : nil
             )

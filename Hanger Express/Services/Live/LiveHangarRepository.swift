@@ -3017,7 +3017,7 @@ actor RSIAccountHTTPPageClient {
     }
 
     init(cookies: [SessionCookie], session: URLSession? = nil, diagnostics: RSIHTTPDiagnosticsHandler? = nil) {
-        self.cookies = cookies
+        self.cookies = RSISessionCookieSet.merging(savedCookies: cookies, refreshedCookies: [])
         self.diagnostics = diagnostics
 
         let configuration = URLSessionConfiguration.ephemeral
@@ -3160,24 +3160,24 @@ actor RSIAccountHTTPPageClient {
             forHTTPHeaderField: "User-Agent"
         )
 
-        if let cookieHeader = cookieHeader(), !cookieHeader.isEmpty {
+        if let cookieHeader = cookieHeader(for: requestedURL), !cookieHeader.isEmpty {
             request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
         }
 
-        if let rsiToken = cookieValue(named: "Rsi-Token") ?? cookieValue(named: "rsi-token") {
+        if let rsiToken = RSISecurityPolicy.cookieValue(names: ["Rsi-Token"], in: cookies, for: requestedURL) {
             request.setValue(rsiToken, forHTTPHeaderField: "x-rsi-token")
         }
 
-        if let rsiDevice = cookieValue(named: "_rsi_device") {
+        if let rsiDevice = RSISecurityPolicy.cookieValue(names: ["_rsi_device"], in: cookies, for: requestedURL) {
             request.setValue(rsiDevice, forHTTPHeaderField: "x-rsi-device")
         }
 
         let requestID = UUID().uuidString
         let started = DispatchTime.now().uptimeNanoseconds
         #if DEBUG || HANGAR_BENCHMARKS
-        let collector = RSIRequestMetricsDelegate(profilingDelegate: PerformanceNetworkMetrics.shared.delegateIfEnabled())
+        let collector = RSIRequestMetricsDelegate(cookies: cookies, profilingDelegate: PerformanceNetworkMetrics.shared.delegateIfEnabled())
         #else
-        let collector = RSIRequestMetricsDelegate()
+        let collector = RSIRequestMetricsDelegate(cookies: cookies)
         #endif
         func context() -> String {
             (["requestID=\(requestID)",
@@ -3207,7 +3207,7 @@ actor RSIAccountHTTPPageClient {
             await diagnostics?(detail, failed)
         }
 
-        guard let httpResponse = response as? HTTPURLResponse else {
+        guard let httpResponse = response as? HTTPURLResponse, RSISecurityPolicy.sameOrigin(requestedURL, httpResponse.url) else {
             throw LiveHangarRepositoryError.unexpectedMarkup(
                 directHTTPDiagnostics(
                     summary: "RSI returned a non-HTTP response for the direct page request.",
@@ -3271,25 +3271,13 @@ actor RSIAccountHTTPPageClient {
         return url
     }
 
-    private func cookieHeader() -> String? {
-        let now = Date()
-        return cookies
-            .filter { cookie in
-                guard let expiresAt = cookie.expiresAt else {
-                    return true
-                }
-
-                return expiresAt > now
-            }
-            .map { "\($0.name)=\($0.value)" }
-            .joined(separator: "; ")
-            .nilIfEmpty
+    private func cookieHeader(for url: URL) -> String? {
+        RSISecurityPolicy.applicableCookies(cookies, to: url)
+            .map { "\($0.name)=\($0.value)" }.joined(separator: "; ").nilIfEmpty
     }
 
     private func cookieValue(named name: String) -> String? {
-        cookies.first {
-            $0.name.caseInsensitiveCompare(name) == .orderedSame
-        }?.value.nilIfEmpty
+        RSISecurityPolicy.cookieValue(names: [name], in: cookies)
     }
 
     private func mergeCookies(from response: HTTPURLResponse, url: URL) {
@@ -3312,7 +3300,7 @@ actor RSIAccountHTTPPageClient {
             merged[cookieStorageKey(cookie)] = cookie
         }
 
-        cookies = Array(merged.values)
+        cookies = RSISessionCookieSet.merging(savedCookies: [], refreshedCookies: Array(merged.values))
     }
 
     private func cookieStorageKey(_ cookie: SessionCookie) -> String {
@@ -5028,7 +5016,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         let store = webView.configuration.websiteDataStore.httpCookieStore
         let cookies = await RSIAuthenticatedWebSession.allCookies(from: store)
         return cookies
-            .filter { $0.domain.contains("robertsspaceindustries.com") }
+            .filter { RSISecurityPolicy.accepts(SessionCookie($0)) }
             .map(SessionCookie.init)
     }
 
@@ -5247,6 +5235,11 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         )
     }
 
+    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        decisionHandler(action.targetFrame?.isMainFrame == false || RSISecurityPolicy.isTrustedOrigin(action.request.url) ? .allow : .cancel)
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         appendNavigationEvent("didFinish url=\(webView.url?.absoluteString ?? "unknown")")
         finishLoading(with: .success(()))
@@ -5302,7 +5295,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             appendNavigationEvent("navigationResponse \(summary)")
         }
 
-        decisionHandler(.allow)
+        decisionHandler(!navigationResponse.isForMainFrame || RSISecurityPolicy.isTrustedOrigin(navigationResponse.response.url) ? .allow : .cancel)
     }
 
     private func prepareWebView(with cookies: [SessionCookie]) async throws {
@@ -5407,6 +5400,9 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     private func load(url: URL) async throws {
+        guard RSISecurityPolicy.isTrustedOrigin(url) else {
+            throw LiveHangarRepositoryError.unexpectedMarkup("The RSI page destination is not trusted.")
+        }
         if loadContinuation != nil {
             throw LiveHangarRepositoryError.unexpectedMarkup("The RSI page loader is already busy.")
         }
@@ -5548,17 +5544,6 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             }
         })()
         """)
-        let bodyPreview = await diagnosticJavaScriptValue("""
-        (() => {
-            try {
-                const text = document.body ? document.body.innerText : '';
-                return text.replace(/\\s+/g, ' ').trim().slice(0, 700);
-            } catch (error) {
-                return 'error=' + String(error && error.message ? error.message : error);
-            }
-        })()
-        """)
-
         let cookieNames = Array(Set(currentCookies.map(\.name))).sorted()
         let cookieDomains = Array(Set(currentCookies.map(\.domain))).sorted()
         let eventSummary = lastNavigationEvents.isEmpty ? "none" : lastNavigationEvents.joined(separator: " | ")
@@ -5582,7 +5567,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
             "performanceNavigation=\(diagnosticValue(performanceSummary))",
             "htmlLength=\(diagnosticValue(htmlLength))",
             "navigationEvents=\(eventSummary)",
-            "bodyPreview=\(diagnosticValue(bodyPreview))"
+            "responseBody=omitted (account HTML)"
         ].joined(separator: "\n")
     }
 
@@ -5625,7 +5610,7 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
     }
 
     private func appendNavigationEvent(_ event: String) {
-        let sanitizedEvent = event
+        let sanitizedEvent = DiagnosticPrivacy.text(event, secrets: preparedSessionCookies.map(\.value), limit: 2_048)
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !sanitizedEvent.isEmpty else {
@@ -5651,11 +5636,14 @@ final class RSIAccountPageBrowser: NSObject, WKNavigationDelegate {
         arguments: [String: Any],
         as type: Value.Type
     ) async throws -> Value {
-        let resolvedArguments = preparedScriptAuthenticationArguments.merging(arguments) { _, actionValue in
-            actionValue
+        guard !Task.isCancelled, RSISecurityPolicy.isTrustedOrigin(webView.url),
+              let expectedURL = webView.url?.absoluteString else {
+            throw LiveHangarRepositoryError.unexpectedMarkup("The RSI account page is not trusted for this operation.")
         }
+        var resolvedArguments = preparedScriptAuthenticationArguments.merging(arguments) { _, actionValue in actionValue }
+        resolvedArguments["expectedDocumentURL"] = expectedURL
         let result = try await webView.callAsyncJavaScript(
-            script,
+            RSISecurityPolicy.javaScriptOriginGuard + "\nif (location.href !== expectedDocumentURL) { throw new Error('RSI document changed'); }\n" + script,
             arguments: resolvedArguments,
             in: nil,
             contentWorld: .page

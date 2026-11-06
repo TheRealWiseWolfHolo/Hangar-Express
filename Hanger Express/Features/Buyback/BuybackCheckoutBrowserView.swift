@@ -17,6 +17,7 @@ struct RSICheckoutBrowserView: View {
             GeometryReader { geometry in
                 ZStack(alignment: .bottom) {
                     RSICheckoutWebView(
+                        checkoutID: context.id,
                         initialURL: context.checkoutURL,
                         itemTitle: context.itemTitle,
                         cookies: context.cookies,
@@ -34,6 +35,7 @@ struct RSICheckoutBrowserView: View {
                             onSucceeded(cookies, confirmationURL)
                         }
                     )
+                    .id(context.id)
 
                     if context.automation != nil, !automationLogs.isEmpty {
                         CheckoutAutomationLogPanel(
@@ -65,7 +67,7 @@ struct RSICheckoutBrowserView: View {
     }
 
     private func appendAutomationLog(_ message: String) {
-        let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMessage = DiagnosticPrivacy.text(message).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedMessage.isEmpty else {
             return
         }
@@ -175,7 +177,8 @@ private struct CheckoutAutomationLogPanel: View {
     }
 }
 
-private struct RSICheckoutWebView: UIViewRepresentable {
+struct RSICheckoutWebView: UIViewRepresentable {
+    let checkoutID: UUID
     let initialURL: URL
     let itemTitle: String
     let cookies: [SessionCookie]
@@ -187,6 +190,7 @@ private struct RSICheckoutWebView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
+            checkoutID: checkoutID,
             initialURL: initialURL,
             itemTitle: itemTitle,
             cookies: cookies,
@@ -237,6 +241,12 @@ private struct RSICheckoutWebView: UIViewRepresentable {
         static let checkoutAutomationMessageName = "checkoutAutomationLog"
 
         private weak var webView: WKWebView?
+        private let checkoutID: UUID
+        private(set) var documentID = UUID()
+        private var isAttached = false
+        private var setupTask: Task<Void, Never>?
+        private var exportTask: Task<Void, Never>?
+        private var automationTask: Task<Void, Never>?
         private var initialURL: URL
         private var itemTitle: String
         private var cookies: [SessionCookie]
@@ -250,6 +260,7 @@ private struct RSICheckoutWebView: UIViewRepresentable {
         private let onCheckoutSucceeded: @MainActor @Sendable ([SessionCookie], URL?) -> Void
 
         init(
+            checkoutID: UUID,
             initialURL: URL,
             itemTitle: String,
             cookies: [SessionCookie],
@@ -258,6 +269,7 @@ private struct RSICheckoutWebView: UIViewRepresentable {
             onCookiesExported: @escaping @MainActor @Sendable ([SessionCookie]) -> Void,
             onCheckoutSucceeded: @escaping @MainActor @Sendable ([SessionCookie], URL?) -> Void
         ) {
+            self.checkoutID = checkoutID
             self.initialURL = initialURL
             self.itemTitle = itemTitle
             self.cookies = cookies
@@ -269,24 +281,36 @@ private struct RSICheckoutWebView: UIViewRepresentable {
 
         func attach(_ webView: WKWebView) {
             self.webView = webView
+            isAttached = true
         }
 
         func detach() {
+            isAttached = false
+            documentID = UUID()
+            setupTask?.cancel()
+            exportTask?.cancel()
+            automationTask?.cancel()
+            preparedScriptAuthenticationArguments = [:]
+            cookies = []
+            webView?.stopLoading()
             webView = nil
         }
 
         func loadInitialPage() {
-            guard !didLoadInitialPage, let webView else {
+            guard !didLoadInitialPage, isAttached, let webView,
+                  RSISecurityPolicy.isTrustedOrigin(initialURL) else {
                 return
             }
 
             didLoadInitialPage = true
-            Task { @MainActor in
+            setupTask = Task { @MainActor [weak self, weak webView] in
+                guard let self, let webView else { return }
                 let preparedSession = await RSIAuthenticatedWebSession.prepare(
                     cookies: cookies,
                     in: webView
                 )
-                preparedScriptAuthenticationArguments = preparedSession.scriptArguments
+                guard self.isAttached, self.webView === webView, !Task.isCancelled else { return }
+                preparedScriptAuthenticationArguments = preparedSession.scriptArguments.filter { ["nativeRsiToken", "nativeRsiDevice"].contains($0.key) }
                 webView.load(
                     RSIAuthenticatedWebSession.request(
                         url: initialURL,
@@ -313,9 +337,12 @@ private struct RSICheckoutWebView: UIViewRepresentable {
             }
 
             lastCookieExportRequestID = cookieExportRequestID
-            Task { @MainActor in
+            exportTask?.cancel()
+            exportTask = Task { @MainActor [weak self] in
+                guard let self, self.isAttached else { return }
                 let exportedCookies = await currentRSICookies()
-                onCookiesExported(exportedCookies.isEmpty ? cookies : exportedCookies)
+                guard self.isAttached, !Task.isCancelled else { return }
+                onCookiesExported(exportedCookies)
             }
         }
 
@@ -323,66 +350,66 @@ private struct RSICheckoutWebView: UIViewRepresentable {
             _: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
-            let renderedMessage = Self.renderScriptMessage(message.body)
-            guard !renderedMessage.isEmpty else {
-                return
+            guard isAttached, message.webView === webView else { return }
+            let origin = message.frameInfo.securityOrigin
+            var components = URLComponents()
+            components.scheme = origin.protocol
+            components.host = origin.host
+            if origin.port != 0 { components.port = origin.port }
+            guard let event = RSICheckoutBridgePolicy.event(body: message.body,
+                isMainFrame: message.frameInfo.isMainFrame, senderOrigin: components.url,
+                frameURL: message.frameInfo.request.url, currentURL: webView?.url,
+                checkoutID: checkoutID.uuidString, documentID: documentID.uuidString) else { return }
+            switch event {
+            case let .log(text): onAutomationLog(DiagnosticPrivacy.text(text, secrets: cookies.map(\.value)))
+            case let .confirmation(url): reportCheckoutSuccess(confirmationURL: url)
             }
+        }
 
-            Task { @MainActor in
-                onAutomationLog(renderedMessage)
-            }
-
-            if let confirmationURL = Self.checkoutConfirmationURL(from: renderedMessage) {
-                reportCheckoutSuccess(confirmationURL: confirmationURL)
-            }
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation _: WKNavigation!) {
+            documentID = UUID()
+            automationTask?.cancel()
         }
 
         func webView(_ webView: WKWebView, didFinish _: WKNavigation!) {
+            guard isAttached, self.webView === webView else { return }
             startCheckoutAutomationIfNeeded(in: webView)
         }
 
-        func webView(
-            _ webView: WKWebView,
-            createWebViewWith configuration: WKWebViewConfiguration,
-            for navigationAction: WKNavigationAction,
-            windowFeatures: WKWindowFeatures
-        ) -> WKWebView? {
-            if let url = navigationAction.request.url, shouldOpenExternally(url) {
-                openExternalURL(url)
-                return nil
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                     for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            switch RSICheckoutNavigationPolicy.decision(for: action.request.url, isMainFrame: true,
+                                                       isUserLink: action.navigationType == .linkActivated) {
+            case .inApp: if action.targetFrame == nil { webView.load(action.request) }
+            case .external: if let url = action.request.url { openExternalURL(url) }
+            case .cancel: break
             }
-
-            if navigationAction.targetFrame == nil {
-                webView.load(navigationAction.request)
-            }
-
             return nil
         }
 
-        func webView(
-            _ webView: WKWebView,
-            decidePolicyFor navigationAction: WKNavigationAction,
-            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
-        ) {
-            guard let url = navigationAction.request.url else {
-                decisionHandler(.allow)
-                return
-            }
-
-            if shouldOpenExternally(url) {
-                openExternalURL(url)
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            switch RSICheckoutNavigationPolicy.decision(for: action.request.url,
+                isMainFrame: action.targetFrame?.isMainFrame != false, isUserLink: action.navigationType == .linkActivated) {
+            case .inApp: decisionHandler(.allow)
+            case .external:
                 decisionHandler(.cancel)
-                return
+                if let url = action.request.url { openExternalURL(url) }
+            case .cancel: decisionHandler(.cancel)
             }
+        }
 
-            decisionHandler(.allow)
+        func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
+                     decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+            decisionHandler(RSICheckoutNavigationPolicy.allowsResponse(for: response.response.url,
+                isMainFrame: response.isForMainFrame) ? .allow : .cancel)
         }
 
         private func allCookies(from store: WKHTTPCookieStore) async -> [HTTPCookie] {
             await RSIAuthenticatedWebSession.allCookies(from: store)
         }
 
-        private func currentRSICookies() async -> [SessionCookie] {
+        func currentRSICookies() async -> [SessionCookie] {
             guard let webView else {
                 return []
             }
@@ -394,53 +421,8 @@ private struct RSICheckoutWebView: UIViewRepresentable {
                 }
             }
 
-            var combined: [String: HTTPCookie] = [:]
-
-            for cookie in storeCookies {
-                combined[cookieKey(cookie)] = cookie
-            }
-
-            for cookie in HTTPCookieStorage.shared.cookies ?? [] where combined[cookieKey(cookie)] == nil {
-                combined[cookieKey(cookie)] = cookie
-            }
-
-            return combined.values
-                .filter { $0.domain.contains("robertsspaceindustries.com") }
-                .map(SessionCookie.init)
-                .sorted { lhs, rhs in
-                    if lhs.domain == rhs.domain {
-                        return lhs.name < rhs.name
-                    }
-
-                    return lhs.domain < rhs.domain
-                }
-        }
-
-        private func cookieKey(_ cookie: HTTPCookie) -> String {
-            Self.cookieKey(cookie)
-        }
-
-        private static func cookieKey(_ cookie: HTTPCookie) -> String {
-            RSIAuthenticatedWebSession.cookieKey(cookie)
-        }
-
-        private func shouldOpenExternally(_ url: URL) -> Bool {
-            guard let scheme = url.scheme?.lowercased() else {
-                return false
-            }
-
-            if !Self.inAppSchemes.contains(scheme) {
-                return true
-            }
-
-            guard scheme == "https",
-                  let host = url.host?.lowercased() else {
-                return false
-            }
-
-            return Self.externalPaymentDomains.contains { domain in
-                host == domain || host.hasSuffix(".\(domain)")
-            }
+            guard isAttached, self.webView === webView, !Task.isCancelled else { return [] }
+            return RSISessionCookieSet.merging(savedCookies: [], refreshedCookies: storeCookies.map(SessionCookie.init))
         }
 
         private func openExternalURL(_ url: URL) {
@@ -450,9 +432,9 @@ private struct RSICheckoutWebView: UIViewRepresentable {
         }
 
         private func startCheckoutAutomationIfNeeded(in webView: WKWebView) {
-            guard let automation else {
-                return
-            }
+            guard let automation, isAttached, self.webView === webView,
+                  RSISecurityPolicy.isCheckoutURL(webView.url), let expectedURL = webView.url?.absoluteString else { return }
+            let generation = documentID
 
             let script = Self.checkoutAutomationScript(
                 amountText: automation.storeCreditAmount.cartCreditInputString,
@@ -462,15 +444,20 @@ private struct RSICheckoutWebView: UIViewRepresentable {
             Task { @MainActor in
                 onAutomationLog("Injecting checkout automation for \(automation.storeCreditAmount.cartCreditInputString) USD.")
             }
-            Task { @MainActor [weak self, weak webView] in
-                guard let self, let webView else {
-                    return
-                }
+            automationTask?.cancel()
+            automationTask = Task { @MainActor [weak self, weak webView] in
+                guard let self, let webView, self.isAttached, self.webView === webView,
+                      self.documentID == generation, !Task.isCancelled,
+                      RSISecurityPolicy.isCheckoutURL(webView.url), webView.url?.absoluteString == expectedURL else { return }
 
                 do {
+                    var arguments = preparedScriptAuthenticationArguments
+                    arguments["checkoutID"] = checkoutID.uuidString
+                    arguments["documentID"] = generation.uuidString
+                    arguments["expectedDocumentURL"] = expectedURL
                     _ = try await webView.callAsyncJavaScript(
-                        script,
-                        arguments: preparedScriptAuthenticationArguments,
+                        RSISecurityPolicy.javaScriptOriginGuard + "\nif (location.href !== expectedDocumentURL) { throw new Error('RSI document changed'); }\n" + script,
+                        arguments: arguments,
                         in: nil,
                         contentWorld: .page
                     )
@@ -481,39 +468,21 @@ private struct RSICheckoutWebView: UIViewRepresentable {
         }
 
         private func reportCheckoutSuccess(confirmationURL: URL?) {
-            guard !didReportCheckoutSuccess else {
+            guard isAttached, !didReportCheckoutSuccess,
+                  RSISecurityPolicy.isCheckoutConfirmationURL(confirmationURL), confirmationURL == webView?.url else {
                 return
             }
 
             didReportCheckoutSuccess = true
-            Task { @MainActor in
+            let generation = documentID
+            exportTask?.cancel()
+            exportTask = Task { @MainActor [weak self] in
+                guard let self, self.isAttached else { return }
                 let exportedCookies = await currentRSICookies()
-                onCheckoutSucceeded(exportedCookies.isEmpty ? cookies : exportedCookies, confirmationURL)
+                guard self.isAttached, self.documentID == generation, !Task.isCancelled,
+                      confirmationURL == self.webView?.url else { return }
+                onCheckoutSucceeded(exportedCookies, confirmationURL)
             }
-        }
-
-        private static func renderScriptMessage(_ body: Any) -> String {
-            if let string = body as? String {
-                return string.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-
-            if JSONSerialization.isValidJSONObject(body),
-               let data = try? JSONSerialization.data(withJSONObject: body),
-               let string = String(data: data, encoding: .utf8) {
-                return string.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-
-            return String(describing: body).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        private static func checkoutConfirmationURL(from message: String) -> URL? {
-            guard let markerRange = message.range(of: "Checkout confirmation URL reached:") else {
-                return nil
-            }
-
-            let urlText = message[markerRange.upperBound...]
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return URL(string: urlText)
         }
 
         private static func checkoutAutomationScript(amountText: String, itemTitle: String, messageName: String) -> String {
@@ -527,6 +496,10 @@ private struct RSICheckoutWebView: UIViewRepresentable {
                 return 'already-active';
               }
 
+              const trustedCheckoutDocument = () => location.origin === new URL(expectedDocumentURL).origin &&
+                ['/en/store/pledge/cart', '/store/pledge/cart', '/en/pledge/cart', '/pledge/cart'].some(root =>
+                  location.pathname === root || location.pathname.startsWith(root + '/'));
+              if (!trustedCheckoutDocument()) { throw new Error('Untrusted checkout route'); }
               const amountText = \#(amountLiteral);
               const expectedItemTitle = \#(itemTitleLiteral);
               const messageName = \#(messageLiteral);
@@ -563,7 +536,7 @@ private struct RSICheckoutWebView: UIViewRepresentable {
               const postLog = (message) => {
                 const entry = `[${new Date().toISOString()}] ${String(message || '')}`;
                 try {
-                  window.webkit?.messageHandlers?.[messageName]?.postMessage(entry);
+                  window.webkit?.messageHandlers?.[messageName]?.postMessage({ kind: 'log', checkoutID, documentID, message: entry.slice(0, 1500) });
                 } catch (error) {
                   // Native logging is best-effort; keep automation running if the bridge is unavailable.
                 }
@@ -1057,6 +1030,7 @@ private struct RSICheckoutWebView: UIViewRepresentable {
               );
               const errorMessage = (error) => normalizeText(error?.message || error || 'unknown error');
               const graphQLRequest = async (operationName, query, variables = {}) => {
+                if (!state.active || !trustedCheckoutDocument()) { throw new Error('Checkout document changed'); }
                 const headers = {
                   accept: 'application/json',
                   'content-type': 'application/json'
@@ -1064,7 +1038,7 @@ private struct RSICheckoutWebView: UIViewRepresentable {
                 const csrf = csrfToken();
                 const rsiToken = cookieValue('Rsi-Token') || (typeof nativeRsiToken === 'string' ? nativeRsiToken : '');
                 const rsiDevice = cookieValue('_rsi_device') || (typeof nativeRsiDevice === 'string' ? nativeRsiDevice : '');
-                const accountAuth = cookieValue('Rsi-Account-Auth') || (typeof nativeRsiAccountAuth === 'string' ? nativeRsiAccountAuth : '');
+                const accountAuth = cookieValue('Rsi-Account-Auth');
                 if (csrf) {
                   headers['x-csrf-token'] = csrf;
                 }
@@ -1920,10 +1894,12 @@ private struct RSICheckoutWebView: UIViewRepresentable {
                 postLog(`Checkout automation started. Store credit amount=${amountText} USD.`);
 
                 while (state.active && Date.now() - state.startedAt < 120000) {
+                  if (!trustedCheckoutDocument()) { state.active = false; return; }
                   if (isConfirmURL()) {
                     state.active = false;
                     state.completed = true;
-                    postLog(`Checkout confirmation URL reached: ${window.location.href}`);
+                    postLog('RSI checkout confirmation page reached.');
+                    window.webkit?.messageHandlers?.[messageName]?.postMessage({ kind: 'confirmation', checkoutID, documentID, url: window.location.href });
                     return;
                   }
 
@@ -2026,26 +2002,7 @@ private struct RSICheckoutWebView: UIViewRepresentable {
             return "\"\(escapedValue)\""
         }
 
-        private static let inAppSchemes: Set<String> = [
-            "about",
-            "blob",
-            "data",
-            "http",
-            "https",
-            "javascript"
-        ]
 
-        private static let externalPaymentDomains: Set<String> = [
-            "alipay.com",
-            "alipay.hk",
-            "alipayobjects.com",
-            "tenpay.com",
-            "wechatpay.com",
-            "paypal.com",
-            "paypalobjects.com",
-            "unionpay.com",
-            "95516.com"
-        ]
     }
 }
 

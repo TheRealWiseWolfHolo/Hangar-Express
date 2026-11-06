@@ -1,177 +1,71 @@
-# Hangar Express Architecture
+# Architecture
 
-## Product Goal
+Hangar Express uses SwiftUI and Observation. `AppEnvironment` supplies live or test
+services. `AppModel` owns account state, refreshes, saved data, and account actions.
 
-Build a clean iOS app that helps a Star Citizen player answer three questions quickly:
+## Code layout
 
-1. What is in my hangar right now?
-2. How is that hangar organized as ships, upgrades, packs, and buy-back items?
-3. What planning options do I have without touching risky account actions?
+| Folder | Responsibility |
+| --- | --- |
+| `App/` | App state, service wiring, and operation ownership |
+| `Core/Domain/` | Sessions, snapshots, inventory, and tool models |
+| `Core/Protocols/` | Service and storage interfaces |
+| `Core/Security/` | Browser origins, cookies, redirects, and diagnostic redaction |
+| `Features/` | Account, authentication, checkout, feedback, inventory, and tools |
+| `Services/` | RSI adapters, hosted feeds, storage, and preview services |
+| `Shared/` | Reusable views, image loading, formatting, and search helpers |
 
-The Android app at `summerkirakira/Starcitizen-lite` is useful as a feature inventory, but not as a direct architecture template. Its scope is broad, its implementation is tightly coupled to reverse-engineered RSI endpoints, and much of the product logic is mixed into the UI layer.
+## Data flow
 
-## Guiding Decisions
+1. Restore a saved session from Keychain and a cached account snapshot.
+2. Ask the user to sign in when a session is missing or expired.
+3. Fetch RSI data through live services and convert it into app-owned models.
+4. Build inventory groups, lookups, and search indexes away from the UI actor.
+5. Commit results only if their account, context, and operation are still current.
+6. Save accepted snapshots through an ordered persistence coordinator.
 
-- Use `SwiftUI + Observation` for the app layer.
-- Keep domain models independent from RSI HTML or GraphQL shapes.
-- Treat RSI integration as an adapter, not as the center of the app.
-- Prefer a browser-backed session to direct credential entry.
-- Ship a read-only organizer first.
+`HangarSnapshot` holds packages, fleet data, buy-back entries, account information,
+and logs. Each section tracks its own freshness and content revision. Partial
+refresh failures keep useful cached data. Hosted catalogs enrich these models;
+they do not establish account ownership.
 
-## Recommended Module Layout
+## Accounts and actions
 
-```text
-Hangar Express/
-  App/
-    AppEnvironment.swift
-    AppModel.swift
-  Core/
-    Domain/
-      HangarModels.swift
-    Protocols/
-      HangarRepository.swift
-      SessionStore.swift
-  Features/
-    Onboarding/
-    Shell/
-    Hangar/
-    Fleet/
-    Buyback/
-    Settings/
-  Services/
-    Preview/
-    Live/
-      Session/
-      Remote/
-      Parsing/
-      Cache/
-  Shared/
-    Formatters/
-```
+Credentials and reusable cookies are stored in Keychain. Read-only sign-in uses
+an RSI browser session without saving a native password. Password-confirmed
+account actions are unavailable for read-only accounts.
 
-## Domain Model
+Sensitive actions use local device authentication and RSI password checks where
+required. One mutation gate covers authorization, submission, and reconciliation.
+An uncertain submitted action requires review before retrying. Switching accounts
+invalidates old local work but cannot undo a request already sent to RSI.
 
-The app should own these concepts:
+See [account operations](ACCOUNT_OPERATIONS.md).
 
-- `UserSession`
-  - Who is signed in
-  - How the session was established
-  - Session notes for support/debugging
-- `HangarSnapshot`
-  - Timestamped local view of the account
-  - Packages
-  - Fleet ships
-  - Buy-back items
-  - Derived metrics
-- `HangarPackage`
-  - Pledge/package identity
-  - Original and current values
-  - Gift/reclaim/upgrade flags
-  - Insurance
-  - Included items
-- `FleetShip`
-  - Ship-centric projection used for browsing by manufacturer, role, insurance, or source package
-- `BuybackPledge`
-  - Reclaimed items that remain useful for planning
+## Browser security
 
-This split matters because the live RSI pages expose hangar data in a package-oriented way, while the organizer experience is often ship-oriented.
+Login helpers and native RSI credentials are limited to trusted RSI HTTPS origins.
+Checkout automation also checks the current cart document and session. Browser
+stores are isolated, and authenticated HTTP redirects keep the original origin.
 
-## App Flow
+Supported Alipay and WeChat Pay pages may load inside checkout. They receive no
+native RSI credential privileges or checkout automation. See [security](SECURITY.md).
 
-1. App launches into `AppModel`.
-2. `AppModel` loads any locally stored session reference.
-3. If no session exists, the user sees onboarding and chooses a sign-in path.
-4. `HangarRepository` fetches and normalizes remote data into `HangarSnapshot`.
-5. Feature views render from normalized models only.
+## Hosted data and feedback
 
-## Live Integration Design
+Hosted feeds share requests, validate responses, and keep usable offline data.
+Referral catalogs contain public reward data; personal progress stays in the
+account snapshot. See [referrals](REFERRALS.md).
 
-As of April 17, 2026, the relevant RSI surfaces still appear to be:
+Feedback prepares email through the user's chosen mail app. Optional diagnostics
+are sanitized snapshots of local events. Selected images are re-encoded before
+sharing. There is no feedback backend or in-app support inbox.
 
-- `/account/pledges`
-  - Authenticated HTML page for the hangar/pledge list
-- `/account/buy-back-pledges`
-  - Authenticated HTML page for buy-back items
-- `/graphql`
-  - Live GraphQL endpoint used by the website
-- `/api/account/pledgeLog`
-  - Account history endpoint referenced by community tooling
-- `/pledge-store/api/upgrade/graphql`
-  - Upgrade metadata surface for later CCU planning
+All six service/support settings come from private build configuration. Tracked
+settings stay blank; Release builds validate them. See the [README](../README.md).
 
-### Auth Recommendation
+## Validation
 
-Do not start with email/password fields inside the app.
-
-Preferred order:
-
-1. Embedded browser-backed login flow that lets RSI handle 2FA/captcha.
-2. Session extraction into a secure local store.
-3. Optional developer-only cookie import fallback.
-
-Why:
-
-- The Android reference app contains credential and session-relogin logic that is brittle and high-maintenance.
-- RSI account flows can require captcha, multi-step login, or launcher-specific behavior.
-- Destructive actions on RSI accounts are high consequence.
-
-### Storage Recommendation
-
-- Keychain for session material.
-- Local cache for normalized snapshots.
-- Domain models should remain decoupled from the persistence layer so SwiftData, SQLite, or GRDB can be swapped later.
-
-## Feature Phases
-
-### Phase 1
-
-- Browser-backed sign-in
-- Read-only hangar sync
-- Package list
-- Fleet projection
-- Buy-back list
-- Search, filter, and sort
-
-### Phase 2
-
-- Local tags
-- Personal notes
-- Insurance filters
-- Upgrade-chain friendly grouping
-- Snapshot diffs between syncs
-
-### Phase 3
-
-- Alerting for important changes
-- Deeper ship metadata enrichment
-- Optional cloud sync for user-created organization data
-
-### Explicitly Deferred
-
-- Melt / reclaim
-- Gifting
-- Applying upgrades
-- Cart manipulation
-- Store checkout
-
-Those flows should remain out of scope until the session model, legal comfort level, and UX safeguards are all solid.
-
-## Why The Current Scaffold Looks Like This
-
-The code in this repo intentionally starts with:
-
-- `PreviewSessionStore`
-- `PreviewHangarRepository`
-- feature tabs backed by normalized models
-
-That gives us a stable product shell while the live adapter is designed behind protocols.
-
-## Next Implementation Steps
-
-1. Add `LiveSessionStore` backed by Keychain.
-2. Add a `WKWebView` sign-in flow and cookie bridge.
-3. Implement `LiveHangarRepository`.
-4. Split remote parsing into:
-   - authenticated HTML parsers for pledges and buy-back
-   - GraphQL clients for store and ship metadata
-5. Add a persistence-backed cache layer and snapshot diffing.
+Tests inject fake services, isolated storage, and HTTP fixtures. Offline UI and
+performance workloads are opt-in. They do not make live purchases, send support
+email, or prove behavior on a signed physical device. See [testing](TESTING.md).

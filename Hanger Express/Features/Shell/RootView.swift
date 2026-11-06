@@ -94,7 +94,7 @@ struct RootView: View {
             return
         }
 
-        UIPasteboard.general.string = report
+        DiagnosticPrivacy.copy(report)
         didCopyRefreshDebugReport = true
     }
 }

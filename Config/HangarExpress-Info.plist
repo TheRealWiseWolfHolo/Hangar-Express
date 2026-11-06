@@ -42,6 +42,8 @@
 	<string>$(REMOTE_REFERRAL_REWARDS_BASE_URL)</string>
 	<key>RemoteTranslationBaseURL</key>
 	<string>$(REMOTE_TRANSLATION_BASE_URL)</string>
+	<key>SupportEmailAddress</key>
+	<string>$(SUPPORT_EMAIL_ADDRESS)</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

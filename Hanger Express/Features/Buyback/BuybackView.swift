@@ -110,7 +110,7 @@ struct BuybackView: View {
                             .disabled(isPreparingCheckout || appModel.isRefreshing)
                             .contextMenu {
                                 Button {
-                                    UIPasteboard.general.string = buybackDebugExport(for: itemGroup)
+                                    DiagnosticPrivacy.copy(buybackDebugExport(for: itemGroup))
                                 } label: {
                                     Label("Copy Raw Buy-Back Data", systemImage: "doc.on.doc")
                                 }

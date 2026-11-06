@@ -632,6 +632,7 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
     case resetCharacter
     case eventCalendar
     case referrals
+    case feedback
 
     var id: Self { self }
 
@@ -651,6 +652,8 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
             return AppLocalizer.string("Referrals")
         case .eventCalendar:
             return AppLocalizer.string("Event Calendar")
+        case .feedback:
+            return AppLocalizer.string("Feedback")
         }
     }
 
@@ -670,6 +673,8 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
             return "person.2.badge.plus"
         case .eventCalendar:
             return "calendar.badge.clock"
+        case .feedback:
+            return "envelope.badge"
         }
     }
 
@@ -677,7 +682,7 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .wbccuDeals, .referrals:
             return true
-        case .allShips, .authorizedDevices, .ccuChainCalculator, .resetCharacter, .eventCalendar:
+        case .allShips, .authorizedDevices, .ccuChainCalculator, .resetCharacter, .eventCalendar, .feedback:
             return false
         }
     }
@@ -690,6 +695,7 @@ enum FleetTool: String, CaseIterable, Identifiable, Hashable {
             || self == .resetCharacter
             || self == .eventCalendar
             || self == .referrals
+            || self == .feedback
     }
 }
 

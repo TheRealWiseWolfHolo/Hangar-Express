@@ -1,78 +1,62 @@
-# Account operation ownership
+# Account operations
 
-Every asynchronous account operation carries a coordinator identity, account ID,
-context generation and operation ID. A result commits only while those remain
-current. Switching, replacing a session, sign-out or active-account removal
-invalidates work before the first suspension. Removing a different saved account
-preserves the active account's work. Account-storage transitions have a short
-exclusive gate; it is released before slow cache restoration or refresh.
+## Ownership and cancellation
 
-Cancellation reduces wasted work but does not establish ownership. Cancelled
-callers can stop waiting through a single-resolution result relay even if a
-service ignores cancellation. The abandoned worker remains tracked until it
-actually finishes. Its invalid operation ID fences progress, cookies, snapshots,
-errors, banners and cleanup. An old defer must never clear a newer refresh.
-Account switching and sign-out do not wait for those abandoned workers.
+Every asynchronous account operation has an account, context generation, and
+operation ID. Results can update the app only while that owner is current.
+Switching accounts, replacing a session, signing out, or removing the active
+account invalidates old work before waiting for services. Removing another saved
+account does not interrupt the active account.
 
-Read operations own their progress, log batches, errors and presentation cleanup.
-Cached restores also check an in-memory snapshot revision so an older disk read
-cannot replace a newer result for the same account. Account-specific translation
-preloads and delayed image work are cancelled/fenced; shared catalog/dictionary
-services remain global. Root UI identity changes at a context boundary to reset
-old sheets and local presentation state. Authentication completions check their
-flow/request identifiers. Checkout-cookie callbacks carry the account ID and
-generation captured when the checkout was prepared.
+Cancellation stops waiting where possible; it does not prove that a service
+stopped. Workers that ignore cancellation remain tracked until they finish.
+Their old results cannot change cookies, snapshots, progress, errors, or cleanup
+for a newer operation. Account switching does not wait for them.
+
+Cached restores also check the current snapshot revision. Translation preloads,
+image work, authentication completions, and checkout cookie callbacks carry
+matching context checks. Shared public catalogs remain separate from account data.
 
 ## Mutations and recovery
 
-One mutation gate covers authorization, submission, cookie persistence and
-post-action reconciliation. A switch can abandon local work but cannot undo an
-RSI request already submitted. Before submission, a preference marker is written
-under a SHA256 hash of the account identity (no cookies, passwords or account
-labels). Pending markers survive account switches and are loaded by a new app
-model. They are local metadata, not server-side idempotency keys or a guarantee
-against a crash before preferences reach disk.
+One mutation gate covers local authentication, RSI submission, cookie saving, and
+reconciliation. Password-confirmed actions are unavailable for read-only accounts.
+Browser navigation and checkout messages also follow the [security policy](SECURITY.md).
 
-A definitive returned response can resolve a known rejection while its owner is
-still current. Successful inventory actions keep the gate and marker through
-reconciliation and the snapshot-store save call. Normal in-flight actions do not
-show the recovery panel. An obsolete, cancelled or failed submitted request with
-an uncertain outcome retains its marker. Never automatically replay the action.
+Before submission, the app records a pending marker under a hash of the account
+identity. It contains no password, cookie, or account label. The marker survives
+account switches, but is not a server idempotency key or a crash-proof disk write.
 
-Recovery requires a full/hangar read that starts after local submission work has
-settled and stays clear of a newer submission, followed by explicit user
-acknowledgement that they reviewed the RSI account, including cart/device state
-where relevant. A read that overlaps the pending request cannot unlock recovery.
-Refresh alone is not proof a server mutation did not happen. The Account page
-provides the refresh, review link and acknowledgement; no automated purchase,
-gift, melt or repeated mutation is part of recovery.
+A known rejection can clear the marker while its operation is current. A successful
+inventory action keeps it until reconciliation and snapshot saving finish. An
+uncertain submitted result keeps the marker. The app never automatically replays
+that action: switching accounts cannot undo an RSI request already sent.
 
-## Persistence boundary
+Recovery needs a fresh Hangar/Full Refresh after submission work has settled, then
+explicit confirmation that the user reviewed the RSI account. A read that overlaps
+the request cannot unlock recovery. Refresh alone does not prove what happened to
+a purchase, gift, melt, cart change, or device action.
 
-Snapshot saves reserve an account revision synchronously on the UI owner before
-any task is scheduled. A persistence coordinator runs one backend operation at a
-time and coalesces pending saves for the same account. Delete/clear barriers
-supersede queued older saves and follow an active write, preventing later write
-completion from recreating deleted data. A flush waits for work accepted before
-its barrier; each receipt reports its own success, supersession or error. Accepted
-writes survive caller cancellation. The queue is in process; abrupt OS termination
-can still interrupt pending work, so it is not a transactional server outbox.
+## Snapshot storage
 
-The file backend is an actor with synchronous filesystem/JSON work on its own
-executor. It uses atomic replacement and a versioned envelope, reads legacy JSON,
-retains damaged originals before replacing them after a successful refresh, and
-refuses to overwrite unknown future schemas. Missing files are distinguished from
-unreadable/corrupt data. Storage failures surface in the UI, and reconciliation
-clears its recovery marker only after a successful persistence receipt. Explicit
-cache/account deletion also removes retained damaged-cache backups.
+The persistence coordinator reserves revisions before scheduling work. It runs
+one backend operation at a time and combines pending saves for the same account.
+Delete and clear operations prevent older writes from restoring removed data.
+Each save reports success, replacement by a newer save, or failure.
 
-## Validation
+The file backend uses atomic writes and a versioned format. It reads legacy data,
+preserves damaged files for recovery, and refuses to overwrite unknown future
+schemas. Storage errors are visible in the app. Explicit cache/account deletion
+also removes retained damaged-cache copies.
 
-`AccountOperationCoordinatorTests` covers generations, pending markers, account
-isolation, reconciliation leases and recovery read barriers. Delayed AppModel
-fixtures deliberately ignore cancellation; assertions join real worker completion
-rather than merely the cancelled caller. They exercise switch-away-and-back,
-sign-out/removal, late progress/errors, pre-cancelled callers, cached restore races,
-authorization overlap, submitted uncertain actions, checkout cookies and auth
-responses. Positive cases verify valid refresh saves and normal reconciliation
-still work. No live RSI mutation is issued by these tests.
+Accepted writes survive caller cancellation, but abrupt app termination can still
+interrupt queued work. This local queue is not a durable server outbox.
+
+## Feedback and validation
+
+Account or authentication changes dismiss the feedback form. It does not submit
+mail or upload attachments in the background. See [feedback](FEEDBACK.md).
+
+Tests cover late workers, account switches, authentication, checkout callbacks,
+recovery barriers, save order, deletion, migration, and storage failures. They wait
+for actual worker completion and never submit live RSI mutations. See [testing](TESTING.md).

@@ -412,14 +412,17 @@ nonisolated enum RSISessionCookieSet {
     ) -> [SessionCookie] {
         var cookiesByKey: [String: SessionCookie] = [:]
 
-        for cookie in savedCookies + refreshedCookies {
-            let trimmedValue = cookie.value.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedValue.isEmpty,
-                  cookie.expiresAt.map({ $0 > now }) ?? true else {
-                continue
-            }
-
+        for cookie in savedCookies where RSISecurityPolicy.accepts(cookie, now: now) {
             cookiesByKey[key(for: cookie)] = cookie
+        }
+        for cookie in refreshedCookies {
+            guard RSISecurityPolicy.isTrustedCookieDomain(cookie.domain) else { continue }
+            let storageKey = key(for: cookie)
+            if cookie.value.isEmpty || (cookie.expiresAt.map { $0 <= now } ?? false) {
+                cookiesByKey.removeValue(forKey: storageKey)
+            } else if RSISecurityPolicy.accepts(cookie, now: now) {
+                cookiesByKey[storageKey] = cookie
+            }
         }
 
         return cookiesByKey.values.sorted { lhs, rhs in

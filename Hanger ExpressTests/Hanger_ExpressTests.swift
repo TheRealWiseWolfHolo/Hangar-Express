@@ -1074,7 +1074,7 @@ struct Hanger_ExpressTests {
         #expect(presentation.debugDetails?.contains("Can't find variable: arguments") == true)
     }
 
-    @Test func authenticationDebugFormatterShowsRawRSIResponseBodyForUnexpectedResponses() async throws {
+    @Test func authenticationDebugFormatterOmitsRawRSIResponseBodyForUnexpectedResponses() async throws {
         let error = NSError(
             domain: "RSIAuthService",
             code: 200,
@@ -1087,7 +1087,8 @@ struct Hanger_ExpressTests {
         let presentation = AuthenticationDebugFormatter.present(error)
 
         #expect(presentation.message.contains("RSI returned a response the app could not decode yet."))
-        #expect(presentation.message.contains(#""message":"SomethingNew""#))
+        #expect(!presentation.message.contains("SomethingNew"))
+        #expect(presentation.debugDetails?.contains("backend surprise") != true)
     }
 
     @Test func verificationCodesNormalizeToUppercaseAlphanumericCharacters() async throws {
@@ -5952,8 +5953,14 @@ struct Hanger_ExpressTests {
         )
         firstAppModel.session = session
 
+        let requestStartedAt = Date.now
         try await firstAppModel.requestCharacterRepair(reason: "Broken character", issueCouncilURL: nil)
-        #expect(firstAppModel.characterRepairCooldownRemainingSeconds() > 3_590)
+        let requestFinishedAt = Date.now
+        let cooldownEndsAt = userDefaults.double(forKey: "account.characterRepair.cooldownUntil.\(session.id.uuidString.lowercased())")
+        #expect(cooldownEndsAt >= requestStartedAt.addingTimeInterval(3_600).timeIntervalSince1970)
+        #expect(cooldownEndsAt <= requestFinishedAt.addingTimeInterval(3_600).timeIntervalSince1970)
+        let referenceDate = Date(timeIntervalSince1970: cooldownEndsAt - 3_600)
+        #expect(firstAppModel.characterRepairCooldownRemainingSeconds(at: referenceDate) == 3_600)
 
         let secondRepository = FakeHangarRepository()
         let secondAppModel = AppModel(
@@ -5967,6 +5974,7 @@ struct Hanger_ExpressTests {
             )
         )
         secondAppModel.session = session
+        #expect(secondAppModel.characterRepairCooldownRemainingSeconds(at: referenceDate) == 3_600)
 
         do {
             try await secondAppModel.requestCharacterRepair(reason: "Retry", issueCouncilURL: nil)
@@ -5976,10 +5984,11 @@ struct Hanger_ExpressTests {
                 Issue.record("Expected characterRepairCooldownActive, got \(error).")
                 return
             }
-            #expect(remainingSeconds > 3_590)
+            #expect(remainingSeconds > 0 && remainingSeconds <= 3_600)
         }
 
         #expect(await secondRepository.characterRepairRequests().isEmpty)
+        #expect(secondAppModel.characterRepairCooldownRemainingSeconds(at: Date(timeIntervalSince1970: cooldownEndsAt)) == 0)
     }
 
     @Test func characterRepairPersistsServerReportedCooldown() async throws {
@@ -6016,6 +6025,7 @@ struct Hanger_ExpressTests {
         )
         appModel.session = session
 
+        let requestStartedAt = Date.now
         do {
             try await appModel.requestCharacterRepair(reason: "Broken character", issueCouncilURL: nil)
             Issue.record("Expected RSI's Character Repair cooldown to be surfaced.")
@@ -6023,7 +6033,12 @@ struct Hanger_ExpressTests {
             #expect(error == .characterRepairCooldownActive(remainingSeconds: 1_800))
         }
 
-        #expect(appModel.characterRepairCooldownRemainingSeconds() > 1_790)
+        let requestFinishedAt = Date.now
+        let cooldownEndsAt = userDefaults.double(forKey: "account.characterRepair.cooldownUntil.\(session.id.uuidString.lowercased())")
+        #expect(cooldownEndsAt >= requestStartedAt.addingTimeInterval(1_800).timeIntervalSince1970)
+        #expect(cooldownEndsAt <= requestFinishedAt.addingTimeInterval(1_800).timeIntervalSince1970)
+        #expect(appModel.characterRepairCooldownRemainingSeconds(at: Date(timeIntervalSince1970: cooldownEndsAt - 1_800)) == 1_800)
+        #expect(appModel.characterRepairCooldownRemainingSeconds(at: Date(timeIntervalSince1970: cooldownEndsAt)) == 0)
     }
 
     @Test func successfulUpgradeRemovesConsumedUpgradeImmediatelyWithoutVisibleRefreshState() async throws {

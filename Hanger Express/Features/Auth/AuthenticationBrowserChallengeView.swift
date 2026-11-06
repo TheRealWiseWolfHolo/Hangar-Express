@@ -10,6 +10,7 @@ struct AuthenticationBrowserChallengeView: View {
     let diagnostics: AuthenticationDiagnosticsStore
     let authService: any AuthenticationServicing
     let isFinishingAuthentication: Bool
+    let isCurrentFlow: @MainActor @Sendable () -> Bool
     let onCancel: () -> Void
     let onAuthenticationAttempt: (Bool) async -> String?
 
@@ -21,12 +22,14 @@ struct AuthenticationBrowserChallengeView: View {
                 diagnostics: diagnostics,
                 authService: authService,
                 isFinishingAuthentication: isFinishingAuthentication,
+                isCurrentFlow: { isCurrentFlow() },
                 manualFinishRequestID: manualFinishRequestID,
                 onAuthenticationAttempt: onAuthenticationAttempt,
                 onManualFinishResult: { message in
                     manualFinishMessage = message
                 },
             )
+            .id(challenge.id)
             .navigationTitle("RSI Sign In")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -72,6 +75,7 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
     let diagnostics: AuthenticationDiagnosticsStore
     let authService: any AuthenticationServicing
     let isFinishingAuthentication: Bool
+    let isCurrentFlow: @MainActor @Sendable () -> Bool
     let manualFinishRequestID: Int
     let onAuthenticationAttempt: (Bool) async -> String?
     let onManualFinishResult: @MainActor (String?) -> Void
@@ -82,6 +86,7 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
             password: password,
             diagnostics: diagnostics,
             authService: authService,
+            isCurrentFlow: isCurrentFlow,
             onAuthenticationAttempt: onAuthenticationAttempt,
             onManualFinishResult: onManualFinishResult,
         )
@@ -307,8 +312,12 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
         private var password: String
         private let diagnostics: AuthenticationDiagnosticsStore
         private let authService: any AuthenticationServicing
+        private let isCurrentFlow: @MainActor @Sendable () -> Bool
+        private var browserSessionID: UUID?
+        private var sessionContextTask: Task<Void, Never>?
         private var isFinishingAuthentication = false
         private var isAuthenticating = false
+        private var autofillTask: Task<Void, Never>?
         private var lastManualFinishRequestID = 0
         private let onAuthenticationAttempt: (Bool) async -> String?
         private let onManualFinishResult: @MainActor (String?) -> Void
@@ -318,6 +327,7 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
             password: String,
             diagnostics: AuthenticationDiagnosticsStore,
             authService: any AuthenticationServicing,
+            isCurrentFlow: @escaping @MainActor @Sendable () -> Bool,
             onAuthenticationAttempt: @escaping (Bool) async -> String?,
             onManualFinishResult: @escaping @MainActor (String?) -> Void
         ) {
@@ -325,15 +335,29 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
             self.password = password
             self.diagnostics = diagnostics
             self.authService = authService
+            self.isCurrentFlow = isCurrentFlow
             self.onAuthenticationAttempt = onAuthenticationAttempt
             self.onManualFinishResult = onManualFinishResult
         }
 
         func attach(_ webView: WKWebView) {
             self.webView = webView
+            sessionContextTask = Task { @MainActor [weak self, weak webView] in
+                guard let self, let webView else { return }
+                let sessionID = await authService.browserSessionIdentifier()
+                guard self.webView === webView, isCurrentFlow(), !Task.isCancelled else { return }
+                browserSessionID = sessionID
+            }
         }
 
         func detach() {
+            sessionContextTask?.cancel()
+            browserSessionID = nil
+            autofillTask?.cancel()
+            autofillTask = nil
+            loginIdentifier = ""
+            password = ""
+            webView?.stopLoading()
             webView = nil
         }
 
@@ -343,9 +367,14 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
             isFinishingAuthentication: Bool,
             manualFinishRequestID: Int
         ) {
+            guard isCurrentFlow() else { detach(); return }
             self.loginIdentifier = loginIdentifier
             self.password = password
             self.isFinishingAuthentication = isFinishingAuthentication
+            if isFinishingAuthentication {
+                autofillTask?.cancel()
+                self.password = ""
+            }
 
             guard manualFinishRequestID != lastManualFinishRequestID else {
                 return
@@ -367,9 +396,35 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
                 summary: "The in-app RSI browser finished loading a page.",
                 detail: webView.url?.absoluteString
             )
-            Task { @MainActor in
-                await autofillCredentialsIfPossible()
+            autofillTask?.cancel()
+            autofillTask = Task { @MainActor [weak self, weak webView] in
+                for _ in 0..<20 {
+                    guard let self, let webView, self.webView === webView,
+                          !Task.isCancelled, self.isCurrentFlow(), !self.isFinishingAuthentication,
+                          RSISecurityPolicy.isTrustedOrigin(webView.url) else { return }
+                    await self.autofillCredentialsIfPossible()
+                    do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+                }
             }
+        }
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            autofillTask?.cancel()
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            guard action.targetFrame?.isMainFrame != false else { decisionHandler(.allow); return }
+            guard RSISecurityPolicy.isTrustedOrigin(action.request.url) else {
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
+                     decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+            decisionHandler(!response.isForMainFrame || RSISecurityPolicy.isTrustedOrigin(response.response.url) ? .allow : .cancel)
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -405,7 +460,7 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
                 detail: "requestURL=\(requestURL), targetIsMainFrame=\(targetIsMainFrame)"
             )
 
-            if navigationAction.targetFrame == nil {
+            if navigationAction.targetFrame == nil, RSISecurityPolicy.isTrustedOrigin(navigationAction.request.url) {
                 webView.load(navigationAction.request)
                 log(
                     stage: "browser.popup",
@@ -426,188 +481,13 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
 
         @MainActor
         private func autofillCredentialsIfPossible() async {
-            guard let webView else {
-                return
-            }
-
-            let script = """
-            (() => {
-              window.__hangerExpressBrowserLoginCredentials = {
-                loginIdentifier,
-                password
-              };
-
-              if (window.__hangerExpressBrowserLoginHelperInstalled) {
-                return { installed: true, reused: true };
-              }
-
-              window.__hangerExpressBrowserLoginHelperInstalled = true;
-
-              const loginSelectors = [
-                'input[name="email"]',
-                'input[name="username"]',
-                'input[type="email"]',
-                'input[autocomplete="username"]',
-                'input[id*="email" i]',
-                'input[id*="username" i]',
-                'input[placeholder*="email" i]',
-                'input[placeholder*="login" i]'
-              ];
-
-              const passwordSelectors = [
-                'input[type="password"]',
-                'input[autocomplete="current-password"]'
-              ];
-
-              const clickableSelectors = [
-                'button',
-                'a',
-                '[role="button"]',
-                'input[type="submit"]',
-                'input[type="button"]'
-              ];
-
-              const normalize = (value) => (value ?? '')
-                .replace(/\\s+/g, ' ')
-                .trim()
-                .toLowerCase();
-
-              const isVisible = (element) => {
-                if (!element) {
-                  return false;
-                }
-
-                const style = window.getComputedStyle(element);
-                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-                  return false;
-                }
-
-                const rect = element.getBoundingClientRect();
-                return rect.width > 0 && rect.height > 0;
-              };
-
-              const findVisibleElement = (selectors) => {
-                for (const selector of selectors) {
-                  const element = document.querySelector(selector);
-                  if (isVisible(element)) {
-                    return element;
-                  }
-                }
-
-                return null;
-              };
-
-              const setValue = (element, value) => {
-                if (!element || value == null) {
-                  return false;
-                }
-
-                const prototype = element.tagName === 'TEXTAREA'
-                  ? HTMLTextAreaElement.prototype
-                  : HTMLInputElement.prototype;
-                const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
-
-                if (element.value === value) {
-                  return true;
-                }
-
-                if (setter) {
-                  setter.call(element, value);
-                } else {
-                  element.value = value;
-                }
-
-                element.dispatchEvent(new Event('input', { bubbles: true }));
-                element.dispatchEvent(new Event('change', { bubbles: true }));
-                return true;
-              };
-
-              const fillCredentials = () => {
-                const credentials = window.__hangerExpressBrowserLoginCredentials ?? {};
-                const loginInput = findVisibleElement(loginSelectors);
-                const passwordInput = findVisibleElement(passwordSelectors);
-
-                let filled = false;
-
-                if (loginInput && credentials.loginIdentifier) {
-                  filled = setValue(loginInput, credentials.loginIdentifier) || filled;
-                }
-
-                if (passwordInput && credentials.password) {
-                  filled = setValue(passwordInput, credentials.password) || filled;
-                }
-
-                return {
-                  foundLoginInput: Boolean(loginInput),
-                  foundPasswordInput: Boolean(passwordInput),
-                  filled
-                };
-              };
-
-              const clickSignInEntry = () => {
-                const candidates = Array.from(document.querySelectorAll(clickableSelectors.join(',')));
-                const labels = ['sign in', 'signin', 'log in', 'login'];
-
-                const match = candidates.find((candidate) => {
-                  if (!isVisible(candidate)) {
-                    return false;
-                  }
-
-                  const values = [
-                    candidate.textContent,
-                    candidate.getAttribute('aria-label'),
-                    candidate.getAttribute('title'),
-                    candidate.value
-                  ].map(normalize);
-
-                  return labels.some((label) => values.some((value) => value.includes(label)));
-                });
-
-                if (!match) {
-                  return false;
-                }
-
-                match.click();
-                return true;
-              };
-
-              const tick = () => {
-                const state = fillCredentials();
-                if (state.foundLoginInput || state.foundPasswordInput) {
-                  return state;
-                }
-
-                clickSignInEntry();
-                return fillCredentials();
-              };
-
-              let attempts = 0;
-              const interval = window.setInterval(() => {
-                attempts += 1;
-                const state = tick();
-                if ((state.foundLoginInput && state.foundPasswordInput) || attempts >= 20) {
-                  window.clearInterval(interval);
-                }
-              }, 500);
-
-              tick();
-
-              return { installed: true, reused: false };
-            })();
-            """
+            guard let webView, isCurrentFlow(), !Task.isCancelled, !isFinishingAuthentication,
+                  RSISecurityPolicy.isTrustedOrigin(webView.url) else { return }
 
             do {
-                let result = try await webView.callAsyncJavaScript(
-                    script,
-                    arguments: [
-                        "loginIdentifier": loginIdentifier,
-                        "password": password
-                    ],
-                    in: nil,
-                    contentWorld: .page
-                )
+                let result = try await RSILoginAutofill.fill(in: webView, loginIdentifier: loginIdentifier, password: password)
 
-                if let payload = result as? [String: Any] {
+                if let payload = result {
                     let foundLoginInput = (payload["foundLoginInput"] as? Bool) == true
                     let foundPasswordInput = (payload["foundPasswordInput"] as? Bool) == true
                     let filled = (payload["filled"] as? Bool) == true
@@ -638,7 +518,7 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
         private func tryCompleteAuthenticationIfPossible(reportsManualResult: Bool = false) async {
             guard !isFinishingAuthentication,
                   !isAuthenticating,
-                  let webView else {
+                  let webView, isCurrentFlow(), !Task.isCancelled, RSISecurityPolicy.isTrustedOrigin(webView.url) else {
                 if reportsManualResult {
                     onManualFinishResult("Hangar Express could not access the browser session. Reopen the browser login and try again.")
                 }
@@ -700,7 +580,11 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
                 summary: "Exported RSI cookies from the in-app browser and sent them to the auth service for validation.",
                 detail: "exportedCookieCount=\(cookies.count), authCookies=\(authCookieNames.joined(separator: ",")), cookieNames=\(cookieNamesList(from: cookies)), \(pageSnapshot)"
             )
-            await authService.rememberBrowserExportedCookies(cookies)
+            await sessionContextTask?.value
+            guard self.webView === webView, isCurrentFlow(), !Task.isCancelled,
+                  RSISecurityPolicy.isTrustedOrigin(webView.url) else { return }
+            await authService.rememberBrowserExportedCookies(cookies, sessionIdentifier: browserSessionID)
+            guard self.webView === webView, isCurrentFlow(), !Task.isCancelled else { return }
             isAuthenticating = true
             let failureMessage = await onAuthenticationAttempt(true)
             if reportsManualResult {
@@ -753,7 +637,7 @@ private struct BrowserChallengeWebView: UIViewRepresentable {
             }
 
             return combined.values
-                .filter { $0.domain.contains("robertsspaceindustries.com") }
+                .filter { RSISecurityPolicy.accepts(SessionCookie($0)) }
                 .map(SessionCookie.init)
                 .sorted { lhs, rhs in
                     if lhs.domain == rhs.domain {
